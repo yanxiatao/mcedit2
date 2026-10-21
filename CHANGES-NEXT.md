@@ -511,3 +511,19 @@ available and is not automatically replaced.
 - Added source regression specifications for original Anvil and
   MCRegion data fidelity, rotated rectangle layouts, batch Undo,
   modded/BE failure cases and backup/reopen. Full tests deferred.
+
+## 0.3.0a47 — Native nearest-neighbour Clone Tool scaling
+
+- Added independent **integer XYZ scale factors 1–8** and optional
+  1–128 repeated scaled stamps, preserving source and each original
+  native BlockState without any modded state normalization.
+- Read-only geometry planner supplies scaled dimensions, first/all
+  target bounds and full planned-write count; blocks invalid,
+  over-limit and out-of-world plans before any file read.
+- Source/target BE protection and original native section/ID
+  checks prevent partial staging. Overlapping copies use one
+  original snapshot and deduplicated single-operation Undo/Redo.
+- Added Qt6 menu scaling dialog and reactive bounds preview
+  plus persistent tool-dock X/Y/Z scale controls. Tests specify
+  original Anvil/MCRegion NBT fidelity and refusal cases.
+  Full CI/real Minecraft versions/Windows builds are deferred.

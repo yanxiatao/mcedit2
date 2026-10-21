@@ -594,6 +594,50 @@ class EditSession:
         # and keeps one before/after entry for every unique target point.
         return self._commit(list(destinations.items()))
 
+    def clone_box_scaled(self, box: Box, offset: Position,
+                         scale: tuple[int, int, int],
+                         repetitions: int = 1) -> int:
+        """Nearest-neighbour integer-scale clone from one original snapshot.
+
+        This is a conservative block-only operation: no BE/entity payloads
+        are scaled, relocated, invented or regenerated. Original native
+        block states are replicated *unchanged*, so even opaque modded
+        states may be copied as long as the native destination accepts
+        them. No orientation or registry semantics are inferred.
+
+        All source/destination BE positions and every writable native
+        target are preflighted before any mutation; Undo is one grouped
+        operation with each destination recorded exactly once.
+        """
+        from .clone_scaling import plan_scaled_clone
+        plan = plan_scaled_clone(
+            box, offset, scale, repetitions, self.max_blocks)
+        source = tuple(box.points())
+        self._ensure_block_only(source)
+        originals = tuple(self.world.get_block(*point) for point in source)
+        sx, sy, sz = plan.scale
+        dx, dy, dz = plan.step
+        targets: dict[Position, Any] = {}
+        # Every stamp uses the SAME pre-mutation original snapshot.
+        for stamp in range(1, plan.repetitions + 1):
+            base_x = box.minimum[0] + stamp * dx
+            base_y = box.minimum[1] + stamp * dy
+            base_z = box.minimum[2] + stamp * dz
+            for (x, y, z), native in zip(source, originals):
+                tx = base_x + (x - box.minimum[0]) * sx
+                ty = base_y + (y - box.minimum[1]) * sy
+                tz = base_z + (z - box.minimum[2]) * sz
+                for ax in range(sx):
+                    for ay in range(sy):
+                        for az in range(sz):
+                            # Later stamps win on overlap. Duplicate target
+                            # coordinates cannot corrupt the Undo baseline.
+                            targets[(tx + ax, ty + ay, tz + az)] = native
+        self._ensure_block_only(targets)
+        # _commit validates every changed native target before staging
+        # and stores a single before/after pair for each unique coordinate.
+        return self._commit(list(targets.items()))
+
     def move_box(self, box: Box, offset: Position, air: Any) -> int:
         """Shift a selection without converting its block states or metadata.
 

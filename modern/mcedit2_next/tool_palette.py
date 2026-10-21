@@ -30,6 +30,7 @@ class ToolPaletteDock(QDockWidget):
         ("Clone selected volume…", "clone_selection"),
         ("Repeat clone / tile selection…", "repeat_clone_selection"),
         ("Clone selected volume rotated / mirrored…", "clone_selection_transformed"),
+        ("Clone selected volume with XYZ scaling…", "clone_selection_scaled"),
         ("Move selected volume…", "move_selection"),
         ("Rotate selection clockwise 90°", "rotate_clockwise"),
         ("Mirror selection East / West", "mirror_x"),
@@ -165,6 +166,14 @@ class ToolPaletteDock(QDockWidget):
         ):
             self.clone_orientation.addItem(label, operation)
         clone_form.addRow("Copy orientation", self.clone_orientation)
+        self.scale_factors = {}
+        for axis in ("x", "y", "z"):
+            field = QSpinBox(clone_group)
+            field.setObjectName("tool_palette_clone_scale_" + axis)
+            field.setRange(1, 8)
+            field.setValue(1)
+            clone_form.addRow("Scale " + axis.upper(), field)
+            self.scale_factors[axis] = field
         repeat_info = QLabel(
             "Choose Repeat clone / tile selection, then enter the XYZ "
             "step. Copies use original block states, not cascading results. "
@@ -379,6 +388,11 @@ class ToolPaletteDock(QDockWidget):
             elif action == "clone_selection_transformed":
                 self.editor.clone_selection_transformed(
                     self.clone_orientation.currentData(), self.repeat_count.value())
+            elif action == "clone_selection_scaled":
+                factors = tuple(self.scale_factors[axis].value()
+                                for axis in ("x", "y", "z"))
+                self.editor.clone_selection_scaled(
+                    factors, self.repeat_count.value())
             elif action == "rotate_clockwise":
                 self.editor.transform_selection("clockwise")
             elif action in ("mirror_x", "mirror_z"):

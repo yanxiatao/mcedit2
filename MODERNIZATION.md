@@ -1610,3 +1610,68 @@ schema support, automatic BE/entity/ownership graph-aware copying,
 large streaming clones and the complete original MCEdit2 Clone Tool
 UI parity. No full live-Minecraft/Qt/Mesa CI matrix or Windows build
 has been executed in this migration-first round.
+
+## 0.3.0a47 — Native Clone Tool integer XYZ scaling and geometry preview
+
+Ported an additional original MCEdit2 Clone Tool workflow to Python 3/Qt6:
+**independent integer nearest-neighbour scaling** of an original native
+block-only selection, optionally repeated as a row of XYZ-offset stamps.
+The scale factors are 1–8 on each X/Y/Z axis. Downscaling, fractional
+interpolation, scaling modded Block Entity contents and arbitrary-angle
+geometry deformation remain explicitly unsupported.
+
+- New `clone_scaling.py` defines a *pure read-only*
+  `plan_scaled_clone` with output dimensions, first-copy and
+  all-copy original-coordinate bounds and the **planned, not merely
+  unique, block-write count**. The planner rejects non-integer/
+  Boolean/zero/over-8 axis factors, repeat counts outside 1–128,
+  zero or non-integer XYZ steps, over-limit operations and
+  coordinates beyond native Java X/Z bounds **before opening any
+  original region or reading world blocks**.
+- `EditSession.clone_box_scaled` takes a **single immutable
+  original selection snapshot** and expands each original native
+  `BlockState` by nearest neighbour across the independent
+  X/Y/Z scale factors. The unchanged block-state payload is copied
+  even for opaque modded IDs/state properties; no guessed modded
+  rotation, item registry lookup, palette normalization or NBT
+  conversion is performed. Each repeated stamp starts at
+  `selection.minimum + repeat × XYZ_step`. The source remains in
+  place; later stamps win when expanded footprints overlap.
+  Destination coordinates are deduplicated before the grouped
+  native Undo/Redo transaction, preserving one original-before
+  record for each changed block even on source/destination overlap.
+- The operation remains **block-only**. Every source and potential
+  target Block Entity position is checked before any mutation;
+  the existing native backend preflights all actual changed target
+  blocks for original writable sections, supported ID encoding
+  and protected BE coordinates. Missing destination sections
+  are not generated. Entity NBT, other original Block Entities,
+  world heightmaps/lighting and chunk metadata are never scaled.
+- Qt6 Edit menu adds **Clone selection with XYZ scaling…**. The
+  new dialog accepts independent factors and copy count, renders a
+  live geometry-only bounds/write-budget preview, and disables OK
+  for invalid/over-limit plans. This is explicitly *not* a 3D
+  ghost preview or a guarantee that all target sections/BEs are
+  writable; actual edits still perform the full original native
+  preflight. The dockable Tool Palette also stores independent
+  X/Y/Z scale factors and uses its existing repeat-count spinner.
+  Menu actions isolate QAction's `triggered(bool)` signal from
+  optional operation arguments.
+- `tests/test_clone_scaling.py` adds **source-only regression
+  specifications** for exact output envelopes, negative offset
+  geometry, independent scaling axes including vertical Y,
+  original-snapshot noncascading overlap, grouped Undo/Redo,
+  malformed/large-factor or repeat rejection, deliberate planned
+  work limits even with heavily overlapping destinations,
+  source/target BE and late native-section refusal without
+  partial mutation, unchanged modded Anvil block state and
+  original BE/other-tag bytes, and old MCRegion numeric ID/data
+  and lighting/entity/unknown-tag bytes through native backups,
+  save/reopen and post-save Undo.
+
+**Remaining:** fractional or shrinking resampling, visual 3D ghost
+clone, dynamic drag/rotate/scale handles, registry-correct modded
+block orientation/BE identity graphs, full original Clone Tool
+interactions and all real-world version test fixtures. No full CI,
+Minecraft reload, Qt/Mesa execution or Windows package build has
+been run for this migration-first round.

@@ -303,6 +303,8 @@ class MainWindow(QMainWindow):
                         lambda: self.repeat_clone_selection())
         self.add_action(edit_menu, "Clone rotated / mirrored selection…", "",
                         lambda: self.clone_selection_transformed())
+        self.add_action(edit_menu, "Clone selection with XYZ scaling…", "",
+                        lambda: self.clone_selection_scaled())
         self.add_action(edit_menu, "Move selection by offset…", "", self.move_selection)
         self.add_action(edit_menu, "Rotate selection clockwise 90°", "",
                         lambda: self.transform_selection("clockwise"))
@@ -1803,6 +1805,84 @@ class MainWindow(QMainWindow):
                 return
         self._perform(lambda: self.session.clone_box_transformed(
             self._box(), offset, operation, repetitions))
+
+    def clone_selection_scaled(self, scale=None, repetitions=None):
+        """Bounded original-state scaled clone, including geometry preview.
+
+        The dialog previews destination coordinates and operation size only;
+        no world, BE or NBT file is touched until the user confirms.
+        """
+        if self.session is None or self.view.selection is None:
+            QMessageBox.information(
+                self, "Scaled clone", "Select an original 3D region first.")
+            return
+        offset = self._selection_offset("Clone selection with XYZ scaling…")
+        if offset is None:
+            return
+        from .clone_scaling import plan_scaled_clone
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Native Clone Tool — nearest-neighbour scaling")
+        form = QFormLayout(dialog)
+        controls = []
+        defaults = scale if isinstance(scale, (tuple, list)) and len(scale) == 3 else (1, 1, 1)
+        for index, axis in enumerate(("Scale X", "Scale Y", "Scale Z")):
+            field = QSpinBox(dialog)
+            field.setRange(1, 8)
+            field.setValue(defaults[index])
+            field.setObjectName("clone_scale_" + axis[-1].lower())
+            form.addRow(axis, field)
+            controls.append(field)
+        copies = QSpinBox(dialog)
+        copies.setRange(1, 128)
+        copies.setValue(1 if repetitions is None else repetitions)
+        copies.setObjectName("clone_scale_copies")
+        form.addRow("Copies", copies)
+        preview = QLabel(dialog)
+        preview.setObjectName("clone_scale_geometry_preview")
+        preview.setWordWrap(True)
+        form.addRow("Geometry preview", preview)
+        note = QLabel(
+            "Copies contain only original native block states. Source and "
+            "target Block Entities are protected; entity NBT is never scaled. "
+            "This geometry preview does not validate target sections or BE "
+            "positions: the actual edit performs a full native preflight.")
+        note.setWordWrap(True)
+        form.addRow(note)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel, parent=dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        approved = buttons.button(QDialogButtonBox.StandardButton.Ok)
+
+        def refresh_plan(_value=None):
+            try:
+                candidate = plan_scaled_clone(
+                    self._box(), offset,
+                    tuple(control.value() for control in controls),
+                    copies.value(), self.session.max_blocks)
+                preview.setText(
+                    f"Each copy: {candidate.output_size[0]} × "
+                    f"{candidate.output_size[1]} × {candidate.output_size[2]} "
+                    f"blocks. Planned cells: {candidate.planned_cells:,}. "
+                    f"First copy: {candidate.first_min} → "
+                    f"{candidate.first_max}. "
+                    f"All copies: {candidate.all_min} → "
+                    f"{candidate.all_max}. Overlap may reduce unique writes.")
+                approved.setEnabled(True)
+            except (ValueError, OverflowError) as exc:
+                preview.setText(f"Invalid / over-limit copy: {exc}")
+                approved.setEnabled(False)
+
+        for control in (*controls, copies):
+            control.valueChanged.connect(refresh_plan)
+        refresh_plan()
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        factors = tuple(control.value() for control in controls)
+        self._perform(lambda: self.session.clone_box_scaled(
+            self._box(), offset, factors, copies.value()))
 
     def move_selection(self):
         offset = self._selection_offset("Move selection by offset…")
