@@ -600,3 +600,17 @@ available and is not automatically replaced.
   creates a normal one-step Undo/Redo edit.
 - Added pure projection/texture-geometry and offscreen Qt
   source regressions, without running the full test matrix.
+
+## 0.3.0a52 — 180° / 270° oriented native clone and selection tools
+
+- Added 180° and clockwise 270° choices to rotated/mirrored
+  Clone Tool, dock orientation control and selection transformation
+  menu. Existing bounded 3D wireframe and translucent BlockState
+  ghost previews use the new mappings without writing world data.
+- Expanded strict native horizontal BlockState rotation for vanilla
+  stairs, rails, signs, cardinal connections, logs and verified old
+  numeric metadata; unknown/modded semantics still fail closed.
+- Added source regression specifications for right-angle geometry,
+  original region NBT retention, 3D ghost fidelity, protected BE
+  failure and original Anvil/MCRegion saved backups and Undo/Redo.
+  Full CI, game-world and Windows execution remain deferred.

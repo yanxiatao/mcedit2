@@ -1950,3 +1950,49 @@ intersecting translucent surfaces; linked/owned BE and entity
 ghosts; full Windows and Minecraft-version integration tests.
 The new tests were **committed as source only**, not executed
 against the full Qt/Mesa/real-world CI matrix.
+
+## 0.3.0a52 — Complete right-angle Clone Tool horizontal rotation
+
+Added distinct original-format **180°** and **clockwise 270°**
+rotation choices to the existing Clone Tool and ordinary selection
+rotation UI. Prior clockwise/counterclockwise 90° and X/Z mirror
+behavior stays intact. Both new angles share the existing 3D Clone
+Tool read-only target wireframe and bounded BlockState material ghost
+logic; they are not new file formats or new rotation engines.
+
+- `transforms.py` now explicitly maps `half_turn` and
+  `clockwise_270` for original block-direction properties, corner
+  rails and ascending rails, vanilla 16-step standing sign rotation,
+  X/Z horizontal axis, side-connection properties, and strict native
+  legacy stairs/torches/log metadata. Half turns preserve X/Z box
+  dimensions and swap both opposite corners; clockwise 270° exchanges
+  X/Z extents and agrees with counterclockwise 90°.
+- Existing `EditSession.clone_box_transformed` and
+  `transform_selection` reuse the strict new mappings, fully
+  preparing all transformed coordinates and BlockStates before any
+  edit and preflighting protected Block Entities and native target
+  sections. Unsupported modded/unknown original orientation data
+  fails closed for the whole operation. Original source data is
+  preserved for offset clones; repeated clones use the same
+  immutable original snapshot and one undo group. In-place
+  selection transforms retain undo history as before.
+- Qt6 Edit menu, oriented Clone Tool dialog and Tool Palette
+  orientation dropdown expose both new angles. Original
+  selection 180° and 270° actions also appear in the menu/palette.
+  `plan_clone_ghost` and `project_clone_ghost` automatically use
+  the new transform geometry for existing drag/snap previews and
+  2048-cell bounded preview rules.
+- `tests/test_clone_half_turn.py` adds source-only regressions for
+  rectangular geometry, 180° roundtrip, clockwise 270° equivalence,
+  stairs, rails, 16-step rotation, redstone side connections, log
+  axes, strict legacy numeric metadata, unknown modded refusal,
+  offset/in-place copy and Undo/Redo, source/target BE rejection,
+  3D ghost coordinate agreement, and original Anvil/MCRegion
+  unaffected block entity/entity/light/unknown NBT/region backup.
+
+**Remaining:** non-right-angle arbitrary rotations, registration
+of per-mod state transforms, entity and Block Entity graph-aware
+rotation, model-exact translucent previews, downscaling and full
+original Clone Tool UI interaction parity. Full CI, Qt/Mesa/Windows
+packaging and live Minecraft-version testing were intentionally
+deferred; newly written regression source is not asserted to pass.

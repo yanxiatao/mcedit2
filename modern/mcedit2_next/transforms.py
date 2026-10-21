@@ -16,6 +16,10 @@ MOVES = {
                   "south": "west", "west": "north"},
     "counterclockwise": {"north": "west", "west": "south",
                          "south": "east", "east": "north"},
+    "half_turn": {"north": "south", "south": "north",
+                  "east": "west", "west": "east"},
+    "clockwise_270": {"north": "west", "west": "south",
+                      "south": "east", "east": "north"},
     "mirror_x": {"east": "west", "west": "east",
                  "north": "north", "south": "south"},
     "mirror_z": {"north": "south", "south": "north",
@@ -159,7 +163,7 @@ def _modern(state: BlockState, op: str) -> BlockState:
             if value not in ("x", "y", "z"):
                 raise UnsafeFormat("Unknown axis value")
             result[key] = (("z" if value == "x" else "x") if
-                           op in ("clockwise", "counterclockwise")
+                           op in ("clockwise", "counterclockwise", "clockwise_270")
                            and value != "y" else value)
         elif key == "rotation":
             if not value.isdecimal() or int(value) not in range(16):
@@ -168,6 +172,8 @@ def _modern(state: BlockState, op: str) -> BlockState:
             transformed = {
                 "clockwise": (angle + 4) % 16,
                 "counterclockwise": (angle - 4) % 16,
+                "half_turn": (angle + 8) % 16,
+                "clockwise_270": (angle + 12) % 16,
                 "mirror_x": (-angle) % 16,
                 "mirror_z": (8 - angle) % 16,
             }[op]
@@ -221,7 +227,8 @@ def _legacy(state: BlockState, op: str) -> BlockState:
         axis = data & 12
         if axis not in (0, 4, 8, 12):
             raise UnsafeFormat("Invalid legacy log axis data")
-        if axis in (4, 8) and op in ("clockwise", "counterclockwise"):
+        if axis in (4, 8) and op in ("clockwise", "counterclockwise",
+                                  "clockwise_270"):
             axis = 8 if axis == 4 else 4
         return native_state(ident, (data & 3) | axis)
     raise UnsafeFormat(
@@ -245,8 +252,10 @@ def transform_position(point: tuple[int, int, int],
     sx, sy, sz = size
     if op == "clockwise":
         return sz - 1 - z, y, x
-    if op == "counterclockwise":
+    if op in ("counterclockwise", "clockwise_270"):
         return z, y, sx - 1 - x
+    if op == "half_turn":
+        return sx - 1 - x, y, sz - 1 - z
     if op == "mirror_x":
         return sx - 1 - x, y, z
     return x, y, sz - 1 - z
@@ -256,4 +265,4 @@ def transformed_size(size: tuple[int, int, int], op: str):
     if op not in MOVES:
         raise ValueError(f"Unknown horizontal transform {op}")
     return (size[2], size[1], size[0]) if op in (
-        "clockwise", "counterclockwise") else size
+        "clockwise", "counterclockwise", "clockwise_270") else size

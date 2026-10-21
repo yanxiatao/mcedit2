@@ -314,6 +314,10 @@ class MainWindow(QMainWindow):
                         lambda: self.transform_selection("clockwise"))
         self.add_action(edit_menu, "Rotate selection counterclockwise 90°", "",
                         lambda: self.transform_selection("counterclockwise"))
+        self.add_action(edit_menu, "Rotate selection 180°", "",
+                        lambda: self.transform_selection("half_turn"))
+        self.add_action(edit_menu, "Rotate selection clockwise 270°", "",
+                        lambda: self.transform_selection("clockwise_270"))
         self.add_action(edit_menu, "Mirror selection East/West (X)", "",
                         lambda: self.transform_selection("mirror_x"))
         self.add_action(edit_menu, "Mirror selection North/South (Z)", "",
@@ -2001,6 +2005,8 @@ class MainWindow(QMainWindow):
             return
         choices = [
             ("Rotate clockwise 90°", "clockwise"),
+            ("Rotate 180°", "half_turn"),
+            ("Rotate clockwise 270°", "clockwise_270"),
             ("Rotate counterclockwise 90°", "counterclockwise"),
             ("Mirror East / West", "mirror_x"),
             ("Mirror North / South", "mirror_z"),

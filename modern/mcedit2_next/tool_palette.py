@@ -33,6 +33,8 @@ class ToolPaletteDock(QDockWidget):
         ("Clone selected volume with XYZ scaling…", "clone_selection_scaled"),
         ("Move selected volume…", "move_selection"),
         ("Rotate selection clockwise 90°", "rotate_clockwise"),
+        ("Rotate selection 180°", "rotate_half_turn"),
+        ("Rotate selection clockwise 270°", "rotate_clockwise_270"),
         ("Mirror selection East / West", "mirror_x"),
         ("Mirror selection North / South", "mirror_z"),
         ("Replace native blocks", "filtered_replace_dialog"),
@@ -160,6 +162,8 @@ class ToolPaletteDock(QDockWidget):
         self.clone_orientation.setObjectName("tool_palette_clone_orientation")
         for label, operation in (
             ("Rotate clockwise 90°", "clockwise"),
+            ("Rotate 180°", "half_turn"),
+            ("Rotate clockwise 270°", "clockwise_270"),
             ("Rotate counterclockwise 90°", "counterclockwise"),
             ("Mirror East / West", "mirror_x"),
             ("Mirror North / South", "mirror_z"),
@@ -520,6 +524,10 @@ class ToolPaletteDock(QDockWidget):
                     factors, self.repeat_count.value())
             elif action == "rotate_clockwise":
                 self.editor.transform_selection("clockwise")
+            elif action == "rotate_half_turn":
+                self.editor.transform_selection("half_turn")
+            elif action == "rotate_clockwise_270":
+                self.editor.transform_selection("clockwise_270")
             elif action in ("mirror_x", "mirror_z"):
                 self.editor.transform_selection(action)
             else:
