@@ -82,6 +82,36 @@ def plan_scaled_clone(box, step, scale, repetitions: int,
 
 
 @dataclass(frozen=True)
+class _RotatedFootprint:
+    """Geometry-only proxy retaining the original box minimum and cell count."""
+    minimum: tuple[int, int, int]
+    size: tuple[int, int, int]
+    volume: int
+
+
+def plan_oriented_scaled_clone(box, step, orientation: str, scale,
+                               repetitions: int, max_blocks: int, *,
+                               placement=(0, 0, 0)) -> ScaledClonePlan:
+    """Strict right-angle orientation BEFORE nearest-neighbour XYZ scaling.
+
+    Scaling factors apply in rotated output-space axes. The plan is
+    computed before any native world reads and shares every limit used
+    by ordinary integer scaling, including negative coordinates and
+    rigid-group placement. No BEs, entities or NBT fields are mapped.
+    """
+    from .transforms import MOVES, transformed_size
+    if orientation not in MOVES:
+        raise ValueError("Invalid original-state clone orientation")
+    output_axes = transformed_size(box.size, orientation)
+    rotated = _RotatedFootprint(tuple(box.minimum), output_axes, box.volume)
+    return plan_scaled_clone(
+        rotated, step, scale, repetitions, max_blocks,
+        placement=placement)
+
+
+
+
+@dataclass(frozen=True)
 class ReducedClonePlan:
     """Nearest-neighbour downscale: sample each source group at its low corner."""
     step: tuple[int, int, int]

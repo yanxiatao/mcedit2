@@ -646,6 +646,56 @@ class EditSession:
         # and stores a single before/after pair for each unique coordinate.
         return self._commit(list(targets.items()))
 
+    def clone_box_oriented_scaled(self, box: Box, offset: Position,
+                                  operation: str, scale: tuple[int, int, int],
+                                  repetitions: int = 1, *,
+                                  placement: Position = (0, 0, 0)) -> int:
+        """Right-angle rotate/mirror FIRST, then scale native block states.
+
+        Each source cell is decoded and transformed once before stamping.
+        The scale axes refer to the rotated footprint, not original axes.
+        The source remains unchanged except for intentional overlap by
+        destinations. No BE or entity payload is copied/transformed.
+        """
+        from .clone_scaling import plan_oriented_scaled_clone
+        from .transforms import transform_position, transform_state
+        plan = plan_oriented_scaled_clone(
+            box, offset, operation, scale, repetitions, self.max_blocks,
+            placement=placement)
+        original_points = tuple(box.points())
+        self._ensure_block_only(original_points)
+        legacy = bool(getattr(self.world, "legacy", False))
+        samples = []
+        for point in original_points:
+            rel = tuple(point[i] - box.minimum[i] for i in range(3))
+            rotated = transform_position(rel, box.size, operation)
+            state = transform_state(
+                self.world.get_block(*point), operation, legacy=legacy)
+            samples.append((rotated, state))
+        sx, sy, sz = plan.scale
+        dx, dy, dz = plan.step
+        px, py, pz = plan.placement
+        targets: dict[Position, Any] = {}
+        for stamp in range(1, plan.repetitions + 1):
+            origin = (
+                box.minimum[0] + px + stamp * dx,
+                box.minimum[1] + py + stamp * dy,
+                box.minimum[2] + pz + stamp * dz,
+            )
+            for (rx, ry, rz), state in samples:
+                x, y, z = (
+                    origin[0] + rx * sx,
+                    origin[1] + ry * sy,
+                    origin[2] + rz * sz,
+                )
+                for ix in range(sx):
+                    for iy in range(sy):
+                        for iz in range(sz):
+                            # Last stamp wins; one unique undo baseline.
+                            targets[(x + ix, y + iy, z + iz)] = state
+        self._ensure_block_only(targets)
+        return self._commit(list(targets.items()))
+
     def clone_box_reduced(self, box: Box, offset: Position,
                           divisors: tuple[int, int, int],
                           repetitions: int = 1, *,

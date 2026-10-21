@@ -10,7 +10,7 @@ still exist. This is an engineering checklist rather than a release promise.
 | Desktop editor and menus | Qt6 MainWindow, tool palette, World Info / Players / Chunk / Maps docks, history, minimap, queued imports and searchable Block Picker | Guarded world/player scalar and existing ItemStack edits; native Java filled-map pixel canvas and limited map metadata fields with independent gzip backup/restore; still lacks arbitrary item creation, modded slot editors, accurate modern map colors and original widget parity |
 | 2D and 3D map views | 2D slice; OpenGL 3.3 Section streaming; Java blockstate variant/multipart JSON elements and rotated noncubic meshes while retaining greedy opaque cubes | Per-face translucent sorting, biome-aware fluid tint, animated texture playback, complex mod renderers, entity models, lighting and LOD (level-aware water/lava meshes are approximate) |
 | Camera, picking and selection | Orbit, zoom, 3D ray selection, coordinate jump | Full MCEdit2 camera/navigation/selection widgets |
-| Clone/move, copy, fill, replace, paint and undo | Native offset/repeat/rotate/mirror/scale clone, including 180° and clockwise 270° horizontal rotation, independent rigid-group 3D drag and stride, absolute grid snap, wireframe plus bounded translucent source BlockState full-cube material/color previews in both GL renderers (2048 planned cells); BE/section preflight, single-step Undo/Redo and original region backups | Full multi-element/multipart/fluid translucent preview parity, large streamed material ghost, fractional/downscaling, non-right-angle rotation, modded transform registries, linked BE/entity operations and persistent/branching history |
+| Clone/move, copy, fill, replace, paint and undo | Native offset/repeat/rotate/mirror/scale, including **rotate-then-scale** (1–8x XYZ after 90°/180°/270°/mirror), integer reduction, rigid-group 3D drag, grid snap, bounded translucent original BlockState ghost and target wireframes; BE/section preflight, single-step Undo/Redo and original region backups | Multi-element/custom/fluid model preview parity, fractional rotation/scaling, modded transforms, linked BE/entity movements and persistent/branching history |
 | Java 1.13+ Anvil | Native paletted Sections and guarded region rewrites | Newer codecs, full chunk heightmap/light/biome maintenance and real-world version matrix |
 | Java 1.2–1.12 Anvil (.mca) | Native numeric IDs and metadata in original 16³ Sections | Mod-specific block geometry, lighting/heightmap updates, real-world game fixtures |
 | Java Beta 1.3–1.1 MCRegion (.mcr) | Native XZY 128-height chunks, ID/metadata editing, backup and reopening | Old-style lighting/heightmap recalculation, real-world game fixtures | 
@@ -2040,3 +2040,56 @@ transparent ghost for all Minecraft blocks, or live-world compatibility
 guarantee. The regression tests are committed as source but the full
 version-matrix/Qt/Mesa/Windows builds and game-world checks remain
 deferred while migration work continues.
+
+## 0.3.0a54 — Combined orientation and integer XYZ scaling
+
+Completed the missing combined original-format Clone Tool operation:
+**rotate/mirror first, then enlarge the rotated output by independent
+integer X/Y/Z scale factors 1–8**, with 1–128 repeated copies and
+independent rigid-group placement.
+
+- `plan_oriented_scaled_clone` uses the original strict horizontal
+  right-angle/mirror geometry, with 90° and 270° swapping the X/Z
+  footprint *before* scale is applied to destination-world axes.
+  The existing bounds, original-region coordinate, planned-cell,
+  destination-size and copy-count restrictions all apply before
+  reading any original block state.
+- `EditSession.clone_box_oriented_scaled` snapshots the entire
+  original selection and applies the verified original-version
+  `transform_state` mapping before nearest-neighbour replication.
+  Unknown modded orientation schemas or old legacy ID mappings fail
+  closed. Every source/target Block Entity location and changed
+  native section/ID is checked before writing anything. The operation
+  copies block states only: **no Block Entity, entity, UUID, link,
+  inventory or modified/unknown NBT record is reconstructed**.
+- Copies with overlapping target coordinates use last-stamp-wins
+  semantics from a frozen source snapshot. Each unique changed
+  coordinate is written once and appears once in a grouped
+  Undo/Redo record, including after native original-region save.
+- Qt6 adds **Clone rotated and scaled selection…** with orientation,
+  independent destination XYZ expansion, repeats and a read-only
+  geometry/budget preview. The dockable Clone Tool now supports
+  **Rotate then scale XYZ** as a placement mode using its existing
+  3D drag, world-grid snap, copy stride, rigid-group placement,
+  bounded wireframe volumes and optional 2,048-cell translucent
+  original BlockState preview. Material ghost projection performs
+  the same orientation-then-scaling arithmetic as Save/Apply.
+- Source regression specifications in
+  `tests/test_clone_oriented_scaled.py` cover rectangular source
+  geometry and axis order, source overlap and stable Undo/Redo,
+  invalid factors/count/coordinates and refusal of unsupported
+  modded orientation, BE safety and late native destination
+  preflight, preview vs actual source-state projections, and
+  original modern Anvil/legacy MCRegion region preservation
+  including unrelated opaque Block Entity records.
+- Concurrently introduced duplicate Python definitions were
+  consolidated to one canonical planner, one core operation, one
+  Qt6 dialog and one Apply dispatch for `oriented_scaled`.
+  No new PR or branch is created.
+
+**Not ported:** arbitrary-angle fractional rotation, general
+modded orientation registries, safe semantic scaling of entities,
+inventories or linked multiblock systems, photorealistic full-model
+transparent ghosts, or crash-atomic multi-region transactions.
+Full CI, Mesa/Qt/Windows builds and live version-matrix testing
+remain deferred as requested.

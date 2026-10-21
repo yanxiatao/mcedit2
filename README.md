@@ -10,7 +10,8 @@
 > original-format editing, CloneTool-style original-state repeat/tiling,
 > strict 90°/180°/270° horizontal rotation or X/Z-mirrored copies
 > (unknown modded orientations remain refused), and nearest-neighbour
-> integer XYZ scaling (1–8× per axis) plus **integer XYZ
+> integer XYZ scaling (1–8× per axis), including **rotation followed by
+> per-output-axis scaling** with native BE-protected placement, plus **integer XYZ
 > downscaling** (independent divisors 1–8; nearest-neighbour sampling
 > with trailing partial groups retained). Reduction checks every
 > source coordinate for a protected Block Entity, even unsampled
@@ -66,7 +67,7 @@
 > remains opt-in (Java 1.13+ only).
 > Metadata, ItemStack and map edits commit directly to their original
 > files, separate from region Undo/Redo; nondestructive native entity
-> edits use the region EditSession Undo/Redo. Version 0.3.0a53 has
+> edits use the region EditSession Undo/Redo. Version 0.3.0a54 has
 > not passed the full CI/game-world validation matrix; Windows packaging remains disabled.
 > It is **not yet fully equivalent to the original MCEdit2 editor**. Do not edit live or valuable maps. See the [migration checklist](MIGRATION_STATUS.md) for a feature-by-feature audit. For the
 > compatibility limits, developer instructions and plugin API, see

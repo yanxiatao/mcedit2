@@ -31,6 +31,7 @@ class ToolPaletteDock(QDockWidget):
         ("Repeat clone / tile selection…", "repeat_clone_selection"),
         ("Clone selected volume rotated / mirrored…", "clone_selection_transformed"),
         ("Clone selected volume with XYZ scaling…", "clone_selection_scaled"),
+        ("Rotate then scale selected volume…", "clone_selection_oriented_scaled"),
         ("Downscale selected volume by XYZ divisors…", "clone_selection_reduced"),
         ("Move selected volume…", "move_selection"),
         ("Rotate selection clockwise 90°", "rotate_clockwise"),
@@ -204,6 +205,7 @@ class ToolPaletteDock(QDockWidget):
             ("Repeat at XYZ step", "repeat"),
             ("Rotate / mirror then repeat", "transformed"),
             ("Scale XYZ then repeat", "scaled"),
+            ("Rotate then scale XYZ", "oriented_scaled"),
             ("Downscale XYZ then repeat", "reduced"),
         ):
             self.preview_mode.addItem(title, mode)
@@ -458,7 +460,8 @@ class ToolPaletteDock(QDockWidget):
         offset = tuple(
             self.preview_offset[axis].value() for axis in ("x", "y", "z"))
         count = self.repeat_count.value() if mode != "offset" else 1
-        orientation = self.clone_orientation.currentData() if mode == "transformed" else None
+        orientation = self.clone_orientation.currentData() if mode in (
+            "transformed", "oriented_scaled") else None
         controls = (self.reduce_divisors if mode == "reduced"
                     else self.scale_factors)
         scale = tuple(controls[axis].value() for axis in ("x", "y", "z"))

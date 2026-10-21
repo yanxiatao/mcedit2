@@ -51,19 +51,19 @@ def project_clone_ghost(box, plan: CloneGhost, originals: tuple,
             stamp * plan.offset[i] for i in range(3))
         for original, state in zip(source, originals):
             relative = tuple(original[i] - box.minimum[i] for i in range(3))
-            if plan.mode == "transformed":
+            if plan.mode in ("transformed", "oriented_scaled"):
                 relative = transform_position(
                     relative, box.size, plan.orientation)
                 state = transform_state(
                     state, plan.orientation, legacy=bool(legacy))
-            elif plan.mode == "reduced":
+            if plan.mode == "reduced":
                 dx, dy, dz = plan.scale
                 if (relative[0] % dx or relative[1] % dy or
                         relative[2] % dz):
                     continue
                 relative = (relative[0] // dx, relative[1] // dy,
                             relative[2] // dz)
-            elif plan.mode == "scaled":
+            elif plan.mode in ("scaled", "oriented_scaled"):
                 sx, sy, sz = plan.scale
                 for x in range(sx):
                     for y in range(sy):

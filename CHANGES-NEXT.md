@@ -630,3 +630,18 @@ available and is not automatically replaced.
   include original Anvil/MCRegion NBT, backups, reload, source BE
   refusal, preview parity and size/coordinate guardrails. Full tests
   remain deferred.
+
+## 0.3.0a54 — Clone orientation plus XYZ integer enlargement
+
+- Compose strict 90°/180°/270°/mirror orientation with 1–8x
+  nearest-neighbour scaling along the ROTATED output axes;
+  support 1–128 repeats and rigid-group placement.
+- Preserve immutable original native BlockStates and all unrelated
+  chunk NBT; refuse unsupported modded rotation, original BEs,
+  protected destinations and invalid/missing native sections before
+  staging. Single grouped Undo/Redo and full region backups.
+- Add Qt6 geometry dialog, dock preview mode, native Apply routing,
+  bounded 3D wireframes and original-texture/color BlockState ghost,
+  plus source regressions for original Anvil and MCRegion data.
+- Consolidated duplicate independently added oriented-scale
+  Python definitions. Full CI/game-version/Windows checks deferred.

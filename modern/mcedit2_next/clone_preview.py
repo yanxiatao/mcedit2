@@ -8,7 +8,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .clone_scaling import plan_scaled_clone, plan_reduced_clone
+from .clone_scaling import (
+    plan_scaled_clone, plan_reduced_clone, plan_oriented_scaled_clone,
+)
 from .transforms import MOVES, transformed_size
 
 MAX_GHOST_BOXES = 128
@@ -41,7 +43,7 @@ def plan_clone_ghost(box, mode: str, offset, repetitions: int,
                      scale=(1, 1, 1), max_blocks: int = 32768,
                      placement=(0, 0, 0)) -> CloneGhost:
     """Plan all target boxes before reading world state or modifying data."""
-    if mode not in ("offset", "repeat", "transformed", "scaled", "reduced"):
+    if mode not in ("offset", "repeat", "transformed", "scaled", "reduced", "oriented_scaled"):
         raise ValueError("Unknown Clone Tool preview mode")
     if (not isinstance(offset, (list, tuple)) or len(offset) != 3 or
             any(type(value) is not int for value in offset)):
@@ -63,6 +65,12 @@ def plan_clone_ghost(box, mode: str, offset, repetitions: int,
         if orientation not in MOVES:
             raise ValueError("Unsupported native orientation preview")
         footprint = transformed_size(box.size, orientation)
+    elif mode == "oriented_scaled":
+        scaled = plan_oriented_scaled_clone(
+            box, offset, orientation, scale, repetitions, max_blocks,
+            placement=placement)
+        footprint = scaled.output_size
+        scale = scaled.scale
     elif mode == "scaled":
         scaled = plan_scaled_clone(
             box, offset, scale, repetitions, max_blocks,
@@ -77,12 +85,12 @@ def plan_clone_ghost(box, mode: str, offset, repetitions: int,
         scale = reduced.divisors
     else:
         footprint = box.size
-    if mode not in ("scaled", "reduced"):
+    if mode not in ("scaled", "reduced", "oriented_scaled"):
         scale = (1, 1, 1)
-    if mode != "transformed":
+    if mode not in ("transformed", "oriented_scaled"):
         orientation = None
     planned = box.volume * repetitions
-    if mode == "scaled":
+    if mode in ("scaled", "oriented_scaled"):
         planned *= scale[0] * scale[1] * scale[2]
     elif mode == "reduced":
         planned = reduced.planned_cells

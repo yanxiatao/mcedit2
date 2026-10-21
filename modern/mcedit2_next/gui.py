@@ -309,6 +309,8 @@ class MainWindow(QMainWindow):
                         lambda: self.clone_selection_transformed())
         self.add_action(edit_menu, "Clone selection with XYZ scaling…", "",
                         lambda: self.clone_selection_scaled())
+        self.add_action(edit_menu, "Clone rotated and scaled selection…", "",
+                        lambda: self.clone_selection_oriented_scaled())
         self.add_action(edit_menu, "Downscale clone by integer XYZ divisors…", "",
                         lambda: self.clone_selection_reduced())
         self.add_action(edit_menu, "Move selection by offset…", "", self.move_selection)
@@ -1336,6 +1338,10 @@ class MainWindow(QMainWindow):
                 count = session.clone_box_transformed(
                     original, plan.offset, plan.orientation, plan.repetitions,
                     placement=plan.placement)
+            elif plan.mode == "oriented_scaled":
+                count = session.clone_box_oriented_scaled(
+                    original, plan.offset, plan.orientation,
+                    plan.scale, plan.repetitions, placement=plan.placement)
             elif plan.mode == "scaled":
                 count = session.clone_box_scaled(
                     original, plan.offset, plan.scale, plan.repetitions,
@@ -2113,6 +2119,96 @@ class MainWindow(QMainWindow):
         factors = tuple(control.value() for control in controls)
         self._perform(lambda: self.session.clone_box_scaled(
             self._box(), offset, factors, copies.value()))
+
+    def clone_selection_oriented_scaled(self):
+        """Compose verified horizontal orientation and integer XYZ expansion.
+
+        The geometry preview is read-only and cannot certify target
+        Block Entities or writable native sections. Apply preflights again.
+        """
+        if self.session is None or self.view.selection is None:
+            QMessageBox.information(
+                self, "Rotated scaled clone", "Select a 3D region first.")
+            return
+        offset = self._selection_offset("Rotate then scale original selection…")
+        if offset is None:
+            return
+        from .clone_scaling import plan_oriented_scaled_clone
+        from .transforms import MOVES
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Native Clone Tool — rotate then scale")
+        form = QFormLayout(dialog)
+        orientation = QComboBox(dialog)
+        for label, op in (
+            ("Clockwise 90°", "clockwise"),
+            ("Rotate 180°", "half_turn"),
+            ("Clockwise 270°", "clockwise_270"),
+            ("Mirror east/west", "mirror_x"),
+            ("Mirror north/south", "mirror_z"),
+        ):
+            orientation.addItem(label, op)
+        orientation.setObjectName("clone_oriented_scaled_orientation")
+        form.addRow("Orientation FIRST", orientation)
+        spins = []
+        for axis in "XYZ":
+            control = QSpinBox(dialog)
+            control.setObjectName("clone_oriented_scaled_" + axis.lower())
+            control.setRange(1, 8)
+            control.setValue(1)
+            form.addRow("Scale rotated " + axis, control)
+            spins.append(control)
+        copies = QSpinBox(dialog)
+        copies.setRange(1, 128)
+        copies.setValue(1)
+        copies.setObjectName("clone_oriented_scaled_copies")
+        form.addRow("Copies", copies)
+        preview = QLabel(dialog)
+        preview.setWordWrap(True)
+        preview.setObjectName("clone_oriented_scaled_plan")
+        form.addRow("Geometry preview", preview)
+        note = QLabel(
+            "Original native BlockStates are rotated using verified vanilla/"
+            "legacy mappings, THEN expanded along rotated axes. Unknown "
+            "modded orientation and any source/target Block Entity are "
+            "refused; no entity NBT is copied. The preview only checks "
+            "geometry, not target native chunks.", dialog)
+        note.setWordWrap(True)
+        form.addRow(note)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel, parent=dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        accept = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        def update(_value=None):
+            try:
+                op = orientation.currentData()
+                if op not in MOVES:
+                    raise ValueError("Unknown orientation")
+                plan = plan_oriented_scaled_clone(
+                    self._box(), offset, op,
+                    tuple(spin.value() for spin in spins),
+                    copies.value(), self.session.max_blocks)
+                preview.setText(
+                    f"Rotated and scaled footprint: {plan.output_size}; "
+                    f"planned writes: {plan.planned_cells:,}; "
+                    f"first copy {plan.first_min} → {plan.first_max}; "
+                    f"all copies {plan.all_min} → {plan.all_max}.")
+                accept.setEnabled(True)
+            except (ValueError, OverflowError) as exc:
+                preview.setText(f"Geometry refused: {exc}")
+                accept.setEnabled(False)
+        for control in (*spins, copies):
+            control.valueChanged.connect(update)
+        orientation.currentIndexChanged.connect(update)
+        update()
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        factors = tuple(spin.value() for spin in spins)
+        op = orientation.currentData()
+        self._perform(lambda: self.session.clone_box_oriented_scaled(
+            self._box(), offset, op, factors, copies.value()))
 
     def clone_selection_reduced(self, divisors=None, repetitions=None):
         """Nearest-neighbour integer downscale from original native states."""
