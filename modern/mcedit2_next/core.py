@@ -542,6 +542,58 @@ class EditSession:
         self._ensure_block_only(destinations)
         return self._commit(list(destinations.items()))
 
+    def clone_box_transformed(self, box: Box, offset: Position,
+                              operation: str, repetitions: int = 1) -> int:
+        """Clone rotated/mirrored native block states without changing source.
+
+        The transform is evaluated against ONE snapshot of the original
+        selection; all stamps are preflighted together. Unknown modded
+        orientation and legacy numeric-ID semantics fail closed. Existing
+        BE/entity NBT are deliberately NOT part of this cloning mode.
+        """
+        from .transforms import (
+            MOVES, transform_position, transform_state, transformed_size,
+        )
+        dx, dy, dz = self._offset3(offset)
+        if operation not in MOVES:
+            raise ValueError("Unsupported clone rotation/mirror operation")
+        if type(repetitions) is not int or not 1 <= repetitions <= 128:
+            raise ValueError("Transformed clone repeat count must be 1..128")
+        if not (dx or dy or dz):
+            raise ValueError("Transformed clone requires a nonzero XYZ step")
+        # Check planned operations BEFORE reading the source or destinations.
+        self._check_size(box.volume * repetitions)
+        source = tuple(box.points())
+        self._ensure_block_only(source)
+        legacy = bool(getattr(self.world, "legacy", False))
+        transformed = []
+        for point in source:
+            relative = tuple(point[axis] - box.minimum[axis] for axis in range(3))
+            relative_dst = transform_position(relative, box.size, operation)
+            state = transform_state(
+                self.world.get_block(*point), operation, legacy=legacy)
+            transformed.append((relative_dst, state))
+        size = transformed_size(box.size, operation)
+        if any(n <= 0 for n in size):
+            raise ValueError("Invalid transformed selection dimensions")
+        destinations: dict[Position, Any] = {}
+        for repeat in range(1, repetitions + 1):
+            origin = (
+                box.minimum[0] + dx * repeat,
+                box.minimum[1] + dy * repeat,
+                box.minimum[2] + dz * repeat,
+            )
+            for (rx, ry, rz), state in transformed:
+                # Later stamps override earlier ones on overlaps.
+                position = (origin[0] + rx, origin[1] + ry, origin[2] + rz)
+                destinations[position] = state
+        # Refuse any original protected BE in source or any target,
+        # even when the changed state otherwise equals the original.
+        self._ensure_block_only(destinations)
+        # _commit preflights all changed target coordinates before staging,
+        # and keeps one before/after entry for every unique target point.
+        return self._commit(list(destinations.items()))
+
     def move_box(self, box: Box, offset: Position, air: Any) -> int:
         """Shift a selection without converting its block states or metadata.
 

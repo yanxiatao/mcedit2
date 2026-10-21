@@ -10,7 +10,7 @@ still exist. This is an engineering checklist rather than a release promise.
 | Desktop editor and menus | Qt6 MainWindow, tool palette, World Info / Players / Chunk / Maps docks, history, minimap, queued imports and searchable Block Picker | Guarded world/player scalar and existing ItemStack edits; native Java filled-map pixel canvas and limited map metadata fields with independent gzip backup/restore; still lacks arbitrary item creation, modded slot editors, accurate modern map colors and original widget parity |
 | 2D and 3D map views | 2D slice; OpenGL 3.3 Section streaming; Java blockstate variant/multipart JSON elements and rotated noncubic meshes while retaining greedy opaque cubes | Per-face translucent sorting, biome-aware fluid tint, animated texture playback, complex mod renderers, entity models, lighting and LOD (level-aware water/lava meshes are approximate) |
 | Camera, picking and selection | Orbit, zoom, 3D ray selection, coordinate jump | Full MCEdit2 camera/navigation/selection widgets |
-| Clone/move, copy, fill, replace, paint and undo | Native offset clone/move and original-block-state repeat/tiling clone, guarded by BE/target preflight and one-step Undo/Redo; square/round/diamond/cylinder/parabolic dome fill/replace, flood fill, statistics, filters, dock tools, session history | Full original repeat preview/rotation/scaling/drag handles, modded transformations, linked BE/entity-aware movement and persistent/branching history |
+| Clone/move, copy, fill, replace, paint and undo | Native offset clone/move, original-state repeat/tiling and safe rotated/mirrored repeated clones, with original vanilla/legacy orientation checks, full BE/target preflight and one-step Undo/Redo; shape brushes, filters, history and dock tools | Full original ghost placement and arbitrary scaling/drag previews, modded transformation registries, linked BE/entity-aware movement and persistent/branching history |
 | Java 1.13+ Anvil | Native paletted Sections and guarded region rewrites | Newer codecs, full chunk heightmap/light/biome maintenance and real-world version matrix |
 | Java 1.2–1.12 Anvil (.mca) | Native numeric IDs and metadata in original 16³ Sections | Mod-specific block geometry, lighting/heightmap updates, real-world game fixtures |
 | Java Beta 1.3–1.1 MCRegion (.mcr) | Native XZY 128-height chunks, ID/metadata editing, backup and reopening | Old-style lighting/heightmap recalculation, real-world game fixtures | 
@@ -1545,3 +1545,58 @@ graph updates and large-volume streaming of edits. No full
 Minecraft-version/Qt/Mesa test suite or Windows packaging run has
 been executed for this migration-first iteration; the source test
 cases have not been claimed to pass.
+
+## 0.3.0a46 — Rotated / mirrored original CloneTool copies
+
+Expanded the Qt6 Clone Tool beyond repeat/tiling with **oriented
+copies** of an original selection: clockwise 90°, counterclockwise
+90°, mirror East/West (X), mirror North/South (Z). Any orientation can
+be combined with 1–128 copies at multiples of one XYZ step, and is
+available in both the Edit menu and dockable Tool Palette.
+
+- New `EditSession.clone_box_transformed(box, offset, operation,
+  repetitions)` takes a **single immutable snapshot** of the original
+  selection before any staging, computes the new rotated rectangle
+  dimensions and transformed per-block coordinates, then applies
+  verified native horizontal orientation rules using the existing
+  `transforms.transform_state` and `transform_position` codecs.
+  The source is left untouched. Repeated copies may overlap each
+  other or the original selection; the **last planned stamp wins**
+  and every unique changed coordinate appears once in history.
+- Uses the strict established vanilla `BlockState` orientation
+  allowlist (stairs, rails, directional connections, axis, facing,
+  door hinges, standing sign rotation, etc.) and the explicitly
+  supported pre-flattening numeric ID/metadata rules (stairs, logs,
+  torches, known invariant IDs). Unknown modded blocks, unverified
+  metadata and orientation-related properties are **refused**,
+  rather than guessing or normalizing their NBT.
+- BE/entity cloning is **not** implied. Every source and destination
+  block entity position is checked before staging, and the native
+  backend preflights all actual changed targets for writable
+  original sections, protected BEs and valid original block states.
+  The planned stamp count is checked against `EditSession.max_blocks`
+  before reading source blocks. Invalid operation, zero step,
+  non-integer/over-limit repeats, unknown oriented blocks, missing
+  sections or BE conflicts produce no committed edit or Undo record.
+- The Edit menu provides the XYZ step, orientation choice and copy
+  count through Qt6 dialogs. The persistent Tool Palette adds a
+  rotation/mirror combobox next to the repeat-count spinner and
+  dispatches directly to the same native session operation.
+  QAction triggered(bool) is explicitly isolated from optional
+  menu parameters so the menus cannot accidentally interpret a
+  signal Boolean as the copy count/operation.
+- `tests/test_clone_transformed.py` adds **source-only regression
+  specifications** for rotated asymmetric footprints, block-state
+  facing/hinge retention, mirror and repeated-overlap behavior,
+  single-step Undo/Redo, legacy ID/metadata fidelity,
+  unknown-orientation, source/destination BE and late-section
+  refusal, count and offset limits, original Anvil modded BE/other
+  tag byte preservation, old MCRegion entity/lighting tag
+  preservation, full-region backup and save/reopen.
+
+**Not yet migrated:** arbitrary-angle rotations, scaling, visual
+ghost previews and drag handles, broad modded orientation/structure
+schema support, automatic BE/entity/ownership graph-aware copying,
+large streaming clones and the complete original MCEdit2 Clone Tool
+UI parity. No full live-Minecraft/Qt/Mesa CI matrix or Windows build
+has been executed in this migration-first round.

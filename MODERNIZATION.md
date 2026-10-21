@@ -1555,3 +1555,58 @@ graph updates and large-volume streaming of edits. No full
 Minecraft-version/Qt/Mesa test suite or Windows packaging run has
 been executed for this migration-first iteration; the source test
 cases have not been claimed to pass.
+
+## 0.3.0a46 — Rotated / mirrored original CloneTool copies
+
+Expanded the Qt6 Clone Tool beyond repeat/tiling with **oriented
+copies** of an original selection: clockwise 90°, counterclockwise
+90°, mirror East/West (X), mirror North/South (Z). Any orientation can
+be combined with 1–128 copies at multiples of one XYZ step, and is
+available in both the Edit menu and dockable Tool Palette.
+
+- New `EditSession.clone_box_transformed(box, offset, operation,
+  repetitions)` takes a **single immutable snapshot** of the original
+  selection before any staging, computes the new rotated rectangle
+  dimensions and transformed per-block coordinates, then applies
+  verified native horizontal orientation rules using the existing
+  `transforms.transform_state` and `transform_position` codecs.
+  The source is left untouched. Repeated copies may overlap each
+  other or the original selection; the **last planned stamp wins**
+  and every unique changed coordinate appears once in history.
+- Uses the strict established vanilla `BlockState` orientation
+  allowlist (stairs, rails, directional connections, axis, facing,
+  door hinges, standing sign rotation, etc.) and the explicitly
+  supported pre-flattening numeric ID/metadata rules (stairs, logs,
+  torches, known invariant IDs). Unknown modded blocks, unverified
+  metadata and orientation-related properties are **refused**,
+  rather than guessing or normalizing their NBT.
+- BE/entity cloning is **not** implied. Every source and destination
+  block entity position is checked before staging, and the native
+  backend preflights all actual changed targets for writable
+  original sections, protected BEs and valid original block states.
+  The planned stamp count is checked against `EditSession.max_blocks`
+  before reading source blocks. Invalid operation, zero step,
+  non-integer/over-limit repeats, unknown oriented blocks, missing
+  sections or BE conflicts produce no committed edit or Undo record.
+- The Edit menu provides the XYZ step, orientation choice and copy
+  count through Qt6 dialogs. The persistent Tool Palette adds a
+  rotation/mirror combobox next to the repeat-count spinner and
+  dispatches directly to the same native session operation.
+  QAction triggered(bool) is explicitly isolated from optional
+  menu parameters so the menus cannot accidentally interpret a
+  signal Boolean as the copy count/operation.
+- `tests/test_clone_transformed.py` adds **source-only regression
+  specifications** for rotated asymmetric footprints, block-state
+  facing/hinge retention, mirror and repeated-overlap behavior,
+  single-step Undo/Redo, legacy ID/metadata fidelity,
+  unknown-orientation, source/destination BE and late-section
+  refusal, count and offset limits, original Anvil modded BE/other
+  tag byte preservation, old MCRegion entity/lighting tag
+  preservation, full-region backup and save/reopen.
+
+**Not yet migrated:** arbitrary-angle rotations, scaling, visual
+ghost previews and drag handles, broad modded orientation/structure
+schema support, automatic BE/entity/ownership graph-aware copying,
+large streaming clones and the complete original MCEdit2 Clone Tool
+UI parity. No full live-Minecraft/Qt/Mesa CI matrix or Windows build
+has been executed in this migration-first round.

@@ -495,3 +495,19 @@ available and is not automatically replaced.
 - Added source regressions for overlap, bounds, Undo/Redo, BE safety,
   original Java Anvil mod blockstates and old MCRegion IDs/metadata,
   backups and reopen. Full CI/game-world testing remains deferred.
+
+## 0.3.0a46 — Rotate / mirror Clone Tool stamps
+
+- Ported **rotate clockwise/counterclockwise or mirror X/Z** of an
+  original selection into a clone destination, with optional 1–128
+  repeated stamps using one frozen source snapshot.
+- Uses the existing strict vanilla/legacy block orientation codec,
+  not guessed modded state transformations. Unsupported modded IDs,
+  source/target BEs and missing sections are rejected before any
+  staging. Later overlapping stamps win with unique Undo history.
+- Added Qt6 menu orientation picker and persistent dock selector
+  sharing repeat-count controls. Guarded QAction's Boolean signal
+  against confusion with optional parameters.
+- Added source regression specifications for original Anvil and
+  MCRegion data fidelity, rotated rectangle layouts, batch Undo,
+  modded/BE failure cases and backup/reopen. Full tests deferred.

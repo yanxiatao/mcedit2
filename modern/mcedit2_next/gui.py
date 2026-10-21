@@ -297,8 +297,12 @@ class MainWindow(QMainWindow):
         self.add_action(edit_menu, "Paste with BE NBT (experimental)…", "", self.paste_with_be)
         self.add_action(edit_menu, "Paste at center", "Ctrl+V", self.paste)
         self.add_action(edit_menu, "Clone selection by offset…", "", self.clone_selection)
+        # QAction.triggered(bool) must not be treated as the optional
+        # repeat-count or orientation argument supplied by the tool dock.
         self.add_action(edit_menu, "Repeat clone / tile selection…", "",
-                        self.repeat_clone_selection)
+                        lambda: self.repeat_clone_selection())
+        self.add_action(edit_menu, "Clone rotated / mirrored selection…", "",
+                        lambda: self.clone_selection_transformed())
         self.add_action(edit_menu, "Move selection by offset…", "", self.move_selection)
         self.add_action(edit_menu, "Rotate selection clockwise 90°", "",
                         lambda: self.transform_selection("clockwise"))
@@ -1765,6 +1769,40 @@ class MainWindow(QMainWindow):
                 return
         self._perform(lambda: self.session.clone_box_repeated(
             self._box(), offset, repetitions))
+
+    def clone_selection_transformed(self, operation=None, repetitions=None):
+        """Clone an oriented native selection using verified vanilla/old IDs."""
+        offset = self._selection_offset("Clone rotated / mirrored selection…")
+        if offset is None:
+            return
+        if not any(offset):
+            QMessageBox.information(
+                self, "Oriented clone", "Choose a nonzero XYZ step.")
+            return
+        choices = [
+            ("Rotate clockwise 90°", "clockwise"),
+            ("Rotate counterclockwise 90°", "counterclockwise"),
+            ("Mirror East / West", "mirror_x"),
+            ("Mirror North / South", "mirror_z"),
+        ]
+        if operation is None:
+            names = [label for label, _ in choices]
+            selected, ok = QInputDialog.getItem(
+                self, "Clone orientation", "Apply transform to each copy",
+                names, 0, False)
+            if not ok:
+                return
+            operation = dict(choices)[selected]
+        if repetitions is None:
+            repetitions, ok = QInputDialog.getInt(
+                self, "Repeat transformed clone",
+                "Number of oriented copies (existing original block states only; "
+                "unknown modded orientations or Block Entities are refused)",
+                1, 1, 128)
+            if not ok:
+                return
+        self._perform(lambda: self.session.clone_box_transformed(
+            self._box(), offset, operation, repetitions))
 
     def move_selection(self):
         offset = self._selection_offset("Move selection by offset…")
