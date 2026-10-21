@@ -646,6 +646,46 @@ class EditSession:
         # and stores a single before/after pair for each unique coordinate.
         return self._commit(list(targets.items()))
 
+    def clone_box_reduced(self, box: Box, offset: Position,
+                          divisors: tuple[int, int, int],
+                          repetitions: int = 1, *,
+                          placement: Position = (0, 0, 0)) -> int:
+        """Clone a BE-free original selection with XYZ integer downsampling.
+
+        Each output cell takes the ORIGINAL state at the low corner of
+        its sampled source group; trailing partial groups are retained.
+        Scan ALL source cells for protected BEs (not only sampled cells).
+        Every destination is preflighted before staging one Undo record.
+        """
+        from .clone_scaling import plan_reduced_clone
+        plan = plan_reduced_clone(
+            box, offset, divisors, repetitions, self.max_blocks,
+            placement=placement)
+        source = tuple(box.points())
+        self._ensure_block_only(source)
+        dx, dy, dz = plan.divisors
+        sampled = []
+        for x, y, z in source:
+            rx, ry, rz = (x - box.minimum[0], y - box.minimum[1],
+                          z - box.minimum[2])
+            if rx % dx == 0 and ry % dy == 0 and rz % dz == 0:
+                sampled.append(((rx // dx, ry // dy, rz // dz),
+                                self.world.get_block(x, y, z)))
+        if len(sampled) != (
+                plan.output_size[0] * plan.output_size[1] *
+                plan.output_size[2]):
+            raise ValueError("Reduced source snapshot is incomplete")
+        targets: dict[Position, Any] = {}
+        for stamp in range(1, plan.repetitions + 1):
+            origin = tuple(
+                box.minimum[i] + plan.placement[i] + stamp * plan.step[i]
+                for i in range(3))
+            for rel, native in sampled:
+                target = tuple(origin[i] + rel[i] for i in range(3))
+                targets[target] = native
+        self._ensure_block_only(targets)
+        return self._commit(list(targets.items()))
+
     def move_box(self, box: Box, offset: Position, air: Any) -> int:
         """Shift a selection without converting its block states or metadata.
 

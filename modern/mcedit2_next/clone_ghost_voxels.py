@@ -56,6 +56,13 @@ def project_clone_ghost(box, plan: CloneGhost, originals: tuple,
                     relative, box.size, plan.orientation)
                 state = transform_state(
                     state, plan.orientation, legacy=bool(legacy))
+            elif plan.mode == "reduced":
+                dx, dy, dz = plan.scale
+                if (relative[0] % dx or relative[1] % dy or
+                        relative[2] % dz):
+                    continue
+                relative = (relative[0] // dx, relative[1] // dy,
+                            relative[2] // dz)
             elif plan.mode == "scaled":
                 sx, sy, sz = plan.scale
                 for x in range(sx):

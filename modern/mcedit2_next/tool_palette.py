@@ -31,6 +31,7 @@ class ToolPaletteDock(QDockWidget):
         ("Repeat clone / tile selection…", "repeat_clone_selection"),
         ("Clone selected volume rotated / mirrored…", "clone_selection_transformed"),
         ("Clone selected volume with XYZ scaling…", "clone_selection_scaled"),
+        ("Downscale selected volume by XYZ divisors…", "clone_selection_reduced"),
         ("Move selected volume…", "move_selection"),
         ("Rotate selection clockwise 90°", "rotate_clockwise"),
         ("Rotate selection 180°", "rotate_half_turn"),
@@ -178,6 +179,14 @@ class ToolPaletteDock(QDockWidget):
             field.setValue(1)
             clone_form.addRow("Scale " + axis.upper(), field)
             self.scale_factors[axis] = field
+        self.reduce_divisors = {}
+        for axis in ("x", "y", "z"):
+            field = QSpinBox(clone_group)
+            field.setObjectName("tool_palette_clone_reduce_" + axis)
+            field.setRange(1, 8)
+            field.setValue(2)
+            clone_form.addRow("Reduce " + axis.upper() + " by", field)
+            self.reduce_divisors[axis] = field
         repeat_info = QLabel(
             "Choose Repeat clone / tile selection, then enter the XYZ "
             "step. Copies use original block states, not cascading results. "
@@ -195,6 +204,7 @@ class ToolPaletteDock(QDockWidget):
             ("Repeat at XYZ step", "repeat"),
             ("Rotate / mirror then repeat", "transformed"),
             ("Scale XYZ then repeat", "scaled"),
+            ("Downscale XYZ then repeat", "reduced"),
         ):
             self.preview_mode.addItem(title, mode)
         preview_form.addRow("Placement mode", self.preview_mode)
@@ -257,6 +267,7 @@ class ToolPaletteDock(QDockWidget):
         for widget in (
                 self.preview_mode, self.clone_orientation, self.preview_snap,
                 self.repeat_count, *self.scale_factors.values(),
+                *self.reduce_divisors.values(),
                 *self.preview_offset.values(),
                 *self.preview_placement.values()):
             if isinstance(widget, QComboBox):
@@ -448,7 +459,9 @@ class ToolPaletteDock(QDockWidget):
             self.preview_offset[axis].value() for axis in ("x", "y", "z"))
         count = self.repeat_count.value() if mode != "offset" else 1
         orientation = self.clone_orientation.currentData() if mode == "transformed" else None
-        scale = tuple(self.scale_factors[axis].value() for axis in ("x", "y", "z"))
+        controls = (self.reduce_divisors if mode == "reduced"
+                    else self.scale_factors)
+        scale = tuple(controls[axis].value() for axis in ("x", "y", "z"))
         placement = tuple(
             self.preview_placement[axis].value() for axis in ("x", "y", "z"))
         return mode, offset, count, orientation, scale, placement
@@ -522,6 +535,11 @@ class ToolPaletteDock(QDockWidget):
                                 for axis in ("x", "y", "z"))
                 self.editor.clone_selection_scaled(
                     factors, self.repeat_count.value())
+            elif action == "clone_selection_reduced":
+                divisors = tuple(self.reduce_divisors[axis].value()
+                                 for axis in ("x", "y", "z"))
+                self.editor.clone_selection_reduced(
+                    divisors, self.repeat_count.value())
             elif action == "rotate_clockwise":
                 self.editor.transform_selection("clockwise")
             elif action == "rotate_half_turn":

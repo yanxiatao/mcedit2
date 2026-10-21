@@ -614,3 +614,19 @@ available and is not automatically replaced.
   original region NBT retention, 3D ghost fidelity, protected BE
   failure and original Anvil/MCRegion saved backups and Undo/Redo.
   Full CI, game-world and Windows execution remain deferred.
+
+## 0.3.0a53 — Native Clone Tool integer reduction
+
+- Add XYZ divisor 1–8 nearest-neighbour block-only downscale; dimensions
+  are ceil-divided and trailing partial groups are retained.
+- Source BE preflight scans **every** original source voxel (even those
+  not sampled), while destination BE/Section/ID preflight refuses unsafe
+  edits before staging. Native BlockStates are copied without
+  conversion and without any entity or BE NBT.
+- Qt6 menu/dock divisor controls, read-only geometry preview,
+  wireframes and bounded 3D original BlockState ghost share the same
+  exact sample-grid semantics. Apply uses independent native checks.
+- One Undo/Redo group for overlapping copies. Source regression cases
+  include original Anvil/MCRegion NBT, backups, reload, source BE
+  refusal, preview parity and size/coordinate guardrails. Full tests
+  remain deferred.

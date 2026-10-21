@@ -309,6 +309,8 @@ class MainWindow(QMainWindow):
                         lambda: self.clone_selection_transformed())
         self.add_action(edit_menu, "Clone selection with XYZ scaling…", "",
                         lambda: self.clone_selection_scaled())
+        self.add_action(edit_menu, "Downscale clone by integer XYZ divisors…", "",
+                        lambda: self.clone_selection_reduced())
         self.add_action(edit_menu, "Move selection by offset…", "", self.move_selection)
         self.add_action(edit_menu, "Rotate selection clockwise 90°", "",
                         lambda: self.transform_selection("clockwise"))
@@ -1338,6 +1340,10 @@ class MainWindow(QMainWindow):
                 count = session.clone_box_scaled(
                     original, plan.offset, plan.scale, plan.repetitions,
                     placement=plan.placement)
+            elif plan.mode == "reduced":
+                count = session.clone_box_reduced(
+                    original, plan.offset, plan.scale, plan.repetitions,
+                    placement=plan.placement)
             else:
                 raise ValueError("Unsupported clone preview mode")
             # Only remove the preview AFTER the EditSession successfully
@@ -2107,6 +2113,81 @@ class MainWindow(QMainWindow):
         factors = tuple(control.value() for control in controls)
         self._perform(lambda: self.session.clone_box_scaled(
             self._box(), offset, factors, copies.value()))
+
+    def clone_selection_reduced(self, divisors=None, repetitions=None):
+        """Nearest-neighbour integer downscale from original native states."""
+        if self.session is None or self.view.selection is None:
+            QMessageBox.information(
+                self, "Downscale clone", "Select an original 3D region first.")
+            return
+        offset = self._selection_offset("Downscale selection by integer XYZ divisors…")
+        if offset is None:
+            return
+        from .clone_scaling import plan_reduced_clone
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Native Clone Tool — integer downscale")
+        form = QFormLayout(dialog)
+        fields = []
+        defaults = (divisors if isinstance(divisors, (list, tuple)) and
+                    len(divisors) == 3 else (2, 2, 2))
+        for axis, default in zip(("X", "Y", "Z"), defaults):
+            control = QSpinBox(dialog)
+            control.setRange(1, 8)
+            control.setValue(default)
+            control.setObjectName("clone_reduce_divisor_" + axis.lower())
+            form.addRow("Divide " + axis + " by", control)
+            fields.append(control)
+        copies = QSpinBox(dialog)
+        copies.setRange(1, 128)
+        copies.setValue(1 if repetitions is None else repetitions)
+        copies.setObjectName("clone_reduce_copies")
+        form.addRow("Copies", copies)
+        preview = QLabel(dialog)
+        preview.setObjectName("clone_reduce_geometry_preview")
+        preview.setWordWrap(True)
+        form.addRow("Geometry preview", preview)
+        note = QLabel(
+            "Nearest-neighbour reduction samples the FIRST original cell of "
+            "each XYZ group, retaining a trailing partial group. "
+            "No entities/Block Entities are copied. ALL source positions "
+            "and ALL target positions are checked for protected BEs. "
+            "Preview is read-only, not a safety approval.")
+        note.setWordWrap(True)
+        form.addRow(note)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel, parent=dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        accept = buttons.button(QDialogButtonBox.StandardButton.Ok)
+
+        def refresh(_value=None):
+            try:
+                plan = plan_reduced_clone(
+                    self._box(), offset,
+                    tuple(field.value() for field in fields),
+                    copies.value(), self.session.max_blocks)
+                preview.setText(
+                    f"Output each: {plan.output_size}; sampled target "
+                    f"cells: {plan.planned_cells:,}; full source BE scan: "
+                    f"{plan.source_cells:,}. First: {plan.first_min} → "
+                    f"{plan.first_max}; all copies: "
+                    f"{plan.all_min} → {plan.all_max}.")
+                accept.setEnabled(True)
+            except (ValueError, OverflowError) as exc:
+                preview.setText(f"Reduction unavailable: {exc}")
+                accept.setEnabled(False)
+
+        for control in (*fields, copies):
+            control.valueChanged.connect(refresh)
+        refresh()
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._perform(lambda: self.session.clone_box_reduced(
+            self._box(), offset,
+            tuple(field.value() for field in fields),
+            copies.value()))
 
     def move_selection(self):
         offset = self._selection_offset("Move selection by offset…")

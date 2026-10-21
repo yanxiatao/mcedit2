@@ -1986,3 +1986,57 @@ rotation, model-exact translucent previews, downscaling and full
 original Clone Tool UI interaction parity. Full CI, Qt/Mesa/Windows
 packaging and live Minecraft-version testing were intentionally
 deferred; newly written regression source is not asserted to pass.
+
+## 0.3.0a53 — Clone Tool bounded integer XYZ downscaling
+
+Added the missing **nearest-neighbour integer reduction** path to the
+existing Python 3 / Qt6 Clone Tool. The user may divide X, Y and Z by
+independent 1–8 integer factors, repeat the result with a fixed XYZ
+stride, and preview/edit its rigid 3D placement using the existing
+non-destructive wireframe/BlockState ghost system.
+
+- `clone_scaling.plan_reduced_clone` calculates exact ceil-divided
+  output dimensions and world-coordinate extents, checks 1–128 copy
+  counts, nonzero integer XYZ step, placement, Java horizontal bounds,
+  original source volume and planned target writes against the
+  native session limit before any source NBT reads. A source axis of
+  length 5 reduced by 2 becomes 3 cells (source positions 0, 2, 4);
+  the trailing partial group is not dropped.
+- `EditSession.clone_box_reduced` **checks every original source cell
+  for Block Entities, even unsampled cells**, then snapshots only the
+  first original block of each XYZ sampling group. This makes
+  approximate resizing deliberate while never silently discarding a
+  protected BE. It copies each original native BlockState unchanged;
+  no item/entity NBT, ownership, modded registry or orientation
+  guessing. Every destination is checked for protected BEs and
+  writable native sections/IDs before any staged mutation.
+- Output copies are stamped from one immutable source sample; later
+  copies overwrite earlier duplicates. Each unique changed
+  destination is recorded only once in one undoable transaction.
+  Undo/Redo remains available after original region saves, unlike
+  structural entity List edits. Full native region backups apply as
+  with other block edits.
+- Qt6 **Downscale clone by integer XYZ divisors…** action is available
+  in the Edit menu and dockable Tool Palette with separate downscale
+  factor controls and a read-only geometry/cell-budget preview.
+  Its `reduced` 3D placement mode supports original group
+  dragging/grid snap/stride, complete footprint wireframes and
+  at most 2048 original BlockState material-ghost cells; oversized
+  or BE-protected previews fall back to wireframes only.
+  Apply always reruns actual original native preflight.
+- `tests/test_clone_reduction.py` specifies exact ceil bounds,
+  negative stride and group placement, type/range/cell-limit
+  rejection, trailing partial groups, 3D XYZ sampling, overlap
+  with frozen source, single-step Undo/Redo, unsampled-source-BE
+  refusal, late-target-BE/native-section rejection, ghost/wireframe
+  parity, and Anvil/MCRegion save/reopen + backup preservation of
+  original unrelated Block Entity/Entities/lighting/unknown NBT.
+
+**Limitations:** This is intentionally lossy nearest-neighbour
+**block-state-only reduction**, not a semantic downsizing of machines,
+inventories, entities, links or modded multiblocks. No arbitrary
+fractional resampling, rotation combined with scaling, model-accurate
+transparent ghost for all Minecraft blocks, or live-world compatibility
+guarantee. The regression tests are committed as source but the full
+version-matrix/Qt/Mesa/Windows builds and game-world checks remain
+deferred while migration work continues.

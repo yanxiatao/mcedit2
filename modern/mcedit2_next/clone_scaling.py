@@ -79,3 +79,74 @@ def plan_scaled_clone(box, step, scale, repetitions: int,
     return ScaledClonePlan(
         step, scale, repetitions, output_size, count,
         first, first_max, all_min, all_max, placement)
+
+
+@dataclass(frozen=True)
+class ReducedClonePlan:
+    """Nearest-neighbour downscale: sample each source group at its low corner."""
+    step: tuple[int, int, int]
+    divisors: tuple[int, int, int]
+    repetitions: int
+    output_size: tuple[int, int, int]
+    source_cells: int
+    planned_cells: int
+    first_min: tuple[int, int, int]
+    first_max: tuple[int, int, int]
+    all_min: tuple[int, int, int]
+    all_max: tuple[int, int, int]
+    placement: tuple[int, int, int] = (0, 0, 0)
+
+
+def plan_reduced_clone(box, step, divisors, repetitions: int,
+                       max_blocks: int, *, placement=(0, 0, 0)) -> ReducedClonePlan:
+    """Plan integer reduction with ceil dimensions and strict source budget.
+
+    A source interval of length N sampled at 0, divisor, 2*divisor, ...
+    becomes ceil(N/divisor) target cells. Partial trailing groups are
+    sampled at their first original voxel; no state interpolation or
+    registry/multi-block conversions occur. Entire source volume must be
+    BE-scannable within the safety budget even when output is small.
+    """
+    def vector(value, name):
+        if (not isinstance(value, (tuple, list)) or len(value) != 3 or
+                any(type(n) is not int for n in value)):
+            raise ValueError(f"{name} requires three integer coordinates")
+        return tuple(value)
+
+    step = vector(step, "Reduction step")
+    placement = vector(placement, "Reduction placement")
+    divisors = vector(divisors, "Reduction divisors")
+    if not any(step):
+        raise ValueError("Reduced clone requires a nonzero XYZ step")
+    if any(not 1 <= n <= MAX_SCALE for n in divisors):
+        raise ValueError("Reduction divisors must be integers in 1..8")
+    if type(repetitions) is not int or not 1 <= repetitions <= MAX_COPIES:
+        raise ValueError("Reduced clone copies must be in 1..128")
+    if type(max_blocks) is not int or max_blocks <= 0:
+        raise ValueError("Reduction needs a positive native cell budget")
+    if box.volume > max_blocks:
+        raise ValueError(
+            f"Reduction source has {box.volume:,} cells; limit is {max_blocks:,}")
+    size = tuple(
+        (box.size[i] + divisors[i] - 1) // divisors[i]
+        for i in range(3))
+    planned = size[0] * size[1] * size[2] * repetitions
+    if planned > max_blocks:
+        raise ValueError(
+            f"Reduced clone plans {planned:,} cells; limit is {max_blocks:,}")
+    first = tuple(box.minimum[i] + placement[i] + step[i] for i in range(3))
+    last = tuple(
+        box.minimum[i] + placement[i] + step[i] * repetitions
+        for i in range(3))
+    first_max = tuple(first[i] + size[i] - 1 for i in range(3))
+    all_min = tuple(min(first[i], last[i]) for i in range(3))
+    all_max = tuple(
+        max(first[i], last[i]) + size[i] - 1
+        for i in range(3))
+    for axis in (0, 2):
+        if (all_min[axis] <= -WORLD_HORIZONTAL_LIMIT or
+                all_max[axis] >= WORLD_HORIZONTAL_LIMIT):
+            raise ValueError("Reduced clone extends beyond Java world X/Z limits")
+    return ReducedClonePlan(
+        step, divisors, repetitions, size, box.volume, planned,
+        first, first_max, all_min, all_max, placement)

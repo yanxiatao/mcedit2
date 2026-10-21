@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .clone_scaling import plan_scaled_clone
+from .clone_scaling import plan_scaled_clone, plan_reduced_clone
 from .transforms import MOVES, transformed_size
 
 MAX_GHOST_BOXES = 128
@@ -41,7 +41,7 @@ def plan_clone_ghost(box, mode: str, offset, repetitions: int,
                      scale=(1, 1, 1), max_blocks: int = 32768,
                      placement=(0, 0, 0)) -> CloneGhost:
     """Plan all target boxes before reading world state or modifying data."""
-    if mode not in ("offset", "repeat", "transformed", "scaled"):
+    if mode not in ("offset", "repeat", "transformed", "scaled", "reduced"):
         raise ValueError("Unknown Clone Tool preview mode")
     if (not isinstance(offset, (list, tuple)) or len(offset) != 3 or
             any(type(value) is not int for value in offset)):
@@ -69,15 +69,23 @@ def plan_clone_ghost(box, mode: str, offset, repetitions: int,
             placement=placement)
         footprint = scaled.output_size
         scale = scaled.scale
+    elif mode == "reduced":
+        reduced = plan_reduced_clone(
+            box, offset, scale, repetitions, max_blocks,
+            placement=placement)
+        footprint = reduced.output_size
+        scale = reduced.divisors
     else:
         footprint = box.size
-    if mode != "scaled":
+    if mode not in ("scaled", "reduced"):
         scale = (1, 1, 1)
     if mode != "transformed":
         orientation = None
     planned = box.volume * repetitions
     if mode == "scaled":
         planned *= scale[0] * scale[1] * scale[2]
+    elif mode == "reduced":
+        planned = reduced.planned_cells
     if planned > max_blocks:
         raise ValueError(
             f"Clone preview would plan {planned:,} cells; "
