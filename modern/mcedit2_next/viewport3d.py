@@ -18,6 +18,7 @@ from .viewport3d_math import Camera, is_air, textured_mesh_blocks, trace_voxels
 from .textureatlas import make_atlas
 from .resourcepack import ResourceLibrary
 from .core import Box
+from .clone_preview import ghost_wireframe_vertices
 from .selection_gizmo import (
     axis_ray_position, horizontal_plane_point, move_selection, ray_handle,
     resize_selection, selection_handles,
@@ -105,6 +106,7 @@ class Voxel3DView(QOpenGLWidget):
         self._gizmo_drag = None
         self._gl_error = None
         self._skipped = 0
+        self.clone_preview_boxes = ()  # Read-only original coordinate boxes.
 
     @property
     def y(self):
@@ -178,10 +180,17 @@ class Voxel3DView(QOpenGLWidget):
             self._program = None
             self.renderError.emit(self._gl_error)
 
+    def set_clone_preview_boxes(self, boxes):
+        """Request a 3D target-volume overlay, WITHOUT modifying chunks."""
+        self.clone_preview_boxes = tuple(boxes)
+        # Streaming subclass invalidate() does not rebuild decoded chunks.
+        self.invalidate()
+
     def _selection_lines(self, target):
-        """Colored 3D wireframe of the current rectangular selection."""
+        """Show ordinary selection and any read-only target clone bounds."""
+        ghost = ghost_wireframe_vertices(self.clone_preview_boxes, target)
         if self.selection is None:
-            return []
+            return ghost
         x1, z1, x2, z2 = self.selection
         a = (min(x1, x2), min(self.y_lo, self.y_hi), min(z1, z2))
         b = (max(x1, x2) + 1, max(self.y_lo, self.y_hi) + 1, max(z1, z2) + 1)
@@ -233,6 +242,7 @@ class Voxel3DView(QOpenGLWidget):
                             point[1] - target[1],
                             point[2] - target[2],
                             *color, .5 / 32, .5 / 32))
+        result.extend(ghost)
         return result
 
     def _gizmo_ray(self, position):

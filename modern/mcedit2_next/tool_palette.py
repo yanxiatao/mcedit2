@@ -182,6 +182,66 @@ class ToolPaletteDock(QDockWidget):
         clone_form.addRow(repeat_info)
         vertical.addWidget(clone_group)
 
+        preview_group = QGroupBox("3D Clone Tool placement — preview first", root)
+        preview_form = QFormLayout(preview_group)
+        self.preview_mode = QComboBox(preview_group)
+        self.preview_mode.setObjectName("tool_palette_clone_preview_mode")
+        for title, mode in (
+            ("Offset one copy", "offset"),
+            ("Repeat at XYZ step", "repeat"),
+            ("Rotate / mirror then repeat", "transformed"),
+            ("Scale XYZ then repeat", "scaled"),
+        ):
+            self.preview_mode.addItem(title, mode)
+        preview_form.addRow("Placement mode", self.preview_mode)
+        self.preview_offset = {}
+        for axis in ("x", "y", "z"):
+            field = QSpinBox(preview_group)
+            field.setObjectName("tool_palette_clone_preview_offset_" + axis)
+            field.setRange(-30_000_000, 30_000_000)
+            field.setValue(16 if axis == "x" else 0)
+            self.preview_offset[axis] = field
+            preview_form.addRow("Step " + axis.upper(), field)
+        preview_note = QLabel(
+            "Preview renders read-only target volume WIREFRAMES in 3D, not "
+            "individual voxel models or a promise that targets are writable. "
+            "Rotate/orientation, XYZ scaling and repeat count use the "
+            "controls above. You may orbit and zoom before applying.")
+        preview_note.setWordWrap(True)
+        preview_form.addRow(preview_note)
+        self.preview_info = QLabel("No clone preview active.")
+        self.preview_info.setObjectName("tool_palette_clone_preview_info")
+        self.preview_info.setWordWrap(True)
+        preview_form.addRow("Current preview", self.preview_info)
+        actions = QHBoxLayout()
+        self.preview_button = QPushButton("Preview in 3D", preview_group)
+        self.preview_button.setObjectName("tool_palette_clone_preview_show")
+        self.preview_button.clicked.connect(self.preview_clone)
+        actions.addWidget(self.preview_button)
+        self.apply_preview_button = QPushButton("Apply preview", preview_group)
+        self.apply_preview_button.setObjectName("tool_palette_clone_preview_apply")
+        self.apply_preview_button.setEnabled(False)
+        self.apply_preview_button.clicked.connect(self.apply_clone_preview)
+        actions.addWidget(self.apply_preview_button)
+        self.clear_preview_button = QPushButton("Clear", preview_group)
+        self.clear_preview_button.setObjectName("tool_palette_clone_preview_clear")
+        self.clear_preview_button.clicked.connect(self.clear_clone_preview)
+        actions.addWidget(self.clear_preview_button)
+        preview_form.addRow(actions)
+        vertical.addWidget(preview_group)
+        # A geometry preview is a snapshot, not a live placement contract.
+        # Parameter edits discard it; the next Preview recomputes all bounds.
+        for widget in (
+                self.preview_mode, self.clone_orientation,
+                self.repeat_count, *self.scale_factors.values(),
+                *self.preview_offset.values()):
+            if isinstance(widget, QComboBox):
+                widget.currentIndexChanged.connect(
+                    lambda _value: self.clear_clone_preview())
+            else:
+                widget.valueChanged.connect(
+                    lambda _value: self.clear_clone_preview())
+
         transform_group = QGroupBox("Selection bounds · no block edits", root)
         transform_form = QFormLayout(transform_group)
         tip = QLabel(
@@ -357,6 +417,42 @@ class ToolPaletteDock(QDockWidget):
         self.shell_thickness.setEnabled(is_shell)
         self.sphere_radius.setEnabled(is_sphere)
         self.sphere_hollow.setEnabled(is_sphere)
+
+    def _clone_preview_parameters(self):
+        mode = self.preview_mode.currentData()
+        offset = tuple(
+            self.preview_offset[axis].value() for axis in ("x", "y", "z"))
+        count = self.repeat_count.value() if mode != "offset" else 1
+        orientation = self.clone_orientation.currentData() if mode == "transformed" else None
+        scale = tuple(self.scale_factors[axis].value() for axis in ("x", "y", "z"))
+        return mode, offset, count, orientation, scale
+
+    def preview_clone(self):
+        try:
+            mode, offset, copies, orientation, scale = (
+                self._clone_preview_parameters())
+            plan = self.editor.show_clone_wireframe_preview(
+                mode, offset, copies, orientation=orientation, scale=scale)
+            if plan is None:
+                return
+            self.preview_info.setText(
+                f"{plan.repetitions} outlined target volumes, "
+                f"{plan.footprint} per copy, "
+                f"{plan.planned_cells:,} planned cells. "
+                "Cyan = earlier copies, green = last. "
+                "Preview does not write any world blocks or NBT.")
+            self.apply_preview_button.setEnabled(True)
+        except Exception as exc:
+            self.clear_clone_preview()
+            QMessageBox.warning(self, "Native Clone Tool preview refused", str(exc))
+
+    def apply_clone_preview(self):
+        if not self.apply_preview_button.isEnabled():
+            return
+        self.editor.apply_clone_wireframe_preview()
+
+    def clear_clone_preview(self):
+        self.editor.clear_clone_wireframe_preview()
 
     def execute_selected(self):
         """Dispatch through the editor's existing native transaction/UI paths."""

@@ -484,8 +484,10 @@ class StreamingVoxel3DView(Voxel3DView):
             glDepthMask(GL_TRUE)
             glDisable(GL_BLEND)
             glUniform1f(opacity_loc, 1.0)
-        if self.selection:
+        if self.selection or self.clone_preview_boxes:
             vertices = self._selection_lines(target)
+            # Both selection handles and clone ghost boxes use the same
+            # read-only lines; no terrain mesh regeneration is required.
             # Parent wireframe uses 8-float vertices; new shader expects 9.
             vertices = [value for offset in range(0, len(vertices), 8)
                         for value in (*vertices[offset:offset + 6],

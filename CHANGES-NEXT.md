@@ -527,3 +527,22 @@ available and is not automatically replaced.
   plus persistent tool-dock X/Y/Z scale controls. Tests specify
   original Anvil/MCRegion NBT fidelity and refusal cases.
   Full CI/real Minecraft versions/Windows builds are deferred.
+
+## 0.3.0a48 — Interactive read-only 3D Clone Tool wireframes
+
+- Added pure bounded original-coordinate CloneTool preview plans for
+  offset, repeated, rotated/mirrored, and integer XYZ scaled copies,
+  with per-copy exact half-open world-space bounds.
+- Both basic OpenGL 3D and streamed OpenGL 3D paths now show cyan
+  earlier-copy and green last-copy target wireframes, without
+  rewriting chunks or forcing streamed chunk remeshing.
+- Qt6 Tool Palette offers Preview in 3D / Apply preview / Clear,
+  with four modes, XYZ step, orientation, scaling and repeat
+  parameters. Camera orbit/zoom remains usable before Apply.
+- Preview invalidates on selection/world/dimension/parameter changes;
+  Apply verifies the original world and selection and reuses all
+  existing native block/BE target preflight and grouped Undo/Redo.
+  Invalid native writes remain refused without changing the world.
+- Added pure geometry plus offscreen Qt source regression
+  specifications. Preview is **a wireframe, not a textured voxel
+  or modded BE ghost**. Full Qt/Mesa/real-world tests deferred.

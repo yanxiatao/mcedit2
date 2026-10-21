@@ -157,6 +157,7 @@ class MainWindow(QMainWindow):
         self.plugins.discover()
         self.slice_view = SliceView()
         self.volume_view = None  # Created on demand for environments without GL 3.3.
+        self._clone_preview = None  # (session, original Box, immutable geometry)
         self.view = self.slice_view
         self.active_brush = None
         self.active_brush_shape = None
@@ -401,6 +402,9 @@ class MainWindow(QMainWindow):
             view.picked.connect(self.sample_block)
         if hasattr(view, "selectionChanged"):
             view.selectionChanged.connect(
+                lambda: self.clear_clone_wireframe_preview()
+                if self._clone_preview is not None else None)
+            view.selectionChanged.connect(
                 lambda: self.tool_palette.refresh_selection(sync_corners=True)
                 if hasattr(self, "tool_palette") else None)
         if hasattr(view, "selectionEditRequested"):
@@ -422,12 +426,16 @@ class MainWindow(QMainWindow):
         self.select_top.setValue(value)
 
     def selection_height_changed(self, value):
+        if self._clone_preview is not None:
+            self.clear_clone_wireframe_preview()
         if self.volume_view is not None:
             self.volume_view.y_lo = self.select_bottom.value()
             self.volume_view.y_hi = self.select_top.value()
             self.volume_view.invalidate()
 
     def change_view_mode(self, index):
+        if index != 1 and self._clone_preview is not None:
+            self.clear_clone_wireframe_preview()
         if self._stroke_tx is not None:
             self.end_stroke()
         if index == 1 and self.volume_view is None:
@@ -695,6 +703,8 @@ class MainWindow(QMainWindow):
     def change_dimension(self, dimension):
         if self.world is None or not dimension or dimension == self.world.dimension:
             return
+        if self._clone_preview is not None:
+            self.clear_clone_wireframe_preview()
         previous = self.world.dimension
         if self.session is not None and self.session.dirty:
             QMessageBox.warning(
@@ -1129,6 +1139,80 @@ class MainWindow(QMainWindow):
         self.view.update()
         self.minimap_dock.canvas.update()
 
+    def clear_clone_wireframe_preview(self):
+        """Dismiss only the 3D preview; no native data is staged or edited."""
+        self._clone_preview = None
+        if self.volume_view is not None:
+            self.volume_view.set_clone_preview_boxes(())
+        if hasattr(self, "tool_palette") and hasattr(
+                self.tool_palette, "preview_info"):
+            self.tool_palette.preview_info.setText("No clone preview active.")
+            self.tool_palette.apply_preview_button.setEnabled(False)
+
+    def show_clone_wireframe_preview(self, mode, offset, repetitions,
+                                     *, orientation=None, scale=(1, 1, 1)):
+        """Compute a bounded, read-only geometry preview in the 3D viewport."""
+        if self.session is None or self.view.selection is None:
+            raise ValueError("Open an offline world and select a 3D region first")
+        from .clone_preview import plan_clone_ghost
+        original_box = self._box()
+        plan = plan_clone_ghost(
+            original_box, mode, offset, repetitions,
+            orientation=orientation, scale=scale,
+            max_blocks=self.session.max_blocks)
+        # View switching may fail without a supported OpenGL context.
+        # Never keep a half-created preview in that case.
+        if self.view_mode.currentIndex() != 1:
+            self.view_mode.setCurrentIndex(1)
+        if self.volume_view is None or self.view is not self.volume_view:
+            raise ValueError(
+                "3D Clone Tool preview requires an available OpenGL viewport")
+        self.clear_clone_wireframe_preview()
+        self._clone_preview = (self.session, original_box, plan)
+        self.volume_view.set_clone_preview_boxes(plan.boxes)
+        self.statusBar().showMessage(
+            f"Read-only 3D Clone Tool preview: {len(plan.boxes)} "
+            f"target wireframe(s), {plan.planned_cells:,} planned cells. "
+            "Orbit/zoom freely; click Apply in the Tool Palette to commit.")
+        return plan
+
+    def apply_clone_wireframe_preview(self):
+        """Apply exactly the previewed native operation, with fresh preflight."""
+        record = self._clone_preview
+        if record is None:
+            QMessageBox.information(
+                self, "Native clone preview", "Create a 3D clone preview first.")
+            return
+        session, original, plan = record
+        if (session is not self.session or self.view.selection is None or
+                self._box() != original):
+            self.clear_clone_wireframe_preview()
+            QMessageBox.warning(
+                self, "Clone preview changed",
+                "World or selection changed; calculate a new clone preview.")
+            return
+
+        def execute():
+            if plan.mode == "offset":
+                count = session.clone_box(original, plan.offset)
+            elif plan.mode == "repeat":
+                count = session.clone_box_repeated(
+                    original, plan.offset, plan.repetitions)
+            elif plan.mode == "transformed":
+                count = session.clone_box_transformed(
+                    original, plan.offset, plan.orientation, plan.repetitions)
+            elif plan.mode == "scaled":
+                count = session.clone_box_scaled(
+                    original, plan.offset, plan.scale, plan.repetitions)
+            else:
+                raise ValueError("Unsupported clone preview mode")
+            # Only remove the preview AFTER the EditSession successfully
+            # returns. The actual operation repeats all native preflight.
+            self.clear_clone_wireframe_preview()
+            return count
+
+        self._perform(execute)
+
     def _perform(self, callback):
         if self.session is None:
             self.statusBar().showMessage("Open a world first")
@@ -1236,6 +1320,8 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Cannot open world", str(exc))
             return
+        if self._clone_preview is not None:
+            self.clear_clone_wireframe_preview()
         if self._stroke_tx is not None:
             self._stroke_tx.discard()
             self._stroke_tx = None
@@ -1668,6 +1754,8 @@ class MainWindow(QMainWindow):
                 raise ValueError("Selection coordinate is outside editor bounds")
         box = Box.from_corners(tuple(first), tuple(second))
         self.session._check_size(box.volume)
+        if self._clone_preview is not None:
+            self.clear_clone_wireframe_preview()
         x1, y1, z1 = box.minimum
         x2, y2, z2 = box.maximum
         for widget in (self.slice_view, self.volume_view):

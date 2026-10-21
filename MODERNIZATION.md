@@ -1675,3 +1675,73 @@ block orientation/BE identity graphs, full original Clone Tool
 interactions and all real-world version test fixtures. No full CI,
 Minecraft reload, Qt/Mesa execution or Windows package build has
 been run for this migration-first round.
+
+## 0.3.0a48 — Read-only 3D Clone Tool target wireframe placement preview
+
+Ported the first interactive original MCEdit2 Clone Tool **3D placement
+preview** to the Python 3 / Qt6 editor. The new feature deliberately
+visualizes *bounded destination volumes* as cyan/green wireframes,
+not simulated textured voxel meshes or an assurance that placement is
+writable. Source NBT and game region files are never read or mutated by
+the preview geometry planner.
+
+- Added pure-Python `clone_preview.py` containing
+  `plan_clone_ghost` and `ghost_wireframe_vertices`. It accepts four
+  existing native Clone Tool actions: one offset copy, repeated
+  XYZ-step tiling, clockwise/counterclockwise 90° or X/Z-mirrored
+  repeat clones, and nearest-neighbour integer XYZ scaled repeat
+  clones. For each 1–128 copy it computes the exact original-world
+  *half-open* target volume, transformed footprint, maximum planned
+  writes and Java horizontal-coordinate range. It reuses the a47
+  pure integer scale planner and established strict horizontal
+  transform dimensions, without reading block data, querying
+  modded registries or generating any chunk.
+- The viewport's existing 3D GL_LINES path now renders clone
+  wireframe boxes. Earlier copies have cyan outlines; the final
+  copy is green. The classic fixed-radius OpenGL renderer merges
+  the overlay into its existing selection/gizmo line geometry.
+  The default **streamed OpenGL** renderer draws those same
+  outlines using its 9-float shader vertex layout even when no
+  ordinary selection outline is active. Camera orbit/zoom continues
+  to work; showing/hiding previews does **not** invalidate or
+  rebuild decoded chunk geometry.
+- The dockable Qt6 Tool Palette now offers a persistent
+  **3D Clone Tool placement** control with four modes, X/Y/Z
+  copy-step coordinates, existing repeat count, rotation/mirror
+  and scale factors, plus explicit **Preview in 3D**, **Apply
+  preview** and **Clear** buttons. A preview automatically
+  switches to 3D when available, reports outlined target counts,
+  planned cells and copy footprints, and never stages world edits.
+  Changing an input, the current selected region, world, dimension
+  or view mode invalidates the preview so obsolete coordinates
+  are not silently used.
+- Applying a preview rechecks the **same world session and exact
+  original selection**, then delegates to the corresponding
+  existing native `EditSession.clone_box`,
+  `clone_box_repeated`, `clone_box_transformed`, or
+  `clone_box_scaled`. These native paths recompute source
+  states and run full original Block Entity, target section,
+  original numeric-ID/metadata and orientation preflight
+  before staging. A rejected native operation does not clear
+  the preview or present the write as successful; a successful
+  application clears all preview boxes and creates the existing
+  single grouped Undo/Redo operation. The geometry-only view
+  never claims to have checked collisions, BE links or modded
+  orientation properties.
+- Added `tests/test_clone_preview.py` pure geometry source
+  regressions for each mode, scaled and asymmetric rotated
+  target extents, negative offsets, limits, line vertex format,
+  malformed boxes and no file operations. Added
+  `tests/test_clone_preview_qt.py` offscreen controller/source
+  tests using a synthetic 3D view, specifying **no writes
+  before Apply**, preservation of grouped Undo, parameter and
+  selection invalidation, BE refusal without committing
+  the preview, and scaled mode geometry/application matching.
+
+**Still not ported:** transparent textured per-block ghost meshes,
+3D mouse-drag destination handles and automatic placement snapping,
+arbitrary/fractional scale, multi-block BE/owner/UUID reference graph
+transfer and complete original MCEdit2 Clone Tool UI parity.
+The preview is deliberately *read-only* until Apply. All new tests
+are committed as source specifications but have not been executed
+in a complete real-world/Qt/Mesa/CI/Windows matrix.
