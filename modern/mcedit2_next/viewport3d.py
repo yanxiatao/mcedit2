@@ -18,10 +18,12 @@ from .viewport3d_math import Camera, is_air, textured_mesh_blocks, trace_voxels
 from .textureatlas import make_atlas
 from .resourcepack import ResourceLibrary
 from .core import Box
-from .clone_preview import ghost_wireframe_vertices
+from .clone_preview import (
+    ghost_wireframe_vertices, first_clone_handle_center,
+)
 from .selection_gizmo import (
     axis_ray_position, horizontal_plane_point, move_selection, ray_handle,
-    resize_selection, selection_handles,
+    resize_selection, selection_handles, SelectionHandle,
 )
 
 
@@ -70,6 +72,9 @@ class Voxel3DView(QOpenGLWidget):
     selectedYEnd = Signal(int)
     selectionChanged = Signal()
     selectionEditRequested = Signal(object, object)
+    clonePreviewDragStarted = Signal()
+    clonePreviewDragRequested = Signal(object)
+    clonePreviewDragFinished = Signal()
     renderError = Signal(str)
 
     def __init__(self, parent=None):
@@ -107,6 +112,7 @@ class Voxel3DView(QOpenGLWidget):
         self._gl_error = None
         self._skipped = 0
         self.clone_preview_boxes = ()  # Read-only original coordinate boxes.
+        self._clone_drag = None  # (picked ray/plane start, vertical).
 
     @property
     def y(self):
@@ -244,6 +250,51 @@ class Voxel3DView(QOpenGLWidget):
                             *color, .5 / 32, .5 / 32))
         result.extend(ghost)
         return result
+
+    def _begin_clone_preview_drag(self, position, modifiers):
+        """Ctrl+Alt+left drag the first CloneTool wireframe center handle."""
+        if not self.clone_preview_boxes:
+            return False
+        if not (modifiers & Qt.KeyboardModifier.ControlModifier and
+                modifiers & Qt.KeyboardModifier.AltModifier):
+            return False
+        origin, direction = self._gizmo_ray(position)
+        center = first_clone_handle_center(self.clone_preview_boxes)
+        handle = ray_handle(
+            origin, direction, (SelectionHandle("move", center),),
+            threshold=1.0)
+        if handle is None:
+            return False
+        vertical = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+        if vertical:
+            start = axis_ray_position(origin, direction, center, 1)
+        else:
+            start = horizontal_plane_point(
+                origin, direction, center[1])
+        if start is None:
+            return False
+        self._clone_drag = (start, vertical, center)
+        self.clonePreviewDragStarted.emit()
+        return True
+
+    def _update_clone_preview_drag(self, position):
+        if self._clone_drag is None:
+            return
+        start, vertical, center = self._clone_drag
+        origin, direction = self._gizmo_ray(position)
+        if vertical:
+            current = axis_ray_position(origin, direction, center, 1)
+            if current is None:
+                return
+            delta = (0, round(current - start), 0)
+        else:
+            current = horizontal_plane_point(
+                origin, direction, center[1])
+            if current is None:
+                return
+            delta = (round(current[0] - start[0]), 0,
+                     round(current[2] - start[2]))
+        self.clonePreviewDragRequested.emit(delta)
 
     def _gizmo_ray(self, position):
         return self.camera.ray(position.x(), position.y(),
@@ -403,6 +454,15 @@ class Voxel3DView(QOpenGLWidget):
         self._last_mouse = event.position()
         self._dragged = False
         if event.button() == Qt.MouseButton.LeftButton:
+            if self._begin_clone_preview_drag(
+                    event.position(), event.modifiers()):
+                return
+            # A failed Ctrl+Alt clone-handle pick should never paint or
+            # replace the original 3D selection by accident.
+            if (self.clone_preview_boxes and
+                    event.modifiers() & Qt.KeyboardModifier.ControlModifier
+                    and event.modifiers() & Qt.KeyboardModifier.AltModifier):
+                return
             if self.mode == "Select" and (
                     event.modifiers() & Qt.KeyboardModifier.AltModifier):
                 # Alt+left mouse handles use only the view ray, so they also
@@ -429,6 +489,10 @@ class Voxel3DView(QOpenGLWidget):
                 self.clicked.emit(x, y, z)
 
     def mouseMoveEvent(self, event):
+        if self._clone_drag is not None:
+            if event.buttons() & Qt.MouseButton.LeftButton:
+                self._update_clone_preview_drag(event.position())
+            return
         if self._gizmo_drag is not None:
             if event.buttons() & Qt.MouseButton.LeftButton:
                 self._update_gizmo(event.position())
@@ -462,6 +526,12 @@ class Voxel3DView(QOpenGLWidget):
                 self.clicked.emit(x, y, z)
 
     def mouseReleaseEvent(self, event):
+        if self._clone_drag is not None:
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._clone_drag = None
+                self._last_mouse = None
+                self.clonePreviewDragFinished.emit()
+            return
         if self._gizmo_drag is not None:
             if event.button() == Qt.MouseButton.LeftButton:
                 self._gizmo_drag = None

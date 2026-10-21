@@ -202,11 +202,19 @@ class ToolPaletteDock(QDockWidget):
             field.setValue(16 if axis == "x" else 0)
             self.preview_offset[axis] = field
             preview_form.addRow("Step " + axis.upper(), field)
+        self.preview_snap = QComboBox(preview_group)
+        self.preview_snap.setObjectName("tool_palette_clone_preview_snap")
+        for grid in (1, 2, 4, 8, 16):
+            self.preview_snap.addItem(f"{grid}-block absolute world grid", grid)
+        preview_form.addRow("Drag snap", self.preview_snap)
         preview_note = QLabel(
-            "Preview renders read-only target volume WIREFRAMES in 3D, not "
-            "individual voxel models or a promise that targets are writable. "
-            "Rotate/orientation, XYZ scaling and repeat count use the "
-            "controls above. You may orbit and zoom before applying.")
+            "Read-only target volume wireframes (not textured voxel ghosts). "
+            "Ctrl+Alt+drag the WHITE cross at the first preview box center "
+            "to reposition horizontally; Ctrl+Alt+Shift+drag for Y. "
+            "Snap aligns the first box minimum to the absolute world grid. "
+            "For Repeat/Rotate/Scale, subsequent copies follow n × XYZ step, "
+            "not a rigid translation of the entire group. "
+            "Orbit/zoom remains available; Apply revalidates native data.")
         preview_note.setWordWrap(True)
         preview_form.addRow(preview_note)
         self.preview_info = QLabel("No clone preview active.")
@@ -232,7 +240,7 @@ class ToolPaletteDock(QDockWidget):
         # A geometry preview is a snapshot, not a live placement contract.
         # Parameter edits discard it; the next Preview recomputes all bounds.
         for widget in (
-                self.preview_mode, self.clone_orientation,
+                self.preview_mode, self.clone_orientation, self.preview_snap,
                 self.repeat_count, *self.scale_factors.values(),
                 *self.preview_offset.values()):
             if isinstance(widget, QComboBox):
@@ -427,6 +435,15 @@ class ToolPaletteDock(QDockWidget):
         scale = tuple(self.scale_factors[axis].value() for axis in ("x", "y", "z"))
         return mode, offset, count, orientation, scale
 
+    def set_clone_preview_summary(self, plan):
+        self.preview_info.setText(
+            f"{plan.repetitions} outlined target volumes, "
+            f"{plan.footprint} per copy, "
+            f"{plan.planned_cells:,} planned cells. "
+            f"First copy: {plan.boxes[0][0]} → {plan.boxes[0][1]}. "
+            f"Step: {plan.offset}. Cyan = earlier copies, green = last. "
+            "Wireframes are read-only; Apply performs native preflight.")
+
     def preview_clone(self):
         try:
             mode, offset, copies, orientation, scale = (
@@ -435,12 +452,7 @@ class ToolPaletteDock(QDockWidget):
                 mode, offset, copies, orientation=orientation, scale=scale)
             if plan is None:
                 return
-            self.preview_info.setText(
-                f"{plan.repetitions} outlined target volumes, "
-                f"{plan.footprint} per copy, "
-                f"{plan.planned_cells:,} planned cells. "
-                "Cyan = earlier copies, green = last. "
-                "Preview does not write any world blocks or NBT.")
+            self.set_clone_preview_summary(plan)
             self.apply_preview_button.setEnabled(True)
         except Exception as exc:
             self.clear_clone_preview()

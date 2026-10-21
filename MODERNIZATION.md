@@ -1745,3 +1745,64 @@ transfer and complete original MCEdit2 Clone Tool UI parity.
 The preview is deliberately *read-only* until Apply. All new tests
 are committed as source specifications but have not been executed
 in a complete real-world/Qt/Mesa/CI/Windows matrix.
+
+## 0.3.0a49 — Mouse-draggable 3D Clone Tool placement and grid snapping
+
+Extended the a48 read-only cyan/green Clone Tool target-volume preview
+with **interactive mouse-ray placement** in both the base and streamed
+OpenGL views. Preview movement changes only the planned original XYZ
+clone step; it never edits source chunks, player NBT, Block Entities
+or the original disk region file until the user explicitly presses
+Apply and full native preflight succeeds.
+
+- The first wireframe now includes a visible white three-axis drag
+  cross. Hold **Ctrl+Alt+left mouse** on that center to drag the
+  preview horizontally in the original world X/Z plane, or use
+  **Ctrl+Alt+Shift+left mouse** for a vertical Y-axis drag.
+  The viewport reuses its existing camera-ray/world-plane and
+  axis-to-ray math and rejects misses rather than modifying
+  the current selection or painting a block. Each gesture
+  captures its original ray origin and handle center to avoid
+  feedback or drift as preview coordinates move under the cursor.
+- Pure `snapped_clone_drag_offset` validates integer XYZ
+  displacements and snaps the *first* destination minimum to
+  an **absolute Java world-coordinate grid** of 1, 2, 4, 8 or
+  16 blocks, including negative coordinates. Horizontal dragging
+  preserves Y; Shift-vertical dragging preserves X/Z. The
+  geometry planner rejects out-of-bounds/over-budget targets
+  without changing the previous valid preview.
+- The Qt6 Tool Palette adds a persistent grid-size selector and
+  documents the input gestures. Dragging updates the exact
+  preview XYZ step spin controls with signal blocking, so those
+  controls cannot accidentally dismiss the preview midway
+  through an in-progress gesture. Both OpenGL paths redraw the
+  shared wireframe without rebuilding native section meshes.
+  On unsuccessful plans or unrepresentable XYZ step settings,
+  no partial UI/preview mutation is committed.
+- Existing repeated clones use `source.min + n × step`.
+  Accordingly, **dragging the first preview changes the repeat
+  step**: later copies relocate according to their respective
+  multiples, rather than translating the full group rigidly.
+  This behavior is stated in the UI. A later migration may
+  separate group origin from repeat stride, alongside textured
+  per-block ghost rendering.
+- Apply continues to verify exact original source selection and
+  world session and to execute the appropriate existing
+  block-only native Clone Tool operation with current world
+  Block Entity and target section preflight. Save/region-backup
+  and single-step Undo/Redo behavior are unchanged.
+- `tests/test_clone_drag.py` adds source regressions for
+  absolute/negative-coordinate snapping, repeat geometry,
+  malformed/Boolean factors, fixed GPU 8-float wireframe
+  stride and white drag control, offscreen camera-ray handle
+  picking, Qt controller coordinate synchronization,
+  no world writes until Apply, vertical dragging,
+  selection invalidation, and out-of-world movement refusal.
+
+**Still missing:** actual semitransparent textured/opaque per-block
+ghost models, physical drag/drop collision checking, rigid-group
+placement origin separate from clone repeat step, arbitrary rotations,
+fractional/downscaling, full modded BE/entity identity graph copying
+and full original Clone Tool UI parity. The new test cases were
+committed as source without executing the full GL/Mesa/Qt,
+real-world Minecraft-version, CI or Windows package test matrix.

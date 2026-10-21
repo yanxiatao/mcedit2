@@ -546,3 +546,18 @@ available and is not automatically replaced.
 - Added pure geometry plus offscreen Qt source regression
   specifications. Preview is **a wireframe, not a textured voxel
   or modded BE ghost**. Full Qt/Mesa/real-world tests deferred.
+
+## 0.3.0a49 — Drag-and-snap Clone Tool 3D preview
+
+- Ctrl+Alt+left mouse drags the first clone preview wireframe center
+  in world X/Z; Ctrl+Alt+Shift+left mouse drags Y. Preview only,
+  never block/BE edits before explicit Apply.
+- Added visible white center control and absolute original-world
+  1/2/4/8/16-block grid snapping, including negative coordinates.
+  Qt6 XYZ controls and both original GL renderers update with the
+  planned geometry without remeshing chunks or losing Undo history.
+- Repeat and transformed/scaled modes follow existing n×XYZ-step
+  semantics. An invalid plan retains the previous preview.
+  Apply redoes all native section, BE, ID and orientation preflight.
+- New pure-math, camera-ray and offscreen Qt controller source
+  regressions added; complete Mesa/game-world tests remain deferred.

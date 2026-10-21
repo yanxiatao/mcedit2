@@ -91,6 +91,45 @@ def plan_clone_ghost(box, mode: str, offset, repetitions: int,
         planned, tuple(boxes))
 
 
+def first_clone_handle_center(boxes):
+    """Center of the first preview volume; the drag target in OpenGL."""
+    if not boxes:
+        raise ValueError("Clone drag needs a preview volume")
+    lo, hi = boxes[0]
+    return tuple((lo[i] + hi[i]) / 2.0 for i in range(3))
+
+
+def snapped_clone_drag_offset(source_box, starting_offset, delta,
+                              grid: int, *, vertical: bool = False):
+    """Snap the FIRST destination's world coordinate to the chosen grid.
+
+    For repeated clones the offset is also the per-stamp stride:
+    moving the first preview copy changes subsequent offsets by
+    n*step, matching the existing actual native clone operation.
+    Horizontal drag changes X/Z only, Shift-vertical drag Y only.
+    No world data or native chunk contents are consulted.
+    """
+    if type(grid) is not int or grid not in (1, 2, 4, 8, 16):
+        raise ValueError("Clone placement snap grid must be 1/2/4/8/16")
+    if (type(vertical) is not bool or
+            not isinstance(starting_offset, (tuple, list)) or
+            len(starting_offset) != 3 or
+            any(type(value) is not int for value in starting_offset) or
+            not isinstance(delta, (tuple, list)) or len(delta) != 3 or
+            any(type(value) is not int for value in delta)):
+        raise ValueError("Invalid native clone drag coordinate")
+    shifted = list(starting_offset)
+    axes = (1,) if vertical else (0, 2)
+    for axis in axes:
+        candidate_world = (
+            source_box.minimum[axis] + starting_offset[axis] + delta[axis])
+        # Round to an absolute world grid, not just multiples of the
+        # drag displacement; negative coordinates are also supported.
+        world_snap = round(candidate_world / grid) * grid
+        shifted[axis] = world_snap - source_box.minimum[axis]
+    return tuple(shifted)
+
+
 def ghost_wireframe_vertices(boxes, target):
     """Return bounded 8-float vertex records for the existing GL_LINES path.
 
@@ -123,4 +162,19 @@ def ghost_wireframe_vertices(boxes, target):
                     corner[2] - target[2],
                     *tint,
                     .5 / 32, .5 / 32))
+    # Bright white XYZ cross shows exactly where Ctrl+Alt+drag begins.
+    # It is included in the same native GL_LINES VBO and does not
+    # occlude or modify any actual world block.
+    if boxes:
+        center = first_clone_handle_center(boxes)
+        for axis in range(3):
+            lower, upper = list(center), list(center)
+            lower[axis] -= 0.55
+            upper[axis] += 0.55
+            for point in (lower, upper):
+                result.extend((
+                    point[0] - target[0],
+                    point[1] - target[1],
+                    point[2] - target[2],
+                    .98, .98, 1., .5 / 32, .5 / 32))
     return result

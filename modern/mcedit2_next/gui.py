@@ -158,6 +158,7 @@ class MainWindow(QMainWindow):
         self.slice_view = SliceView()
         self.volume_view = None  # Created on demand for environments without GL 3.3.
         self._clone_preview = None  # (session, original Box, immutable geometry)
+        self._clone_drag_start_offset = None  # Frozen first-box offset per gesture.
         self.view = self.slice_view
         self.active_brush = None
         self.active_brush_shape = None
@@ -409,6 +410,12 @@ class MainWindow(QMainWindow):
                 if hasattr(self, "tool_palette") else None)
         if hasattr(view, "selectionEditRequested"):
             view.selectionEditRequested.connect(self.request_selection_gizmo)
+        if hasattr(view, "clonePreviewDragStarted"):
+            view.clonePreviewDragStarted.connect(self.begin_clone_preview_drag)
+        if hasattr(view, "clonePreviewDragRequested"):
+            view.clonePreviewDragRequested.connect(self.update_clone_preview_drag)
+        if hasattr(view, "clonePreviewDragFinished"):
+            view.clonePreviewDragFinished.connect(self.finish_clone_preview_drag)
         view.strokeStarted.connect(self.begin_stroke)
         view.strokeFinished.connect(self.end_stroke)
         if hasattr(view, "selectedY"):
@@ -1139,9 +1146,73 @@ class MainWindow(QMainWindow):
         self.view.update()
         self.minimap_dock.canvas.update()
 
+    def begin_clone_preview_drag(self):
+        """Capture initial XYZ step; do not write blocks while dragging."""
+        self._clone_drag_start_offset = (
+            self._clone_preview[2].offset
+            if self._clone_preview is not None else None)
+
+    def update_clone_preview_drag(self, displacement):
+        """Keep wireframe, spin-box step, and eventual Apply in lockstep."""
+        record = self._clone_preview
+        initial = self._clone_drag_start_offset
+        if record is None or initial is None:
+            return
+        session, source, old = record
+        if (session is not self.session or self.view.selection is None or
+                self._box() != source):
+            self.clear_clone_wireframe_preview()
+            return
+        from .clone_preview import (
+            plan_clone_ghost, snapped_clone_drag_offset,
+        )
+        palette = self.tool_palette
+        vertical = bool(displacement[1]) and not (
+            displacement[0] or displacement[2])
+        # Viewport passes horizontal displacements with Y=0, and a
+        # Shift-drag displacement with only Y. A zero displacement uses
+        # the original offset without resnapping to avoid a snap jump.
+        if not any(displacement):
+            return
+        try:
+            step = snapped_clone_drag_offset(
+                source, initial, displacement,
+                palette.preview_snap.currentData(), vertical=vertical)
+            new = plan_clone_ghost(
+                source, old.mode, step, old.repetitions,
+                orientation=old.orientation, scale=old.scale,
+                max_blocks=self.session.max_blocks)
+            if old.offset == new.offset:
+                return
+            # Do not trigger the palette's invalidate-preview signal
+            # while transferring a world coordinate from the 3D handle.
+            for axis, value in zip(("x", "y", "z"), new.offset):
+                control = palette.preview_offset[axis]
+                if not control.minimum() <= value <= control.maximum():
+                    raise ValueError(
+                        "Dragged XYZ step cannot be represented by the "
+                        "original Clone Tool coordinate controls")
+            for axis, value in zip(("x", "y", "z"), new.offset):
+                control = palette.preview_offset[axis]
+                previous = control.blockSignals(True)
+                try:
+                    control.setValue(value)
+                finally:
+                    control.blockSignals(previous)
+            self._clone_preview = (session, source, new)
+            self.volume_view.set_clone_preview_boxes(new.boxes)
+            palette.set_clone_preview_summary(new)
+            palette.apply_preview_button.setEnabled(True)
+        except (ValueError, OverflowError) as exc:
+            self.statusBar().showMessage("Clone drag refused: " + str(exc))
+
+    def finish_clone_preview_drag(self):
+        self._clone_drag_start_offset = None
+
     def clear_clone_wireframe_preview(self):
         """Dismiss only the 3D preview; no native data is staged or edited."""
         self._clone_preview = None
+        self._clone_drag_start_offset = None
         if self.volume_view is not None:
             self.volume_view.set_clone_preview_boxes(())
         if hasattr(self, "tool_palette") and hasattr(
