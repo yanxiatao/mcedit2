@@ -10,7 +10,7 @@ from .nbt_inspector import NBTInspectorDialog
 class EntityListDialog(QDialog):
     def __init__(self, entries, chunk, parent=None, on_move=None,
                  on_rotate=None, on_move_many=None, on_edit_scalar=None,
-                 on_delete=None):
+                 on_delete=None, on_clone=None):
         super().__init__(parent)
         self.entries = tuple(entries)
         self.on_move = on_move
@@ -18,6 +18,7 @@ class EntityListDialog(QDialog):
         self.on_move_many = on_move_many
         self.on_edit_scalar = on_edit_scalar
         self.on_delete = on_delete
+        self.on_clone = on_clone
         self.chunk = chunk
         self.setWindowTitle(f"Entities in chunk {chunk} — original NBT")
         self.resize(650, 430)
@@ -43,6 +44,12 @@ class EntityListDialog(QDialog):
             self.batch_button.setObjectName("entity_batch_move")
             self.batch_button.clicked.connect(self.edit_multiple_positions)
             layout.addWidget(self.batch_button)
+        if self.on_clone is not None:
+            self.clone_button = QPushButton(
+                "Clone selected dropped item / XP orb…", self)
+            self.clone_button.setObjectName("entity_clone_original")
+            self.clone_button.clicked.connect(self.clone_selected_entity)
+            layout.addWidget(self.clone_button)
         if self.on_delete is not None:
             self.delete_button = QPushButton(
                 "Delete selected dropped items / XP orbs…", self)
@@ -73,8 +80,9 @@ class EntityListDialog(QDialog):
             rotation = ("" if record.rotation is None else
                         " / yaw,pitch " +
                         ", ".join(f"{angle:.1f}" for angle in record.rotation))
+            staged_label = " [new, unsaved]" if record.storage_index < 0 else ""
             self.items.addItem(
-                f"{record.identifier}{pos}{rotation} [{record.source}]")
+                f"{record.identifier}{pos}{rotation} [{record.source}]{staged_label}")
         if 0 <= selected < len(self.entries):
             self.items.setCurrentRow(selected)
 
@@ -215,6 +223,72 @@ class EntityListDialog(QDialog):
         except Exception as exc:
             QMessageBox.warning(self, "Entity rotation refused", str(exc))
 
+    def clone_selected_entity(self):
+        if self.on_clone is None:
+            return
+        row = self.items.currentRow()
+        if row < 0 or row >= len(self.entries):
+            QMessageBox.information(
+                self, "Native entity clone", "Select an original entity first.")
+            return
+        record = self.entries[row]
+        from .entity_clone import DELETABLE_ENTITY_IDS
+        if (record.storage_index < 0 or
+                record.identifier not in DELETABLE_ENTITY_IDS or
+                record.position is None):
+            QMessageBox.warning(
+                self, "Native entity clone refused",
+                "Only an existing original vanilla dropped item or XP orb "
+                "with a valid Pos/UUID can be duplicated. Unsaved clones, "
+                "modded entities and passengers are not eligible.")
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Clone original dropped item / XP orb")
+        form = QFormLayout(dialog)
+        axes = []
+        for label, value in zip(("Clone X", "Clone Y", "Clone Z"),
+                                record.position):
+            field = QDoubleSpinBox(dialog)
+            field.setRange(-29_999_999., 29_999_999.)
+            field.setDecimals(4)
+            field.setSingleStep(0.5)
+            field.setValue(value)
+            form.addRow(label, field)
+            axes.append(field)
+        form.addRow(QLabel(
+            "Original NBT is copied without normalization. A NEW UUIDv4 "
+            "is written in the same original field representation. "
+            "The target must stay inside the SAME source chunk. "
+            "The new entity remains uneditable until you save/reopen."))
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel, parent=dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        answer = QMessageBox.question(
+            self, "Stage original Java entity clone",
+            "Create a duplicate of this original standalone entity at "
+            "the chosen coordinates? This immediately stages a new UUID "
+            "and NBT Compound, and supports Undo/Redo before Save. "
+            "Saving creates a full region backup and invalidates old "
+            "entity-list index history. Use only on offline world copies.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            updated = self.on_clone(
+                record.source, record.storage_index,
+                tuple(field.value() for field in axes))
+            if updated is not None:
+                self.entries = tuple(updated)
+                self._refresh_items()
+        except Exception as exc:
+            QMessageBox.warning(self, "Native entity clone refused", str(exc))
+
     def delete_selected_entities(self):
         if self.on_delete is None:
             return
@@ -227,6 +301,13 @@ class EntityListDialog(QDialog):
         indexes = sorted(self.items.row(widget) for widget in selected)
         records = [self.entries[index] for index in indexes]
         from .entity_delete import DELETABLE_ENTITY_IDS
+        if any(record.storage_index < 0 for record in records):
+            QMessageBox.warning(
+                self, "Original entity removal refused",
+                "A newly staged clone does not have an original List index. "
+                "Undo its creation before saving, or save and reopen the "
+                "world before selecting it for normal entity editing.")
+            return
         if any(record.identifier not in DELETABLE_ENTITY_IDS
                for record in records):
             QMessageBox.warning(

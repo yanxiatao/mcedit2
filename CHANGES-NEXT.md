@@ -430,3 +430,22 @@ available and is not automatically replaced.
   region backup… to recover a committed delete.
 - Added source-only preservation/refusal/backup/reopen specifications.
   No full CI, game reload or Windows build performed.
+
+## 0.3.0a42 — Guarded native dropped-item / XP-orb clone
+
+- Original Java dropped-item and experience-orb duplication is now
+  available within the **same** original chunk. Original UUID
+  IntArray[4] or UUIDMost/UUIDLeast Longs are rewritten with fresh
+  UUIDv4 bytes; original item/modded NBT tags are copied losslessly.
+  Unknown UUID/linkage schemas, modded/linked entity IDs and
+  cross-chunk targets remain refused.
+- New Qt6 **Clone selected dropped item / XP orb…** action previews
+  the staged new entity; clone entries cannot themselves be edited
+  or duplicated until a successful native save.
+- Native world and EditSession use UUID-keyed pre-save staging and
+  one-step Undo/Redo. The saved region List is appended with only
+  validated original Compound payloads and a full original region
+  backup; structural history is cleared on successful Save.
+- Added source regressions for modern and legacy identities,
+  UUID uniqueness, original opaque ItemStack round-trip, native
+  region save and backup/reopen; actual full tests deferred.

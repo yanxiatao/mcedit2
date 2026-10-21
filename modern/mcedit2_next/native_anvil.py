@@ -20,7 +20,11 @@ import zlib
 
 from . import nbtwire as nbt
 from . import palette, legacy_anvil, mcregion
-from .entity_index import read_entities
+from .entity_index import read_entities, EntityRecord
+from .entity_clone import (
+    clone_original_entity, original_entity_uuid, validate_clone_source,
+    patch_entity_additions,
+)
 from .entity_delete import validate_deletable_entity, patch_entity_deletions
 from .entity_edit import (entity_at, entity_position, entity_rotation,
                           relocated_simple_entity, rotated_simple_entity,
@@ -218,6 +222,8 @@ class NativeAnvilWorld:
         self._entity_edits: dict[tuple[str, int, int, int], bytes] = {}
         # Original list-member indices, never shifted by staged deletions.
         self._entity_deletions: set[tuple[str, int, int, int]] = set()
+        # Pending new members are keyed by fresh UUID, never by old index.
+        self._entity_additions: dict[tuple[str, int, int, str], bytes] = {}
         # Chunk-scoped opt-ins. Never overwrite native heightmaps silently.
         self._surface_approvals = {}
         level_bytes = (self.path / "level.dat").read_bytes()
@@ -573,6 +579,18 @@ class NativeAnvilWorld:
             except RegionError as exc:
                 if "absent" not in str(exc):
                     raise
+        for source in ("chunk", "entities"):
+            for (src, x, z, token), payload in sorted(self._entity_additions.items()):
+                if (src, x, z) != (source, cx, cz):
+                    continue
+                info = nbt.parse(nbt.make_tag(10, "", payload))
+                rotation = info.child("Rotation")
+                angles = None
+                if rotation is not None:
+                    angles = entity_rotation(payload)
+                records.append(EntityRecord(
+                    info.require("id", 8).value, entity_position(payload),
+                    payload, source, -1, angles))
         return tuple(records)
 
     def _assert_entity_present(self, source: str, cx: int, cz: int,
@@ -605,6 +623,55 @@ class NativeAnvilWorld:
             if key not in self._entity_deletions:
                 raise UnsafeFormat("Entity is not staged for deletion")
             self._entity_deletions.remove(key)
+
+    def prepare_entity_clone(self, source: str, cx: int, cz: int,
+                             index: int, position):
+        """Build a standalone original NBT clone without staging it."""
+        if source not in ("chunk", "entities") or (
+                source == "entities" and self.is_mcregion):
+            raise UnsafeFormat("Original entity storage source not supported")
+        key = (source, cx, cz, index)
+        self._assert_entity_present(*key)
+        if type(index) is not int or index < 0:
+            raise UnsafeFormat("Cannot clone an unsaved/new entity")
+        if key in self._entity_edits:
+            raise UnsafeFormat(
+                "Save or undo edits on the source entity before copying")
+        original = entity_at(self._entity_chunk(source, cx, cz), index)
+        validate_clone_source(original, cx, cz)
+        candidate_uuid = uuid.uuid4()
+        clone = clone_original_entity(
+            original, position, cx, cz, candidate_uuid.bytes)
+        if candidate_uuid.bytes == original_entity_uuid(original):
+            raise UnsafeFormat("Generated UUID repeats the source entity identity")
+        return candidate_uuid.hex, clone
+
+    def set_entity_added(self, source: str, cx: int, cz: int,
+                         token: str, payload: bytes, added: bool) -> None:
+        """Stage/undo exact cloned bytes; redo retains the same new UUID."""
+        if (source not in ("chunk", "entities") or
+                (source == "entities" and self.is_mcregion) or
+                type(cx) is not int or type(cz) is not int or
+                type(token) is not str or len(token) != 32 or
+                type(added) is not bool):
+            raise UnsafeFormat("Invalid native entity addition identity")
+        if not isinstance(payload, bytes):
+            raise UnsafeFormat("Original cloned entity payload required")
+        from .entity_clone import MAX_ADDITIONS
+        if len(self._entity_additions) >= MAX_ADDITIONS and added:
+            raise UnsafeFormat("Too many staged original entity additions")
+        check = uuid.UUID(bytes=validate_clone_source(payload, cx, cz))
+        if check.version != 4 or check.hex != token:
+            raise UnsafeFormat("Staged cloned entity UUID/token mismatch")
+        key = (source, cx, cz, token)
+        if added:
+            if key in self._entity_additions:
+                raise UnsafeFormat("New original entity already staged")
+            self._entity_additions[key] = payload
+        else:
+            if self._entity_additions.get(key) != payload:
+                raise UnsafeFormat("Staged clone cannot be undone safely")
+            del self._entity_additions[key]
 
     def get_entity_position(self, source: str, cx: int, cz: int, index: int):
         """Return an entity's original numeric position without any rewriting."""
@@ -797,7 +864,8 @@ class NativeAnvilWorld:
 
     def save(self) -> None:
         if (not self._edits and not self._be_edits
-                and not self._entity_edits and not self._entity_deletions):
+                and not self._entity_edits and not self._entity_deletions
+                and not self._entity_additions):
             self._surface_approvals.clear()
             return
         with self._exclusive_session_lock():
@@ -805,7 +873,8 @@ class NativeAnvilWorld:
 
     def _save_with_lock(self) -> None:
         if (not self._edits and not self._be_edits
-                and not self._entity_edits and not self._entity_deletions):
+                and not self._entity_edits and not self._entity_deletions
+                and not self._entity_additions):
             return
         if self._lock_bytes() != self._session_lock:
             raise RegionError("Minecraft session.lock changed; refuse concurrent world editing")
@@ -851,6 +920,17 @@ class NativeAnvilWorld:
             deletion_by_chunk[(source, cx, cz)].add(index)
             if (source, cx, cz, index) in self._entity_edits:
                 raise UnsafeFormat("A deleted entity also has staged NBT changes")
+
+        additions_by_chunk = defaultdict(list)
+        for (source, cx, cz, token), payload in sorted(
+                self._entity_additions.items()):
+            if (source not in ("chunk", "entities") or
+                    (source == "entities" and self.is_mcregion)):
+                raise UnsafeFormat("Invalid original entity clone storage")
+            filename = (self._region_path(cx, cz) if source == "chunk"
+                        else self._entity_path(cx, cz))
+            edits_by_region[filename].setdefault((cx, cz), {})
+            additions_by_chunk[(source, cx, cz)].append(payload)
 
         # Prepare and validate every chunk before writing anything to disk.
         prepared: dict[Path, bytes] = {}
@@ -903,6 +983,9 @@ class NativeAnvilWorld:
                     expected_chunk=(cx, cz))
                 patched = patch_entity_deletions(
                     patched, deletion_by_chunk.get((source, cx, cz), ()),
+                    cx, cz)
+                patched = patch_entity_additions(
+                    patched, additions_by_chunk.get((source, cx, cz), ()),
                     cx, cz)
                 if source == "chunk":
                     # All other native heightmaps and lighting must be
@@ -965,6 +1048,7 @@ class NativeAnvilWorld:
         self._be_edits.clear()
         self._entity_edits.clear()
         self._entity_deletions.clear()
+        self._entity_additions.clear()
         self._surface_approvals.clear()
         self._chunk.cache_clear()
         self._section.cache_clear()
@@ -994,7 +1078,8 @@ class NativeAnvilWorld:
         rollback on normal I/O errors, but are not crash-atomic.
         """
         if (self._edits or self._be_edits or self._entity_edits
-                or self._entity_deletions or self._surface_approvals):
+                or self._entity_deletions or self._entity_additions
+                or self._surface_approvals):
             raise RegionError(
                 "Save or discard pending edits and WORLD_SURFACE approvals before restoring")
         backup_root = (self.path / ".mcedit2-backups").resolve()
@@ -1064,6 +1149,7 @@ class NativeAnvilWorld:
         self._be_edits.clear()
         self._entity_edits.clear()
         self._entity_deletions.clear()
+        self._entity_additions.clear()
         self._surface_approvals.clear()
         self._chunk.cache_clear()
         self._section.cache_clear()

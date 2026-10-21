@@ -16,7 +16,7 @@ still exist. This is an engineering checklist rather than a release promise.
 | Java Beta 1.3–1.1 MCRegion (.mcr) | Native XZY 128-height chunks, ID/metadata editing, backup and reopening | Old-style lighting/heightmap recalculation, real-world game fixtures | 
 | Bedrock / Pocket Edition | No new LevelDB backend | Entire Bedrock adapter; will edit native LevelDB formats, not migrate worlds |
 | BE NBT | Native NBT tree viewer, guarded scalar editing (types 1–6, 8) across modern/legacy Anvil and MCRegion, experimental clipboard | Array resizing/structural compound edit, mod-specific links/identity, safe BE moves |
-| Entities / players | Original NBT inspector, whitelisted scalar/Pos/Rotation edits, guarded batch translation and native playerdata ItemStack edits; opt-in byte-preserving native dropped-item/XP-orb deletion with pre-save Undo/Redo and region backups | General entity creation/deletion, full mob/vehicle/linked graph removal, cross-chunk relocation, modded entity schemas and item registry are not yet ported |
+| Entities / players | Original NBT inspector, guarded scalar/Pos/Rotation, batch translate and player ItemStack tools; native same-chunk dropped-item/XP-orb deletion and UUID-fresh duplication with pre-save Undo/Redo and full region backups | Arbitrary registered entity creation, other mobs/vehicles, linked graph edits, cross-chunk relocation, modded entity schemas and item registries remain unported |
 | Original Java filled maps | Qt6 native map_N.dat inspector, staging pixel paint/rectangle canvas, exact colors-array byte patches, whitelisted map metadata scalar edits, original gzip backup/restore | Full modern 208+ palette preview, modded map palettes, decorations/icons, world-side rendering fixtures, arbitrarily resizable map NBT and Bedrock maps |
 | Vanilla .nbt structures | Block-only import/export | Entity/BE-aware structure transactions |
 | Sponge v2/v3 .schem | Block-only import/export; strict nested Sponge v3 codec | BE/entity/biome payloads, rich metadata transfer and real-world fixtures |
@@ -1325,3 +1325,63 @@ full modded identity/link schemas; cross-chunk and cross-region
 entity relocation. Original-world fixtures/CI/Qt/Mesa tests and
 Windows packaging are still deferred per migration-first priorities.
 Only the existing Draft PR #1 on `python3-modern-editor` was changed.
+
+## 0.3.0a42 — Original same-chunk entity duplication with independent UUID
+
+Extended the experimental Python 3/Qt6 native Java entity workflow beyond
+deletion and simple scalar/Position/Rotation edits with **duplicate original
+standalone dropped-item or XP-orb entity into the same storage chunk**.
+
+- Added `entity_clone.py` with an intentionally narrow allowlist:
+  original `minecraft:item`, `minecraft:experience_orb`, legacy
+  `Item` and `XPOrb` only. Source must be in the original target
+  chunk, have explicit existing UUID encoded as modern
+  `UUID` IntArray[4] or legacy `UUIDMost` plus `UUIDLeast` Long
+  scalars, and contain none of the known passenger, owner, leash,
+  thrower or other relationship tags. Unsupported or ambiguous UUID
+  layouts, missing UUID, custom entity types, existing pending NBT
+  edits on the source, and cross-chunk clones are refused.
+- Every cloned entity receives a newly generated UUIDv4, encoded in
+  the **same native UUID field layout** the original entity uses.
+  Native Pos changes only the existing three Double bytes. Every other
+  original NBT field and packed member—including a dropped item's
+  entire original opaque modded ItemStack Compound—retains identical
+  source bytes. No item registry lookups, conversion, enchantment
+  normalization or assumptions about nonstandard modded references.
+  As with all original native edits, this is for offline disposable
+  world copies, not a guarantee of mod-specific semantic safety.
+- New strict `patch_entity_additions` writer appends staged entity
+  Compound payloads to the original `Entities` list, without changing
+  surviving list members or other chunk NBT. It checks source layout,
+  target chunk and duplicate UUIDs among understood original identities
+  and pending additions before any region replacement. It supports
+  both modern separate entity region files and legacy inline Java
+  Anvil/MCRegion entity Lists; no additional region file creation.
+- `NativeAnvilWorld` stages new cloned payloads keyed by newly
+  generated UUID, **not old list index**. The browser marks them as
+  `[new, unsaved]` (negative staging index). They cannot be selected
+  as further clone/edit sources until the saved file is reloaded,
+  avoiding premature dependency on a list index that does not exist
+  in the original file. Other original member indices remain stable.
+- `EditSession.clone_entity_in_chunk` integrates original entity
+  duplication into the current one-action Undo/Redo machinery.
+  Undo drops the pending clone, redo reinstates its **same new UUID
+  and unchanged clone bytes**. On Save, native region files are
+  fingerprinted, session-locked, entirely prevalidated and fully
+  backed up before atomic replacement; only then is the old
+  index-based Undo/Redo history cleared. Committed entity additions
+  are recoverable from **File → Restore native region backup…**.
+- New source-level `tests/test_entity_clone.py` covers original
+  numeric UUID encodings, opaque ItemStack/tag preservation, native
+  List append integrity, unsafe/no UUID/linked/modded rejection,
+  pre-save Undo/Redo and UUID stability, separate `entities/*.mca`
+  saved-region backup/reopen, clone-and-original-deletion and old
+  MCRegion `Level/Entities` cloning.
+
+**Still missing:** arbitrary registered entity creation, general
+mob/vehicle duplication, linked passenger/leash graph updates,
+cross-chunk relocation, custom entity identity formats, full
+source-component/version-aware render behavior and game-side
+verification. The new tests are source specifications and have
+**not yet been executed** in full CI/Mesa/Windows/game-world fixtures.
+No new branch or PR; `master` remains unchanged.

@@ -78,6 +78,18 @@ class EntityRemoval:
     after: bool = True
 
 
+@dataclass(frozen=True)
+class EntityAddition:
+    """An unsaved native Entity Compound with a new stable UUID identity."""
+    source: str
+    cx: int
+    cz: int
+    token: str
+    payload: bytes
+    before: bool = False
+    after: bool = True
+
+
 MAX_OPERATION_BLOCKS = 32768
 
 @dataclass(frozen=True)
@@ -150,6 +162,12 @@ class EditSession:
 
     def _apply(self, changes: list[Change | EntityMove], reverse: bool):
         def apply_one(change, undo):
+            if isinstance(change, EntityAddition):
+                added = change.before if undo else change.after
+                self.world.set_entity_added(
+                    change.source, change.cx, change.cz, change.token,
+                    change.payload, added)
+                return
             if isinstance(change, EntityRemoval):
                 removed = change.before if undo else change.after
                 self.world.set_entity_deleted(
@@ -657,6 +675,30 @@ class EditSession:
         self.dirty = True
         return len(changes)
 
+    def clone_entity_in_chunk(self, source: str, cx: int, cz: int,
+                              index: int, position) -> int:
+        """Duplicate only a safe original dropped item/orb with fresh UUID.
+
+        Undo/Redo uses the *same prepared NBT bytes* and UUID. The native
+        region save appends it after any staged deletions; structural
+        history is cleared after a successful Save as indexes then change.
+        """
+        maker = getattr(self.world, "prepare_entity_clone", None)
+        if not callable(maker):
+            raise ValueError("This backend cannot safely clone original entities")
+        if (type(index) is not int or index < 0 or
+                not isinstance(position, (tuple, list)) or len(position) != 3 or
+                any(type(x) not in (int, float) for x in position)):
+            raise ValueError("Original entity clone requires a real source and XYZ")
+        token, payload = maker(source, cx, cz, index, tuple(position))
+        change = EntityAddition(source, cx, cz, token, payload)
+        self._apply([change], reverse=False)
+        self.undo_stack.append([change])
+        self.undo_stack = self.undo_stack[-100:]
+        self.redo_stack.clear()
+        self.dirty = True
+        return 1
+
     def rotate_entity_in_chunk(self, source: str, cx: int, cz: int,
                                index: int, rotation) -> int:
         """Undoable native entity yaw/pitch, without changing Pos or UUID."""
@@ -809,8 +851,9 @@ class EditSession:
         # Do not carry any pre-save EntityRemoval record into the new
         # original-index baseline; after saving recover via region backup.
         structural_history = bool(
-            getattr(self.world, "_entity_deletions", ())) or any(
-                isinstance(change, EntityRemoval)
+            getattr(self.world, "_entity_deletions", ())
+            or getattr(self.world, "_entity_additions", ())) or any(
+                isinstance(change, (EntityRemoval, EntityAddition))
                 for history in (self.undo_stack, self.redo_stack)
                 for group in history for change in group
             )
