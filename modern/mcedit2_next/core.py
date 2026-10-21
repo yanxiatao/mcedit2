@@ -90,6 +90,20 @@ class EntityAddition:
     after: bool = True
 
 
+@dataclass(frozen=True)
+class EntityTransfer:
+    """Move an existing original UUID between two existing Java chunks."""
+    source: str
+    cx: int
+    cz: int
+    index: int
+    dcx: int
+    dcz: int
+    payload: bytes
+    before: bool = False
+    after: bool = True
+
+
 MAX_OPERATION_BLOCKS = 32768
 
 @dataclass(frozen=True)
@@ -162,6 +176,12 @@ class EditSession:
 
     def _apply(self, changes: list[Change | EntityMove], reverse: bool):
         def apply_one(change, undo):
+            if isinstance(change, EntityTransfer):
+                moved = change.before if undo else change.after
+                self.world.set_entity_transferred(
+                    change.source, change.cx, change.cz, change.index,
+                    change.dcx, change.dcz, change.payload, moved)
+                return
             if isinstance(change, EntityAddition):
                 added = change.before if undo else change.after
                 self.world.set_entity_added(
@@ -675,6 +695,25 @@ class EditSession:
         self.dirty = True
         return len(changes)
 
+    def transfer_entity_to_chunk(self, source: str, cx: int, cz: int,
+                                 index: int, destination) -> int:
+        """Move one existing vanilla loose item/orb to an existing chunk.
+
+        Reuses original UUID; both original regions join the same save
+        transaction. Undo before save removes the staged transfer exactly.
+        """
+        maker = getattr(self.world, "prepare_entity_transfer", None)
+        if not callable(maker):
+            raise ValueError("World cannot preserve cross-chunk entity NBT")
+        dcx, dcz, payload = maker(source, cx, cz, index, destination)
+        change = EntityTransfer(source, cx, cz, index, dcx, dcz, payload)
+        self._apply([change], reverse=False)
+        self.undo_stack.append([change])
+        self.undo_stack = self.undo_stack[-100:]
+        self.redo_stack.clear()
+        self.dirty = True
+        return 1
+
     def clone_entity_in_chunk(self, source: str, cx: int, cz: int,
                               index: int, position) -> int:
         """Duplicate only a safe original dropped item/orb with fresh UUID.
@@ -852,8 +891,9 @@ class EditSession:
         # original-index baseline; after saving recover via region backup.
         structural_history = bool(
             getattr(self.world, "_entity_deletions", ())
-            or getattr(self.world, "_entity_additions", ())) or any(
-                isinstance(change, (EntityRemoval, EntityAddition))
+            or getattr(self.world, "_entity_additions", ())
+            or getattr(self.world, "_entity_transfers", ())) or any(
+                isinstance(change, (EntityRemoval, EntityAddition, EntityTransfer))
                 for history in (self.undo_stack, self.redo_stack)
                 for group in history for change in group
             )

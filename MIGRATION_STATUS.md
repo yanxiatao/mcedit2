@@ -16,7 +16,7 @@ still exist. This is an engineering checklist rather than a release promise.
 | Java Beta 1.3–1.1 MCRegion (.mcr) | Native XZY 128-height chunks, ID/metadata editing, backup and reopening | Old-style lighting/heightmap recalculation, real-world game fixtures | 
 | Bedrock / Pocket Edition | No new LevelDB backend | Entire Bedrock adapter; will edit native LevelDB formats, not migrate worlds |
 | BE NBT | Native NBT tree viewer, guarded scalar editing (types 1–6, 8) across modern/legacy Anvil and MCRegion, experimental clipboard | Array resizing/structural compound edit, mod-specific links/identity, safe BE moves |
-| Entities / players | Original NBT inspector, guarded scalar/Pos/Rotation, batch translate and player ItemStack tools; native same-chunk dropped-item/XP-orb deletion and UUID-fresh duplication with pre-save Undo/Redo and full region backups | Arbitrary registered entity creation, other mobs/vehicles, linked graph edits, cross-chunk relocation, modded entity schemas and item registries remain unported |
+| Entities / players | Original NBT inspector, guarded scalar/Pos/Rotation, batch translate and player ItemStack tools; native dropped-item/XP-orb deletion, UUID-fresh same-chunk clone and original UUID-preserving cross-chunk/region transfer with pre-save Undo/Redo and full backups | General registered entity creation, mobs/vehicles, linked passenger/owner graphs, custom mod entity schemas, and robust cross-entity references remain unported |
 | Original Java filled maps | Qt6 native map_N.dat inspector, staging pixel paint/rectangle canvas, exact colors-array byte patches, whitelisted map metadata scalar edits, original gzip backup/restore | Full modern 208+ palette preview, modded map palettes, decorations/icons, world-side rendering fixtures, arbitrarily resizable map NBT and Bedrock maps |
 | Vanilla .nbt structures | Block-only import/export | Entity/BE-aware structure transactions |
 | Sponge v2/v3 .schem | Block-only import/export; strict nested Sponge v3 codec | BE/entity/biome payloads, rich metadata transfer and real-world fixtures |
@@ -1385,3 +1385,59 @@ source-component/version-aware render behavior and game-side
 verification. The new tests are source specifications and have
 **not yet been executed** in full CI/Mesa/Windows/game-world fixtures.
 No new branch or PR; `master` remains unchanged.
+
+## 0.3.0a43 — Strict original UUID-preserving cross-chunk item/orb transfer
+
+Added the first experimental **native Java cross-chunk and cross-region
+entity move** for the same narrow standalone dropped-item/XP-orb subset as
+the preceding original entity clone/delete features. This operation MOVES an
+existing entity: it retains its original UUID, instead of creating a new one.
+
+- New `entity_transfer.py` preflights the original existing entity
+  with the guarded item/orb and reference-tag allowlist, validates a finite
+  destination in a **different chunk**, rewrites **only the original three
+  Pos TAG_Double values**, and compares every other byte in the Compound
+  to prove original UUID, modded ItemStack and unknown NBT were unchanged.
+  Negative chunk coordinates use Java-compatible floor division.
+- `NativeAnvilWorld.prepare_entity_transfer` requires an existing
+  original source and a **pre-existing destination chunk in the SAME
+  original entity storage family**: inline Anvil/MCRegion chunk entities
+  stay inline; separate `entities/*.mca` entities stay separate.
+  It refuses missing chunks, pending edits/deletions of the source,
+  recognized UUID collisions in the destination or its staged additions,
+  linked/modded/unrecognized entity identities, and over 128 simultaneous
+  pending transfers. It never generates target region files or chunks.
+- Staged transfers live in a dedicated original-source-index map, not
+  in the same table as additions or scalar/Pos edits. While unsaved, the
+  source disappears from its current Qt6 entity listing and the target
+  preview shows a staged member with no original List index.
+  The preview does not alter the files or renumber unrelated original
+  list members. New staged items cannot be edited before saving/reopening.
+- A successful native Save places both the **original source removal**
+  and **destination append with the SAME original UUID** in the existing
+  multi-region preflight/backup/replace workflow. Both source and target
+  native region files are included in the preflight and complete backup
+  when the move crosses region boundaries; original lighting,
+  heightmaps and unrelated NBT bytes remain unmodified. Multi-file
+  replacement offers best-effort rollback on ordinary write errors;
+  it is **not crash-atomic**.
+- `EditSession.transfer_entity_to_chunk` and Qt6
+  **Move dropped item / XP orb to another existing chunk…** provide an
+  explicit XYZ destination dialog, refusal messages and one-operation
+  Undo/Redo **before Save**. A successful structural List save clears
+  the pre-save Undo/Redo history due to index renumbering. After Save,
+  recover via `File → Restore native region backup…`, which creates
+  another safety backup.
+- Source-only `tests/test_entity_transfer.py` specifications cover
+  preserved original UUID and opaque custom ItemStack, negative
+  coordinates, unsafe/same-chunk failures, absent target rejection,
+  stable source/destination previews, pre-save undo/redo, other
+  entity edits in the source, same-region multi-chunk save, and
+  two separate original region-file backup coverage.
+
+**Not implemented:** cross-dimension transfers; creating nonexistent
+chunks/regions; cross-storage-family migration; arbitrary mobs/vehicles;
+passengers, leashes, owners and graph references; proven global UUID
+collision-free scans across entire worlds; mod-specific linked identities.
+No new CI/Minecraft-version fixture tests or Windows builds have been
+executed. The existing Draft PR and branch are preserved.

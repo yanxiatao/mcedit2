@@ -449,3 +449,19 @@ available and is not automatically replaced.
 - Added source regressions for modern and legacy identities,
   UUID uniqueness, original opaque ItemStack round-trip, native
   region save and backup/reopen; actual full tests deferred.
+
+## 0.3.0a43 — Native original-UUID cross-chunk entity transfer
+
+- Standalone vanilla dropped-item/XP-orb entities may now MOVE between
+  **existing Java chunks**, including different region files, with their
+  original UUID and unknown/modded ItemStack NBT unchanged.
+- Both existing original source and target formats must match. Linked,
+  modded and ambiguous identities, missing destination chunks and
+  recognized UUID collisions are refused. No target chunks are created.
+- Native writer stages one source List removal + destination List append
+  in the same preflight/region backup/save transaction. Qt6 adds an XYZ
+  target dialog. Undo/Redo works before Save; after Save use the
+  original region snapshot restore because List indices changed.
+- Added source regressions for original bytes/UUID, negative chunk math,
+  missing-target refusal, same-region and cross-region backup/reopen.
+  Full version CI/Windows builds and game-world reload remain deferred.

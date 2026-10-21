@@ -10,7 +10,7 @@ from .nbt_inspector import NBTInspectorDialog
 class EntityListDialog(QDialog):
     def __init__(self, entries, chunk, parent=None, on_move=None,
                  on_rotate=None, on_move_many=None, on_edit_scalar=None,
-                 on_delete=None, on_clone=None):
+                 on_delete=None, on_clone=None, on_transfer=None):
         super().__init__(parent)
         self.entries = tuple(entries)
         self.on_move = on_move
@@ -19,6 +19,7 @@ class EntityListDialog(QDialog):
         self.on_edit_scalar = on_edit_scalar
         self.on_delete = on_delete
         self.on_clone = on_clone
+        self.on_transfer = on_transfer
         self.chunk = chunk
         self.setWindowTitle(f"Entities in chunk {chunk} — original NBT")
         self.resize(650, 430)
@@ -44,6 +45,12 @@ class EntityListDialog(QDialog):
             self.batch_button.setObjectName("entity_batch_move")
             self.batch_button.clicked.connect(self.edit_multiple_positions)
             layout.addWidget(self.batch_button)
+        if self.on_transfer is not None:
+            self.transfer_button = QPushButton(
+                "Move dropped item / XP orb to another existing chunk…", self)
+            self.transfer_button.setObjectName("entity_transfer_original")
+            self.transfer_button.clicked.connect(self.transfer_selected_entity)
+            layout.addWidget(self.transfer_button)
         if self.on_clone is not None:
             self.clone_button = QPushButton(
                 "Clone selected dropped item / XP orb…", self)
@@ -80,7 +87,7 @@ class EntityListDialog(QDialog):
             rotation = ("" if record.rotation is None else
                         " / yaw,pitch " +
                         ", ".join(f"{angle:.1f}" for angle in record.rotation))
-            staged_label = " [new, unsaved]" if record.storage_index < 0 else ""
+            staged_label = " [staged, unsaved]" if record.storage_index < 0 else ""
             self.items.addItem(
                 f"{record.identifier}{pos}{rotation} [{record.source}]{staged_label}")
         if 0 <= selected < len(self.entries):
@@ -222,6 +229,73 @@ class EntityListDialog(QDialog):
                 self._refresh_items()
         except Exception as exc:
             QMessageBox.warning(self, "Entity rotation refused", str(exc))
+
+    def transfer_selected_entity(self):
+        if self.on_transfer is None:
+            return
+        row = self.items.currentRow()
+        if row < 0 or row >= len(self.entries):
+            QMessageBox.information(self, "Cross-chunk entity transfer",
+                                    "Select one original entity first.")
+            return
+        record = self.entries[row]
+        from .entity_delete import DELETABLE_ENTITY_IDS
+        if (record.storage_index < 0 or
+                record.identifier not in DELETABLE_ENTITY_IDS or
+                record.position is None):
+            QMessageBox.warning(
+                self, "Cross-chunk entity transfer refused",
+                "Only original standalone vanilla dropped items / XP orbs "
+                "can be moved. Unsaved clones and transfers have no original "
+                "list index; save and reopen before editing those entries.")
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Move original entity to existing chunk")
+        form = QFormLayout(dialog)
+        axes = []
+        for label, value in zip(("Destination X", "Destination Y", "Destination Z"),
+                                record.position):
+            field = QDoubleSpinBox(dialog)
+            field.setRange(-29_999_999.0, 29_999_999.0)
+            field.setDecimals(4)
+            field.setSingleStep(1.0)
+            field.setValue(value)
+            form.addRow(label, field)
+            axes.append(field)
+        form.addRow(QLabel(
+            "Only original independent dropped items / XP orbs. "
+            "Destination must lie in a DIFFERENT already-existing native "
+            "chunk with the SAME entity storage format. The original UUID "
+            "and all item/mod NBT remain unchanged."))
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel, parent=dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        answer = QMessageBox.question(
+            self, "Transfer native Java entity",
+            "Stage removing this entity from its original chunk and appending "
+            "it to the destination chunk with its SAME UUID? Both original "
+            "region files are backed up on Save. Undo/Redo works until "
+            "Save, after which structural history resets; restore region "
+            "backup to reverse a committed transfer. Multi-region writes "
+            "have best-effort rollback but are not crash-atomic.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            updated = self.on_transfer(
+                record.source, record.storage_index,
+                tuple(field.value() for field in axes))
+            if updated is not None:
+                self.entries = tuple(updated)
+                self._refresh_items()
+        except Exception as exc:
+            QMessageBox.warning(self, "Entity transfer refused", str(exc))
 
     def clone_selected_entity(self):
         if self.on_clone is None:

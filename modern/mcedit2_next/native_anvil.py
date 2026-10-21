@@ -26,6 +26,8 @@ from .entity_clone import (
     patch_entity_additions,
 )
 from .entity_delete import validate_deletable_entity, patch_entity_deletions
+from .entity_transfer import transferred_original_entity
+from .entity_edit import _entity_list
 from .entity_edit import (entity_at, entity_position, entity_rotation,
                           relocated_simple_entity, rotated_simple_entity,
                           patch_entity_positions)
@@ -224,6 +226,9 @@ class NativeAnvilWorld:
         self._entity_deletions: set[tuple[str, int, int, int]] = set()
         # Pending new members are keyed by fresh UUID, never by old index.
         self._entity_additions: dict[tuple[str, int, int, str], bytes] = {}
+        # Original indexed source -> (destination chunk, new original Pos bytes).
+        self._entity_transfers: dict[
+            tuple[str, int, int, int], tuple[int, int, bytes]] = {}
         # Chunk-scoped opt-ins. Never overwrite native heightmaps silently.
         self._surface_approvals = {}
         level_bytes = (self.path / "level.dat").read_bytes()
@@ -564,7 +569,9 @@ class NativeAnvilWorld:
                 self._entity_chunk_with_edits("chunk", cx, cz),
                 source="chunk")
                 if ("chunk", cx, cz, record.storage_index)
-                not in self._entity_deletions)
+                not in self._entity_deletions
+                and ("chunk", cx, cz, record.storage_index)
+                not in self._entity_transfers)
         except RegionError as exc:
             if "absent" not in str(exc) and "does not exist" not in str(exc):
                 raise
@@ -575,7 +582,9 @@ class NativeAnvilWorld:
                     self._entity_chunk_with_edits("entities", cx, cz),
                     source="entities")
                     if ("entities", cx, cz, record.storage_index)
-                    not in self._entity_deletions)
+                    not in self._entity_deletions
+                    and ("entities", cx, cz, record.storage_index)
+                    not in self._entity_transfers)
             except RegionError as exc:
                 if "absent" not in str(exc):
                     raise
@@ -591,13 +600,24 @@ class NativeAnvilWorld:
                 records.append(EntityRecord(
                     info.require("id", 8).value, entity_position(payload),
                     payload, source, -1, angles))
+        for (source, src_cx, src_cz, index), (dest_cx, dest_cz, payload) in sorted(
+                self._entity_transfers.items()):
+            if (dest_cx, dest_cz) != (cx, cz):
+                continue
+            root = nbt.parse(nbt.make_tag(10, "", payload))
+            rotation = root.child("Rotation")
+            angles = entity_rotation(payload) if rotation is not None else None
+            records.append(EntityRecord(
+                root.require("id", 8).value,
+                entity_position(payload), payload, source, -1, angles))
         return tuple(records)
 
     def _assert_entity_present(self, source: str, cx: int, cz: int,
                                index: int):
-        if (source, cx, cz, index) in self._entity_deletions:
+        if (source, cx, cz, index) in self._entity_deletions or (
+                source, cx, cz, index) in self._entity_transfers:
             raise UnsafeFormat(
-                "Entity is staged for removal; undo deletion before editing")
+                "Entity is staged for removal/transfer; undo it before editing")
 
     def validate_entity_deletion(self, source: str, cx: int, cz: int,
                                  index: int) -> None:
@@ -672,6 +692,70 @@ class NativeAnvilWorld:
             if self._entity_additions.get(key) != payload:
                 raise UnsafeFormat("Staged clone cannot be undone safely")
             del self._entity_additions[key]
+
+    def prepare_entity_transfer(self, source: str, cx: int, cz: int,
+                                index: int, destination):
+        """Validate source and existing destination before staging anything."""
+        if (source not in ("chunk", "entities") or
+                (source == "entities" and self.is_mcregion) or
+                type(cx) is not int or type(cz) is not int or
+                type(index) is not int or index < 0):
+            raise UnsafeFormat("Unsupported native entity transfer source")
+        key = (source, cx, cz, index)
+        self._assert_entity_present(*key)
+        if key in self._entity_edits:
+            raise UnsafeFormat("Save or undo pending entity edits before transfer")
+        from .entity_clone import MAX_ADDITIONS
+        if len(self._entity_transfers) >= MAX_ADDITIONS:
+            raise UnsafeFormat("Pending cross-chunk entity transfer limit reached")
+        original = entity_at(self._entity_chunk(source, cx, cz), index)
+        (dcx, dcz), updated = transferred_original_entity(
+            original, cx, cz, destination)
+        # Existing entity-region entries are NOT proof of existing terrain.
+        # Require original terrain chunks at BOTH ends; never create them.
+        self._chunk(cx, cz)
+        self._chunk(dcx, dcz)
+        # Both destination entity region and entity chunk must also exist.
+        destination_raw = self._entity_chunk(source, dcx, dcz)
+        target_list = _entity_list(nbt.parse(destination_raw))
+        if len(target_list.children) >= nbt.MAX_COLLECTION_ITEMS:
+            raise UnsafeFormat("Destination entity List is full")
+        identity = original_entity_uuid(updated)
+        existing = []
+        for member in target_list.children:
+            entry = nbt.bytes_of(destination_raw, member)
+            try:
+                existing.append(original_entity_uuid(entry))
+            except (UnsafeFormat, nbt.NBTError):
+                pass
+        if identity in existing or any(
+                original_entity_uuid(payload) == identity
+                for (src, sx, sz, token), payload in self._entity_additions.items()
+                if (src, sx, sz) == (source, dcx, dcz)):
+            raise UnsafeFormat("Destination already has the original entity UUID")
+        for (src, sx, sz, other), (tx, tz, payload) in self._entity_transfers.items():
+            if (src, tx, tz) == (source, dcx, dcz) and (
+                    original_entity_uuid(payload) == identity):
+                raise UnsafeFormat("Destination already has a staged matching entity")
+        return dcx, dcz, updated
+
+    def set_entity_transferred(self, source: str, cx: int, cz: int, index: int,
+                               dcx: int, dcz: int, payload: bytes,
+                               moved: bool) -> None:
+        """Atomically stage/undo a cross-chunk source removal + target append."""
+        if type(moved) is not bool:
+            raise UnsafeFormat("Transfer state must be boolean")
+        key = (source, cx, cz, index)
+        if not moved:
+            if self._entity_transfers.get(key) != (dcx, dcz, payload):
+                raise UnsafeFormat("Staged entity transfer cannot be undone safely")
+            del self._entity_transfers[key]
+            return
+        expected_cx, expected_cz, expected = self.prepare_entity_transfer(
+            source, cx, cz, index, entity_position(payload))
+        if (expected_cx, expected_cz, expected) != (dcx, dcz, payload):
+            raise UnsafeFormat("Entity transfer differs from source byte patch")
+        self._entity_transfers[key] = (dcx, dcz, payload)
 
     def get_entity_position(self, source: str, cx: int, cz: int, index: int):
         """Return an entity's original numeric position without any rewriting."""
@@ -865,7 +949,7 @@ class NativeAnvilWorld:
     def save(self) -> None:
         if (not self._edits and not self._be_edits
                 and not self._entity_edits and not self._entity_deletions
-                and not self._entity_additions):
+                and not self._entity_additions and not self._entity_transfers):
             self._surface_approvals.clear()
             return
         with self._exclusive_session_lock():
@@ -874,7 +958,7 @@ class NativeAnvilWorld:
     def _save_with_lock(self) -> None:
         if (not self._edits and not self._be_edits
                 and not self._entity_edits and not self._entity_deletions
-                and not self._entity_additions):
+                and not self._entity_additions and not self._entity_transfers):
             return
         if self._lock_bytes() != self._session_lock:
             raise RegionError("Minecraft session.lock changed; refuse concurrent world editing")
@@ -931,6 +1015,34 @@ class NativeAnvilWorld:
                         else self._entity_path(cx, cz))
             edits_by_region[filename].setdefault((cx, cz), {})
             additions_by_chunk[(source, cx, cz)].append(payload)
+
+        # A transfer touches BOTH existing source and destination chunks.
+        # A missing destination region/chunk refuses the entire save, rather
+        # than silently generating anything in the user's original world.
+        for (source, cx, cz, index), (dcx, dcz, payload) in sorted(
+                self._entity_transfers.items()):
+            if ((source, cx, cz, index) in self._entity_edits or
+                    (source, cx, cz, index) in self._entity_deletions):
+                raise UnsafeFormat("Transferred entity has competing staged edits")
+            old_raw = self._entity_chunk(source, cx, cz)
+            before = entity_at(old_raw, index)
+            derived, reproduced = transferred_original_entity(
+                before, cx, cz, entity_position(payload))
+            if derived != (dcx, dcz) or reproduced != payload:
+                raise UnsafeFormat("Transfer cannot reproduce original NBT delta")
+            # Revalidate both original terrain chunks during save as well.
+            self._chunk(cx, cz)
+            self._chunk(dcx, dcz)
+            destination_raw = self._entity_chunk(source, dcx, dcz)
+            _entity_list(nbt.parse(destination_raw))
+            src_file = (self._region_path(cx, cz) if source == "chunk"
+                        else self._entity_path(cx, cz))
+            dst_file = (self._region_path(dcx, dcz) if source == "chunk"
+                        else self._entity_path(dcx, dcz))
+            edits_by_region[src_file].setdefault((cx, cz), {})
+            edits_by_region[dst_file].setdefault((dcx, dcz), {})
+            deletion_by_chunk[(source, cx, cz)].add(index)
+            additions_by_chunk[(source, dcx, dcz)].append(payload)
 
         # Prepare and validate every chunk before writing anything to disk.
         prepared: dict[Path, bytes] = {}
@@ -1049,6 +1161,7 @@ class NativeAnvilWorld:
         self._entity_edits.clear()
         self._entity_deletions.clear()
         self._entity_additions.clear()
+        self._entity_transfers.clear()
         self._surface_approvals.clear()
         self._chunk.cache_clear()
         self._section.cache_clear()
@@ -1079,7 +1192,7 @@ class NativeAnvilWorld:
         """
         if (self._edits or self._be_edits or self._entity_edits
                 or self._entity_deletions or self._entity_additions
-                or self._surface_approvals):
+                or self._entity_transfers or self._surface_approvals):
             raise RegionError(
                 "Save or discard pending edits and WORLD_SURFACE approvals before restoring")
         backup_root = (self.path / ".mcedit2-backups").resolve()
@@ -1150,6 +1263,7 @@ class NativeAnvilWorld:
         self._entity_edits.clear()
         self._entity_deletions.clear()
         self._entity_additions.clear()
+        self._entity_transfers.clear()
         self._surface_approvals.clear()
         self._chunk.cache_clear()
         self._section.cache_clear()

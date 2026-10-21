@@ -1941,11 +1941,16 @@ class MainWindow(QMainWindow):
                 self._perform(lambda: self.session.clone_entity_in_chunk(
                     source, cx, cz, index, coords))
                 return self.world.get_entities_in_chunk(cx, cz)
+            def transfer_entity(source, index, coords):
+                # SAME UUID, source List removal plus original target append.
+                self._perform(lambda: self.session.transfer_entity_to_chunk(
+                    source, cx, cz, index, coords))
+                return self.world.get_entities_in_chunk(cx, cz)
             dialog = EntityListDialog(
                 entities, (cx, cz), self, on_move=move_entity,
                 on_rotate=rotate_entity, on_move_many=move_entity_group,
                 on_edit_scalar=edit_entity_scalar, on_delete=delete_entity_group,
-                on_clone=clone_entity)
+                on_clone=clone_entity, on_transfer=transfer_entity)
             dialog.exec()
         except Exception as exc:
             QMessageBox.critical(self, "Entity NBT inspector error", str(exc))
