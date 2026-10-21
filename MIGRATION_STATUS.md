@@ -1,0 +1,1327 @@
+# MCEdit2 Next — migration inventory
+
+Status: 2026-10-21. The original Python 2 application remains in `src/mcedit2`
+and `src/mceditlib`, but these files are **not** active in the Python 3 editor.
+Statuses below describe working Python 3 equivalents, not whether old files
+still exist. This is an engineering checklist rather than a release promise.
+
+| Original MCEdit2 capability | New Python 3 implementation | Remaining gap |
+| --- | --- | --- |
+| Desktop editor and menus | Qt6 MainWindow, tool palette, World Info / Players / Chunk / Maps docks, history, minimap, queued imports and searchable Block Picker | Guarded world/player scalar and existing ItemStack edits; native Java filled-map pixel canvas and limited map metadata fields with independent gzip backup/restore; still lacks arbitrary item creation, modded slot editors, accurate modern map colors and original widget parity |
+| 2D and 3D map views | 2D slice; OpenGL 3.3 Section streaming; Java blockstate variant/multipart JSON elements and rotated noncubic meshes while retaining greedy opaque cubes | Per-face translucent sorting, biome-aware fluid tint, animated texture playback, complex mod renderers, entity models, lighting and LOD (level-aware water/lava meshes are approximate) |
+| Camera, picking and selection | Orbit, zoom, 3D ray selection, coordinate jump | Full MCEdit2 camera/navigation/selection widgets |
+| Clone/move, copy, fill, replace, paint and undo | Native offset clone/move, original square/round/diamond/cylinder/parabolic dome fill/replace brushes, flood fill, shapes, statistics, filters, dock tools, session history panel and transactions | More rotation variants, modded transformation rules, entities/BE-aware movement and persistent/branching history |
+| Java 1.13+ Anvil | Native paletted Sections and guarded region rewrites | Newer codecs, full chunk heightmap/light/biome maintenance and real-world version matrix |
+| Java 1.2–1.12 Anvil (.mca) | Native numeric IDs and metadata in original 16³ Sections | Mod-specific block geometry, lighting/heightmap updates, real-world game fixtures |
+| Java Beta 1.3–1.1 MCRegion (.mcr) | Native XZY 128-height chunks, ID/metadata editing, backup and reopening | Old-style lighting/heightmap recalculation, real-world game fixtures | 
+| Bedrock / Pocket Edition | No new LevelDB backend | Entire Bedrock adapter; will edit native LevelDB formats, not migrate worlds |
+| BE NBT | Native NBT tree viewer, guarded scalar editing (types 1–6, 8) across modern/legacy Anvil and MCRegion, experimental clipboard | Array resizing/structural compound edit, mod-specific links/identity, safe BE moves |
+| Entities / players | Original NBT inspector, whitelisted scalar/Pos/Rotation edits, guarded batch translation and native playerdata ItemStack edits; opt-in byte-preserving native dropped-item/XP-orb deletion with pre-save Undo/Redo and region backups | General entity creation/deletion, full mob/vehicle/linked graph removal, cross-chunk relocation, modded entity schemas and item registry are not yet ported |
+| Original Java filled maps | Qt6 native map_N.dat inspector, staging pixel paint/rectangle canvas, exact colors-array byte patches, whitelisted map metadata scalar edits, original gzip backup/restore | Full modern 208+ palette preview, modded map palettes, decorations/icons, world-side rendering fixtures, arbitrarily resizable map NBT and Bedrock maps |
+| Vanilla .nbt structures | Block-only import/export | Entity/BE-aware structure transactions |
+| Sponge v2/v3 .schem | Block-only import/export; strict nested Sponge v3 codec | BE/entity/biome payloads, rich metadata transfer and real-world fixtures |
+| Alpha .schematic | Guarded numeric-ID/metadata subset | Unmapped IDs/rotations, BE/entity/ticks, complete metadata remapping |
+| Other schematics | Qt6 Pending Imports queue for Java .nbt, Sponge .schem and Alpha .schematic, XYZ placement and single undo transaction | Zipped variants, complete BE/entity payload transfers, schematic previews with 3D overlays |
+| Undo / revision history | Per-session undo/redo with migrated dock showing operations and BE/entity edit counts; backup browsing and guarded restore | Persistent journal, branching revisions and crash-atomic multi-region writes |
+| World exploration | Region header index, asynchronous LRU Section streaming | Precise memory accounting, background priorities, large-scale profiling |
+| Resource packs / model loading | Layered vanilla/mod/client ZIP/JAR resources, JSON parent textures, variants/multipart, noncubic elements, quarter-turn block rotation, limited diagonal element rotation, UV and cutout atlas | Per-biome tint, true translucency, animations, weighted alternatives, custom loader models and full texture compatibility |
+| Plugins | Python 3 TOML plugins: commands, brush modes/shapes, tools, generators, read-only block/BE inspector callbacks | Legacy PySide1 widgets, preview scenegraph, schematic-based generators and complete original plugin APIs |
+| Heightmaps, light, biome | Reader preservation only | Safe update and recalculation workflows |
+| Formats and test matrix | Synthetic CI across 3 Python versions, Mesa and Qt | Genuine world fixtures with save/reopen across Minecraft versions/mod loaders |
+
+## Safety/release gates
+
+- No format is advertised as universal until unknown and modded content is
+  preserved, or editing is rejected with an actionable error.
+- Keep the draft PR unmerged; test only offline world copies.
+- For world writes, require per-version fixtures plus Minecraft-side reload
+  validation, especially block entities, lighting, heightmaps, and biomes.
+- Vanilla Java 1.13+ paletted blocks are the only actively developed modern
+  writer. Legacy numeric writers are constrained by each original format (MCRegion 0–255 IDs; preflattening Anvil 0–4095 IDs).
+
+## Immediate migration work order
+
+1. Validate classic `.schematic` and Sponge v2/v3 `.schem` against independent
+   real-world fixtures; extend BE/entity/biome transfers only with lossless guards.
+2. Expand actual-world fixture testing, verify no-loss chunk round trips and
+   reject unknown codecs before mutation.
+3. Extend block models/translucency and build UI for entity/BE inspection.
+4. Design safe biome/light/heightmap updates with explicit version contracts.
+5. Port original Qt tools, plugin dialogs, original history and more formats.
+6. Extend the original-version backends with Bedrock LevelDB (no Anvil conversion).
+
+## 原生格式编辑，不转换存档
+
+每个存档始终使用其原始版本与底层格式进行编辑。不会对 `level.dat`、
+`DataVersion`、旧版数字 ID 或区块整体结构进行自动升级。对于早于 1.13
+的 Java Anvil 地图，可使用 `mcedit2:legacy_id_N[data=M]` 输入原生的
+数字 ID（0–4095）与元数据（0–15），包括无法识别的模组 ID。
+旧版 `.schematic` 导入同类旧版存档时无需转换成新版方块状态。
+
+## Early Java MCRegion (.mcr)
+
+Implemented native 16×128×16 MCRegion block editing in `mcregion.py`.
+It reads and writes the original `Level/Blocks` and `Level/Data` X-Z-Y
+arrays and uses existing 4-KiB sector-region I/O and backup logic without
+creating `.mca` files. Original BE, entities, light, HeightMap and unknown
+NBT are byte-preserved. Mixed ambiguous `.mcr`/`.mca` old worlds refuse
+editing rather than guess which storage Minecraft will use. Only IDs 0–255
+are valid in the original MCRegion format; Y is restricted to 0–127.
+
+## Selection tools restored: clone, move, bounded flood fill
+
+The Edit menu exposes block-only 3-axis offset cloning and moving, including
+overlapping areas. Both snapshot the complete source selection before applying
+any change. Moving clears source-only cells and populates destinations in one
+undo step; selections follow successful moves. Contiguous 6-neighbor flood
+fill is constrained to a selected volume, preventing accidental world-wide
+filling of connected air. Region size and edit budgets apply.
+
+These tools copy **native block states or legacy numeric ID/metadata as-is**,
+without translating or rotating values. If a BE appears anywhere in the
+source or destination of a move/clone, it is refused. Entities remain
+unchanged; no entity or BE movement is implied. A native backend preflight
+checks all target sections and IDs *before* staging any writes. Unsupported
+or ungenerated destinations are rejected rather than creating chunks.
+
+## 0.3.0a4 — Strict horizontal rotations and mirrors
+
+The selection menu now offers clockwise and counterclockwise 90-degree
+horizontal rotation plus East/West and North/South reflection. Both positions
+and known vanilla blockstate properties are transformed, including facing,
+horizontal axis, stairs handed corners, doors hinges, rail bends/slopes,
+redstone direction-key connections and standing sign rotation.
+
+The numeric pre-1.13 codec transforms only explicitly mapped historical
+vanilla stairs, logs and torches; unknown legacy ID/metadata and unknown
+namespaced mod blocks fail *before any edits*. All source/destination BE
+positions are guarded and entities are not moved. The complete source volume
+is captured before any writes, including rotated non-square volumes.
+Operations are version-native: no flattening, DataFixer or world conversion.
+
+More complicated multipart/tall blocks and mod-specific orientation fields
+require tested per-version transformation profiles; refusing unsupported
+states is intentional, not silently copying old orientation.
+
+## 0.3.0a5 — Native entity position editing (restricted subset)
+
+Added an opt-in GUI action to edit X/Y/Z position of a selected vanilla entity,
+**within the same chunk**. The editor changes only the three original NBT
+TAG_Double `Pos` values. It preserves all other entity tags, UUIDs and
+mod-specific payloads byte-for-byte. The old `Level/Entities` and newer
+standalone `entities/*.mca` formats are handled without version changes,
+including regular undo/redo and region-file backup.
+
+Only a short conservative allowlist of *simple unlinked vanilla entity IDs*
+is writable. Entities with passengers, riders, leashes, attachment coordinates
+or modded IDs are rejected, as are cross-chunk moves. All other entity data
+remains read-only. This is **not** an arbitrary entity NBT editor and does not
+validate runtime behavior of mods. Linked and cross-region migration are open.
+
+## 0.3.0a6 — Type-preserving BE scalar editing
+
+Selected **existing** BE scalar fields (Byte, Short, Int, Long, Float, Double
+and String) can now be edited directly from the NBT tree without converting
+the map. The editor replaces only the original tag's payload bytes, preserving
+tag type, name, sibling compounds/arrays and unknown modded fields bit-for-bit.
+Edits use the same undo/redo, backup and native save/reopen pipeline for
+modern Java Anvil, pre-1.13 numeric Anvil and early MCRegion.
+
+Protected identity/reference fields (including id, x/y/z, UUID, Owner and
+Passengers) are refused, as are creating/deleting tags, replacing arrays or
+compounds, converting NBT types and moving BE positions. Legacy BEs may be
+changed ONLY in place. This is a low-level expert-only feature: edited numeric
+fields may have mod-specific semantic limits that generic NBT cannot validate.
+No default bulk rewrites or world version updates are performed.
+
+## 0.3.0a7 — Existing NBT Byte/Int/Long Array member editing
+
+Select a Byte_Array, Int_Array or Long_Array in the BE NBT tree and specify
+an **existing zero-based index**, then change its signed value. The patcher
+updates only 1, 4 or 8 original bytes and preserves the array count, tag
+type and every other unknown/modded byte. Empty and out-of-range indexes
+and protected UUID/owner/identity fields are refused.
+
+Uses the same native undo/redo and backup/save pipeline for modern Anvil,
+legacy numeric Anvil and MCRegion. Large arrays stay collapsed in the Qt
+tree. Array resize, arbitrary compound edit and BE movement remain unported.
+
+## 0.3.0a8 — Additional NBT structure editing
+
+Existing BE NBT Compounds support insert/delete of simple scalar children;
+existing scalar TAG_Lists and Byte/Int/Long Arrays allow indexed insertion
+and deletion while preserving their original element kind and all untouched
+bytes. Original BE identity, coordinates, ownership and UUID paths are
+protected. All changes participate in undo/redo with original save backups.
+
+This is expert-only structural editing: valid NBT mutations can still make
+modded entities behave incorrectly. No full compound/list construction,
+mod-specific schema inference or cross-version transformation is performed.
+
+## 0.3.0a9 — Native region backup recovery
+
+Added an explicit File-menu option to restore prior editor-created `.mca` /
+`.mcr` region snapshots. Restoration requires no pending edits, validates
+the snapshot is inside the same world's backup folder, refuses symlink and
+unexpected files, checks the original `level.dat` and session lock, and
+takes another full safety snapshot of the live target regions before writes.
+
+Restoring does not modify `level.dat`, upgrade `DataVersion` or change region
+formats. Undo history is reset and read/render caches are invalidated. A
+failure during a normal multi-file write attempts rollback; crashes or power
+loss mid-write are **not** transactionally atomic. External backups and
+offline world copies remain required until crash-journal support is added.
+
+## 0.3.0a10 — Native Python 3 generator and editor tool integration
+
+Existing plugin registration categories `tool` and `generate` now execute
+explicit Python 3 function callbacks from the Plugin menu, using the same
+bounded EditTransaction and undo/rollback guarantees as plugin commands.
+Generators require a selected bounded volume. A bundled checkerboard
+generator demonstrates original-world block placement without conversion.
+
+Old `registerToolClass` / `registerGeneratePlugin` class decorators are still
+discovered but are NOT executed: their Python 2/PySide 1 constructor, old
+Schematic return contract and original preview GUI require a deliberate port.
+Third-party plugin code remains explicitly user-loaded and trusted, with
+normal process/filesystem access; it is not a sandbox.
+
+## 0.3.0a11 — Sponge Schematic v3 (block-only)
+
+The Python 3 editor now imports both Sponge v2 and nested Sponge v3 `.schem`
+files without modifying the target world's storage format or `DataVersion`.
+Export remains v2 by default; the save dialog also offers explicit v3 output.
+The v3 codec reads `Schematic/Blocks/Palette` and `Data` VarInts in
+X-Z-Y order, preserving namespaced mod block states and the source schematic
+`DataVersion`. It refuses any v3 biome container, nonempty entity/BE lists,
+unknown block-container fields and nonzero offsets rather than discarding
+unhandled content. The v3 reader shares the existing block-only version
+mismatch confirmation and native-format world writer. Metadata descriptions
+are not exported; no entity, BE or biome transfer is implied. Synthetic
+regressions cover independent v3 fixtures, gzip round trips, malformed
+payload guards and v2 backward compatibility. Genuine WorldEdit/MC fixtures
+and Minecraft-side multi-version reopening remain outstanding.
+
+## 0.3.0a11 — Inspector and brush shape plugin binding
+
+Registered native Python 3 inspector callbacks can now inspect a block
+state and unchanged optional opaque BE NBT payload at selected coordinates.
+Output is displayed in a read-only Qt6 dialog; inspector callbacks receive
+a snapshot, not an editing transaction. This is a convenience contract,
+NOT a security sandbox: trusted Python plugins still run in-process.
+
+The `brush_shape` registration category is also live. A Python 3 callback
+receives `(PluginContext, point, block)` and may stage a spatial brush stamp
+through ctx.set_block. Multiple stamps remain one undoable stroke. The
+built-in plugin demonstrates a five-block cross shape and a native-block
+summary inspector. Old PySide1 inspector classes remain registered but are
+not automatically instantiated; they require an explicit Qt6 widget port.
+
+## 0.3.0a12 — Native Qt6 plugin panel callbacks
+
+The Python 3 plugin `widget` extension category is bound to the Plugins
+menu. Only explicit callable providers are accepted. A provider receives
+a Qt6 parent and returns a QWidget, displayed in a managed dialog;
+invalid return types and exceptions are surfaced without leaving a panel.
+
+Bundled selection-tools includes a trivial Qt6 panel example. Legacy
+registered PySide1 widget classes remain discoverable but are NEVER
+instantiated as Qt6. They require a manual rewrite. Full original
+scenegraph/model previews and dock widgets remain unported.
+
+
+## 0.3.0a15 — Read-only native selection statistics
+
+Edit > Selection block statistics scans the bounded selection using the
+existing world backend, with either original block IDs or complete native
+BlockState / legacy numeric metadata groups. It reports exact block counts,
+frequencies and the number of BE locations if the backend supports presence
+queries. Unsupported BE counts show **unknown**, never zero.
+
+Statistics never edit blocks or rewrite / normalize NBT, create undo history,
+or save regions. Failed reads refuse to produce a partial report. The GUI caps
+visible rows at 512 while totals are computed for all distinct states within
+the existing edit-size selection limit; this does not remove the underlying
+limit or claim safe editing of unsupported chunks.
+
+Regression tests cover named block-state grouping, legacy metadata behavior,
+modded BE original-byte preservation and Qt6 read-only dialogs. These tests
+are synthetic; real modded Java world validation remains required.
+
+
+## 0.3.0a16 — Native block-ID filter with BE-aware replacement preview
+
+**Edit > Filtered replace by native block ID…** allows explicit source and
+destination native states. By default it matches the namespaced block ID
+across different properties/old numeric metadata; the **exact** checkbox
+matches properties and legacy metadata too. The read-only preview counts
+matching positions, proposed block writes and existing BE conflicts without
+editing any world data.
+
+Confirmation is required before committing one undoable operation. Any
+matching block entity is a **hard failure for the entire operation**; it never
+silently skips or rewrites unknown NBT. Backends without an authoritative BE
+presence query refuse non-empty filtered writes. Native version-specific
+preflight also rejects missing Sections and invalid old ID ranges before
+applying changes. The exact same checks are performed again at commit time
+so an outdated preview is not authoritative.
+
+Synthetic and native save/reopen regressions include modded unknown BE NBT,
+original paletted Anvil and numeric MCRegion, undo after save, and Qt6
+dialog approval / cancellation and BE veto. There is no cross-version
+format conversion and no claim of fully accurate relighting or support
+for live server files.
+
+
+## 0.3.0a17 — Python 3 read-only block predicates and native filter UI
+
+Plugin registration adds the opt-in **filter** category: callbacks receive a
+frozen FilterBlock(position, state, has_block_entity) and must return bool.
+The Qt6 Plugins menu lists loaded Python 3 predicates, never unported old
+PySide1 classes. Filter snapshots retain native states and numeric metadata.
+
+The GUI previews selected/matching/proposed counts and BE conflicts, requires
+confirmation, then re-runs the predicate and BE checks before a single native
+undo transaction. Any BE overwrite or lack of BE presence checking rejects
+the entire operation. Native preflight and original-format writer guards
+remain in force. The bundled plugin demonstrates stone matching in both
+paletted Anvil and numeric MCRegion.
+
+Plugin, Qt6 and real native synthetic save-reopen tests cover bad results,
+unloaded providers, no-BE-check refusal, conflict rollback, undo after save
+and preserving opaque modded BE NBT. Trusted Python plugins still execute
+in-process with user permissions. This is not a sandbox or complete legacy
+filter/plugin parity; live-world fixtures remain outstanding.
+
+
+## 0.3.0a18 — Configurable Python 3 filter options
+
+Native predicate registration now includes typed option schemas via
+PluginHost.register_filter(id, label, callback, options=[...]). This retains
+the older single-record register_extension filter contract; configured
+callbacks receive (immutable FilterBlock, validated options dict).
+Supported option kinds reuse Qt6 command widgets: blocktype, choice,
+int, float, bool, text, and display-only label.
+
+Plugins > Python 3 native block filters shows a single Qt6 configuration
+form for source/target block states, exact-vs-identifier matching, Y limits
+and inversion in the bundled filter. The same validated options are passed
+to read-only preview and the guarded rescan before commit. Invalid types,
+unknown fields, out-of-range numbers, non-finite floats, unrecognized choices
+and non-block arguments are refused; the internal target field is reserved.
+Unconfigured legacy one-argument predicates continue to work as before.
+
+Tests verify parameter handling, partial defaults, inversion, exact state
+matching, Qt6 form interaction, undo, native modded Anvil save/reopen and
+unchanged unrelated Block Entity NBT. This does not make Python plugins
+sandboxed or equivalent to the full original MCEdit2 filter SDK.
+
+
+## 0.3.0a19 — Dockable Qt6 tool palette (initial MCEdit2 tool UI port)
+
+The editor now constructs a right-hand **MCEdit2 Tools** QDockWidget,
+accessible from **View > MCEdit2 Tools**. It provides Paint/Select mode
+switching, bounded original-format fill, hollow, flood-fill, line, clone,
+move, rotation, mirror, search, statistics, copy/paste and filtered
+replacement through the existing edit menu implementations. The dock's
+native block ID/state field and selection Y bounds remain synchronized
+with the editor toolbar; a manual refresh reports current selection
+corners, volume, and the core operation budget without loading any chunks.
+
+Loaded Python 3 tool, generator and filter providers are listed dynamically.
+Plugin unload/reload rebuilds available actions, preserves a still-available
+choice and otherwise selects a safe default. Opening the palette never
+loads or executes external plugins. Plugin callbacks reuse their original
+transaction/undo/BE guards; no alternate native writer was introduced.
+The 2D Select mouse-release updates the selection summary automatically;
+3D selections may use the explicit refresh control.
+
+Qt6 offscreen tests exercise the native editable selection, toolbar/dock
+field synchronization, undo, BE-conflict rollback, plugin load/unload,
+and a generator called through the palette. GUI smoke now asserts the dock.
+Remaining work includes full original MCEdit2 dock layout parity, context
+tools, 3D interactive selection overlays, Bedrock, lighting/heightmap
+updates and real-world multi-version fixtures.
+
+
+## 0.3.0a20 — XYZ corner selection without solid blocks; parameterized shapes
+
+The Qt6 MCEdit2 Tools dock now accepts two explicit three-dimensional
+corners: X/Z corner inputs plus the existing synchronized selection Y bounds.
+**Select XYZ corners** constructs a bounded selection for 2D and loaded 3D
+viewports even when there is no solid voxel to ray-pick, including skyblock
+voids and empty air. It validates integer coordinate ranges and the existing
+core max-block operation budget **before changing viewport selection**.
+This only changes UI state; it never reads, saves or generates a chunk.
+
+The original 3D OpenGL base viewport emits selectionChanged on a completed
+Select-mode mouse drag. The right-hand dock mirrors the resulting X/Z bounds,
+while changing Y options does not overwrite an unfinished manual X/Z input.
+Switching 2D/3D views, manually refreshing the dock, and opening a new world
+also refresh coordinates. Opening a different world discards the previous
+world's stale selection.
+
+The dock now has contextual shape fields: shell thickness (1..64), sphere
+radius (1..128) and a hollow-sphere toggle. Selecting these tools runs the
+existing undoable EditSession.hollow_box/sphere operations with the chosen
+parameters, instead of reimplementing native edits. Existing BE preflight,
+per-operation budget, rollback and native format preservation remain active.
+
+Offscreen Qt6 tests verify skyblock XYZ selection, selection budget rejection
+without state changes, 2D/3D selection synchronization, 3D mouse drag
+notifications and wireframe coordinates, ray misses, undoable shell/sphere
+tools and unchanged world state during selection. Further work remains for
+full original MCEdit2 tool panels, complex 3D editing gizmos, Bedrock LevelDB,
+relighting/heightmaps, and diverse real-world cross-version fixtures.
+
+
+## 0.3.0a21 — Interactive 3D selection gizmos and precision bounds
+
+The original 3D OpenGL view and the streaming 3D renderer now draw six
+orange face-diamond handles and a cyan center cross around selected block
+bounds (Select mode). In a 3D view, **Alt+left-drag on a face handle** resizes
+only that face; **Alt+left-drag on the center** moves the selected region
+horizontally (X/Z); **Alt+Shift+left-drag on the center** moves it vertically
+(Y). Handle picking uses camera rays and geometrical math without any
+chunk reads or generation. The 3D view emits proposed integer-coordinate
+bounds; MainWindow validates them through the same bounded
+select_coordinates() method before updating either viewport. A rejected
+oversized/out-of-range gesture leaves the selection unchanged and displays
+a status-bar refusal. No world edit or undo operation is performed simply
+by moving/resizing selection bounds.
+
+The right-side tool dock also provides precise XYZ selection displacement
+and single-face (X±, Y±, Z±) resize with integer offsets. It is now
+scrollable so these controls remain accessible at reduced window height.
+The base 3D mesh is explicitly invalidated when selection bounds change,
+and streaming 3D draws the same gizmos through its existing GL_LINES pass.
+Face shrinking clamps at one block instead of inverting the selection.
+
+Headless geometry tests exercise every face, negative offsets, clamping,
+closest-ray hit testing, X/Z plane and vertical-axis drags. Qt6 tests
+exercise face handles, center X/Z and Y drag, precise dock controls,
+volume-budget rejections and the scrolling palette. Disk-backed synthetic
+original-format Java Anvil and MCRegion tests confirm that selection-only
+transforms leave original region bytes, Block Entity NBT, staged edits and
+undo history untouched. Complete original MCEdit2 3D gizmo parity and
+representative real-world/modpack compatibility remain outstanding.
+
+
+## 0.3.0a22 — Read-only original-world compatibility audit
+
+A bounded forensic audit now scans existing Java region headers/chunks without
+saving, staging edits, changing session locks, generating chunks, migrating
+formats, or altering opaque Block Entity NBT. The native world adapter exposes
+compatibility_audit(max_chunks=64, max_regions=32); hard limits are 512 chunks
+and 128 regions. It reports region extension, level.dat DataVersion, sampled
+chunk DataVersions, readable/damaged/unsupported chunk counts, observed BE
+counts, missing/duplicate block Sections, invalid/cross-chunk BE coordinates,
+mismatched chunk locations, damaged region sector offsets and overlaps, and
+unsupported compression including external .mcc or LZ4. Mixed .mca and .mcr
+region folders are explicitly reported as an excluded-format finding.
+Per-chunk parse and decompression stay within existing native size limits;
+reports cap detailed findings and distinguish partial scans.
+
+The Qt6 File menu now includes **Audit native world compatibility
+(read-only)…**, with an adjustable chunk budget and a copyable text report.
+Audit is separate from Save and EditSession and cannot certify that a world
+is safe to write: skylight, block-light, heightmaps, entity behavior,
+modded invariants, unscanned chunks and full-version game correctness are
+not fully validated. Do not equate a successful audit with full support.
+
+Tests cover Java MCRegion, preflattening numeric Anvil, compact 1.13 and
+padded 1.16-style palettes, modern 1.18+ layouts, BE duplication and foreign
+coordinates, unknown/external compression, overlapping and invalid sector
+headers, cross-region/chunk budgets, version mismatches, mixed extensions,
+unchanged files and pending edits, plus Qt6 audit dialog/cancel/no-world
+behavior. The test fixtures are synthetic representations of the original
+formats; representative actual game-produced, modded multi-version worlds
+remain a separate acceptance requirement.
+
+
+## 0.3.0a23 — Derived lighting/heightmap impact and preservation guard
+
+The native Java writer now verifies that all existing original lighting
+and heightmap NBT tags remain byte-for-byte unchanged by every prepared
+chunk patch. This includes legacy HeightMap, modern Heightmaps compounds
+and child long arrays, section SkyLight/BlockLight arrays, isLightOn and
+legacy LightPopulated/TerrainPopulated markers. A discrepancy refuses the
+save before region-file replacement. Existing automatic region backups
+and Block Entity / opaque tag preservation still apply.
+
+A separate bounded read-only preview (NativeAnvilWorld.derived_data_impact)
+reports staged changed blocks, touched chunk coordinates, changed X/Z
+columns, edited section Y values, existing light/heightmap tag names and
+structural anomalies (e.g. malformed light array sizes). The preview reads
+disk chunks through the existing bounded reader without caching/staging
+changes, and caps the scanned chunk count. The Qt6 File menu offers
+**Inspect pending lighting / heightmap impact (read-only)…**, with copyable
+plain-text details; Save now provides explicit potential-staleness warning
+and change counts before the user chooses Yes/No (default No).
+
+IMPORTANT: This phase verifies preservation, not automatic relighting or
+heightmap recalculation. Changing a block can make preserved lighting or
+heightmap values incorrect until an actual Minecraft engine or a future
+verified version-specific updater processes the chunk. Modded emission,
+opacity and block update rules are not inferred. This build does not
+claim to fix the game's resulting visual or behavioral side effects.
+
+Regression tests cover modern 1.18+ heightmap compounds and light arrays,
+MCRegion legacy heightmaps, changed-column grouping, read-only scan
+limits, dirty-edit preservation, deliberate metadata corruption detection,
+modded BE equality, on-disk save/reopen, GUI impact report and rejection
+of the experimental save confirmation. Actual game-generated modded and
+cross-version save/load acceptance is not yet established.
+
+
+## 0.3.0a24 — Native Java heightmap codec and no-write WORLD_SURFACE preview
+
+Added a separate Java-native heightmap codec that decodes and encodes exactly
+256 unsigned column offsets from Minecraft's original NBT long arrays.
+Supported packing: pre-1.16 continuous bits across longs and 1.16+
+non-crossing, padded long entries; the field width comes from an explicit
+world build height and supports bounded custom heights. It verifies array
+length, value range, unused bits, exact 256-value roundtrips, and both
+older Level/Heightmaps and modern root/Heightmaps compounds. Original
+HeightMap (numeric MCRegion/preflattening) remains separate; the new
+paletted codec is strictly Java 1.13+.
+
+A conservative, memory-only WORLD_SURFACE candidate reconstruction is now
+available for up to 16 edited local X/Z columns in one chunk. It requires the
+exact dimension min_y and world height to be supplied explicitly; the
+editor does not guess custom datapack geometry. Before yielding a candidate,
+it verifies the chunk DataVersion, block NBT, original stored WORLD_SURFACE
+values against real original Section contents, and rejects any non-vanilla
+namespace in the scanned edited columns. It refuses a missing WORLD_SURFACE
+map, bad packed arrays, mismatched stale originals, cross-chunk edits,
+oversized batches and invalid coordinates. It computes vanilla-style
+topmost non-air per column (air/cave_air/void_air excluded) and returns an
+immutable SurfacePreview containing a patched NBT **in memory only**.
+A byte-span comparison proves no other root NBT bytes changed in the
+candidate, including separate motion-blocking heightmaps and BE fields.
+
+NativeAnvilWorld.preview_world_surface(cx,cz,min_y,height) applies this to
+staged block-state edits without staging the resulting heightmap or
+writing to disk. Qt6 File > Preview WORLD_SURFACE heightmap (memory only)…
+prompts for exact height bounds and shows a copyable candidate report.
+It never overrides the original preservation-only Save pipeline.
+
+Synthetic tests cover 1.13 compact, 1.16 padded, modern 1.18+,
+negative Y, a 512/1024 build height, roundtrip packing, inherited unknown
+BE NBT, neighboring heightmap preservation, actual region bytes unchanged,
+unknown modded blocks, incorrect source heights, missing tags, cross-chunk
+edits and Qt6 preview/refusal. The in-memory reconstruction remains an
+experimental building block, NOT a verified or enabled heightmap writer;
+MOTION_BLOCKING, OCEAN_FLOOR, all lighting, custom block air semantics,
+custom dimension geometry and real modpack gameplay require further work.
+
+
+## 0.3.0a25 — Explicit guarded WORLD_SURFACE write within original-region save
+
+The first, deliberately limited, opt-in native heightmap write path is now
+available for offline test-world copies. Normal Save continues its existing
+preservation-only behavior unless a user explicitly approves a reviewed
+WORLD_SURFACE candidate for each block-edited chunk.
+
+The backend offers approve_world_surface_update(cx,cz,min_y,height),
+cancel_world_surface_updates(), and approved_world_surface_chunks.
+Approval only records an in-memory reviewed preview and the exact native
+staged block-state set, without modifying world chunks or NBT. Approval is
+single-use: Save first confirms all block-edited chunks are approved and
+then, during its existing locked backup-and-atomic-replacement preparation,
+rechecks the original raw chunk and exact pending edits and independently
+regenerates the candidate. It first performs ordinary block/BE/entity
+patching with the original strict derived-NBT byte guard. It then replaces
+*only* the approved WORLD_SURFACE long-array tag within the already patched
+chunk and verifies that every other derived tag and all unrelated NBT bytes
+remain unaffected. Saving still backs up complete original region files,
+uses its existing best-effort multi-region rollback, and clears approvals
+only on success. Invalid/stale proposals fail the whole save before any
+region replacement; reverting or canceling approvals restores the default
+preserve-only path. Remaining approvals also block backup restoration.
+No-op save and editor close clear approvals.
+
+For memory safety, approval is capped at 16 chunks with at most 32 MiB of
+combined source/candidate NBT held in memory. Each chunk is also limited
+by the prior 16-column strict WORLD_SURFACE preview. Source height and
+build limits must be explicitly supplied by the user; unknown modded
+states, inconsistent source heightmaps and cross-chunk coordinates are
+rejected, not guessed.
+
+Qt6 File now has **Approve WORLD_SURFACE update for current chunk
+(experimental)…** plus **Cancel pending WORLD_SURFACE approvals**, separate
+from the pre-existing read-only preview. The approval dialog requires
+explicit world bounds and a separate warning/confirmation. The final
+Save dialog independently warns when approved heightmaps will be written,
+and still defaults to No.
+
+Synthetic on-disk tests cover Java 1.13 compact, 1.16 padded, and 1.18+
+WORLD_SURFACE writes, backups and reopen, exact modded BE/NBT and other
+heightmap preservation, failed approvals, staged-edit changes, unapproved
+chunks, restore refusal, no-op clears, and Qt6 approve/cancel/no-save.
+THIS DOES NOT recalculate MOTION_BLOCKING, OCEAN_FLOOR, sky/block light,
+or modded block updates. Actual-game acceptance for each specific version
+and modpack is still required; production-world save safety is unproven.
+
+
+## 0.3.0a26 — Fail-closed collision/fluid heightmap classification (READ ONLY)
+
+Added two new, isolated, read-only heightmap analysis modules:
+heightmap_predicates.py and heightmap_collision.py. For Java **1.21 and
+1.21.1 release DataVersions 3953 and 3955 only**, they can compute bounded
+MOTION_BLOCKING and OCEAN_FLOOR candidates from original native block
+sections plus staged edits. Collision and fluid heightmap rules are not
+interchangeable: MOTION_BLOCKING includes solid motion-blocking blocks and
+non-empty fluid states; OCEAN_FLOOR includes the approved solid subset but
+not plain water/lava. These predicates are tag-based in Minecraft; without
+the running game's block registry, no arbitrary state can be classified
+safely. The implementation explicitly permits only vanilla air, a small
+enumerated group of simple full-cube solids and water/lava with validated
+simple fluid levels. Leaves, slabs, stairs, transparent/non-full blocks,
+waterlogging, unusual state properties, all modded namespaces and unknown
+versions are *rejected* rather than guessed. In worlds that override vanilla
+heightmap block tags with datapacks/mods, even the small static allowlist
+may no longer match the game and must not be trusted.
+
+The preview requires explicit dimension min_y/build height and an explicit
+boolean acknowledgment that the relevant vanilla heightmap tag rules have
+not been modified. It reads and validates the matching original packed NBT
+heightmap, the exact chunk's DataVersion and X/Z identity, all original
+Sections of the chosen explicit height range and every affected column;
+then compares observed heights against stored originals before computing
+a new candidate. A maximum of 16 affected X/Z columns per preview is
+allowed. The candidate changes *only one named original heightmap tag*
+inside an in-memory NBT byte array, preserving everything else, including
+modded Block Entities. No world edits, saves or chunk generations occur.
+
+NativeAnvilWorld.preview_collision_heightmap() is a diagnostic-only method
+with no approval/writer integration. Qt6 File now offers **Preview
+MOTION_BLOCKING / OCEAN_FLOOR (read-only)…** with explicit map choice,
+world bounds and a separate default-No acknowledgment of unmodified
+vanilla block tags. The existing WORLD_SURFACE opt-in save remains
+unchanged; neither new heightmap can be written by the editor.
+
+Regressions cover water-above-stone (raises MOTION_BLOCKING but not
+OCEAN_FLOOR), solids, water-to-air edits, unsupported shapes/modded states,
+invalid fluid properties, stale original maps, missing tags, mismatched
+chunk coordinates, unacknowledged tag assumptions, unsupported data
+versions, Qt6 read-only approval refusal and native disk-byte preservation.
+All these are synthetic Java NBT fixtures; there are still no verified
+real-game modpack registry/heightmap acceptance results. This is NOT
+automatic heightmap rebuilding for all Minecraft versions.
+
+
+## 0.3.0a27 — Version-bound exact-state collision heightmap rule evidence
+
+Added a strictly parsed immutable JSON evidence snapshot interface to
+extend the read-only MOTION_BLOCKING and OCEAN_FLOOR heightmap previews
+without guessing unknown block properties. Each snapshot identifies a
+single exact Java DataVersion, a claimed origin and a map of canonical
+BlockState strings to **both** blocks_motion_in_heightmap tag membership
+and nonempty-fluid-state booleans. No wildcard/substring/name-prefix
+matching or automatic fallback is permitted once a snapshot is selected.
+The importer accepts precise modded namespaces, leaves, slabs, stairs,
+waterlogged property combinations etc. *only* when the exact state occurs
+in the imported evidence: unknown states fail closed. An example/test
+state classification is not proof of actual Minecraft runtime semantics.
+
+The importer rejects malformed/duplicate JSON fields, invalid types,
+noncanonical property ordering, unknown document fields, mismatched
+versions and files larger than 4 MiB; state entries capped at 20,000.
+Loaded facts are immutable, with claimed source and SHA-256 digest shown
+in diagnostic output. It executes no Python, Java or plugin code and
+reads no implicit mod/data pack paths. The new editor menu
+**File > Preview collision heightmap using state evidence JSON…** explicitly
+requests the file, heightmap name, exact dimension bounds and a default-No
+acknowledgment that the user's supplied facts match their actual
+runtime/modpack/tag configuration. This import supplements but does not
+replace the previous built-in limited 1.21/1.21.1 classification, which
+remains the default.
+
+A matching evidence snapshot may support a different modern Java chunk
+DataVersion than the built-in 3953/3955 allowlist; this is an experimental
+exact-state diagnostic and cannot certify compatibility with that release.
+The collision heightmaps remain **read-only**. It does not grant
+WORLD_SURFACE write approvals or edit any original .mca/.mcr bytes.
+Tests cover exact waterlogged stair/leaves/modded states, custom version,
+unknown state refusal, malformed JSON, duplicate keys, file/symlink
+limits, immutable state maps, Qt6 file picker, explicit confirmation,
+fingerprint provenance and original-region-byte preservation.
+See doc/heightmap_evidence.md for schema and safety limits.
+
+
+## 0.3.0a28 — Optional Minecraft 1.21.1 NeoForge runtime evidence exporter
+
+Added an optional source-only NeoForge 1.21.1 mod overlay under
+tools/neoforge-1.21.1-exporter. The operator-only `/mcedit2export` command
+queries the **actual running game** for all registered block states and the
+Minecraft `Heightmap.Types.OCEAN_FLOOR` and `MOTION_BLOCKING` predicates,
+plus `BlockState.getFluidState().isEmpty()`. It serializes exact canonical
+property sets and the actual DataVersion 3955 into schema-1 JSON for the
+existing read-only collision heightmap importer. It validates at runtime
+that MOTION_BLOCKING equals (OCEAN_FLOOR or nonempty fluid), aborting if
+that relationship ever differs. The JSON's historical
+`blocks_motion_in_heightmap` key means the *effective OCEAN_FLOOR
+predicate* for this exporter, **not membership in a Minecraft block tag**.
+This corrects earlier imprecise documentation of that legacy key.
+
+The export is only initiated by an authorized in-game command and writes
+a content-addressed JSON file to `mcedit2-evidence/` under the Minecraft
+game directory, not to a world save. It uses a same-directory temporary
+file and an atomic rename where supported. Missing/mismatched game
+versions, >200,000 block states, >32 MiB JSON and inconsistent runtime
+predicates cause refusal without partial output.
+
+The importer was expanded conservatively from 20k states / 4 MiB to
+200k states / 32 MiB with a regression test importing 25,001 entries.
+The exact-state matching and DataVersion validation are unchanged. No
+heightmap writes are enabled by this feature, and ordinary native Save
+still follows its existing safety rules.
+
+An isolated, manually/labeled opt-in GitHub workflow now compiles the
+helper against the official NeoForge 1.21.1 ModDevGradle MDK using Java 21;
+the **first actual compiler CI passed** and produced a JAR inside the
+build runner, with **no published binary**. This proves the Java source
+compiles for the CI-selected NeoForge version, not that its command has
+been exercised on a modded game server. Real runtime execution,
+round-trip exported snapshots against game-generated worlds, and
+cross-version/lighting safety validation are future acceptance gates.
+See tools/neoforge-1.21.1-exporter/README.md.
+
+
+## 0.3.0a29 — Verified real NeoForge server export and real game-world READ-ONLY audit
+
+The optional official-MDK NeoForge 1.21.1 CI now goes beyond compilation:
+a disposable headless Java 21 development server actually starts and calls
+the same runtime-registry exporter behind two CI-only gates (JVM property
+AND test environment variable). Production servers never auto-export:
+the ordinary helper still requires the operator command /mcedit2export.
+
+In the successful test run, Minecraft generated a genuine
+DataVersion-3955 JSON covering **26,684 registered block states**.
+The Python 3 importer verified its exact canonical state facts, full
+SHA-256 filename/content match, source marker, GameVersion and
+representative air, stone, water and waterlogged stair entries.
+This is a game-generated vanilla+NeoForge runtime state registry,
+NOT a snapshot from the user's installed modpack. No JAR binary is released.
+
+After the server shut down and saved its test world, the existing native
+MCEdit2 Java region backend opened a REAL Minecraft-generated 1.21.1
+level.dat and .mca dataset and performed the first real-game read-only
+compatibility audit: 4 region files, 168 header-indexed chunks and
+48 successfully parsed/tested chunks in a deterministic bounded sample.
+SHA-256 values of level.dat and every existing .mca file were identical
+before and after the audit. The scan used no world mutators or plugin
+callbacks, no staged editor edits, no partial region rewriting, and no
+game-dependent serialization approximations.
+
+GitHub CI run https://github.com/yanxiatao/mcedit2/actions/runs/39475914856
+passed full Java compilation, real game runtime export, Python schema
+handshake, and 1.21.1 real-region audit. Separate core tests now
+exercise valid and invalid importer handshake inputs (digest, version,
+source and required state completeness). The optional exporter workflow
+remains independently triggered so everyday Qt6/Python validation stays fast.
+
+Limitations: full-world scans, mods with real BEs, read/write/reopen in
+the actual game, cross-version releases and modded lighting/heightmap
+semantics have NOT been certified. A byte-identical READ-ONLY scan does
+not guarantee that editing/saving such a map is safe.
+
+## 0.3.0a30 — Original MCEdit2 feature-port batch (implementation-first)
+
+Responding to the decision to prioritize **unmigrated features before
+extensive testing**, this batch ports original Qt/metadata workflows in
+the working `python3-modern-editor` branch. All migrated widgets reuse
+the native Java NBT backend or existing EditSession editing transactions.
+It does NOT bring old PySide1 modules into the active Python3 process.
+
+**New dockable Qt6 modules:**
+- `WorldPanelsDock` restores World Info (full original Data NBT viewer),
+  player browsing and inventory/EnderItems ItemStack NBT inspection,
+  bounded native Chunk Inspector, and map_N.dat preview+original NBT.
+  No metadata/player/map writes, DataFixer conversions or guessed modded
+  ItemStack schemas have been introduced.
+- `NativeBlockPicker` is a searchable native-state selector: bounded
+  current-chunk palette discovery and explicit user-selected runtime
+  evidence JSON import. Selecting a state only changes toolbar input.
+- `PendingImportsDock` restores the pending multi-structure workflow:
+  queue .nbt/.schem/.schematic, edit per-item XYZ origins, review format
+  and DataVersion, remove or clear entries. Applying merges last-wins
+  overlapping destinations and uses one EditSession._commit, one Undo and
+  native BE/format preflight; refused commits leave queue intact.
+- `ShapeBrushDialog` migrates original square, round/ellipsoid, diamond,
+  cylinder and parabolic dome shapes. Fill, replace-only, optional hollow
+  shell, dimensions and center feed the existing native block transaction.
+- `HistoryDock` exposes applied/redo operations and BE/entity edit
+  counts using the same core undo stack, not a parallel transaction
+  implementation. `MinimapDock` draws generated chunk occupancy from
+  .mca/.mcr 8-KiB region headers with click-to-pan and zoom; no chunk
+  generation or NBT decoding is caused by zoom.
+- `map_panels_data` reuses the original MCEdit2 filled-map RGB palette
+  for known legacy indices. Unsupported newer/opaque palette entries are
+  visibly marked magenta and **not** passed off as exact modern colors.
+
+**Not complete yet:** writable world metadata and inventory/map
+properties, full modern map palettes and image import, all resource
+pack model geometries, lighting/biome reprocessing, cross-chunk or
+graph-aware entities/BE moves, all original Python2/PySide plugins,
+complete Bedrock LevelDB support, format-specific future Minecraft
+versions and a release-quality Windows binary. These are real feature
+gaps, not things to mark as done by moving source files unchanged.
+
+**Validation policy for this batch:** full CI and real-game save/reopen
+checks have deliberately not been the focus of this migration-first
+iteration. The previous 0.3.0a29 CI is NOT a claim that these new Qt6
+modules were tested. Keep Draft PR unmerged and use offline test worlds.
+
+
+## 0.3.0a31 — Resource-pack noncubic model geometry migration
+
+The source-only feature migration now extends the real streaming renderer,
+not merely the model inspector. Added `modern/mcedit2_next/block_models.py`:
+strict, bounded, independent Java JSON model resolver reading the already
+layered client JAR/resource pack/mod JAR `ResourceLibrary` assets. It
+combines `variants`, `multipart` with AND/OR property conditions,
+bounded model parent inheritance, merged texture variables, each element's
+from/to coordinates, face texture and per-face UV rectangle/rotation,
+quarter-turn blockstate X/Y rotations, and supported element rotations
+(-45/-22.5/0/22.5/45 degrees including the JSON `rescale` and `origin`
+fields). Zero-thickness plane elements are retained for foliage-style
+crossed geometry. Model parsing never loads or alters original world NBT.
+
+`StreamingAtlas` now maintains resolved special geometry and stable
+per-face texture tile IDs, passing immutable numeric model faces to
+`MeshBuildPool` on background workers. `greedy_section_geometry` keeps
+its old efficient rectangle merging for regular full cubes, but excludes
+noncubic/rotated/custom-UV states from fake solid-cube geometry and appends
+true model faces; neighbor special models no longer suppress exposed
+ordinary cube faces. External face culling is conservative, and a bounded
+special-geometry vertex count prevents massive per-section allocations.
+
+The OpenGL shader drops fully transparent atlas texels, avoiding fully
+opaque square backgrounds for basic alpha-cutout cross-plants and pane
+textures. Models outside this constrained vanilla JSON subset still use
+the existing unmistakable full-cube diagnostic fallback. This is **not**
+full parity with the original MCEdit2 scenegraph or Minecraft renderer:
+animated textures, biome-color models, accurate fluid transparency,
+sorted translucency, overlay/model-display transforms, weighted variant
+randomization, entity rendering, non-vanilla custom model loaders and
+precise subvoxel picking remain outstanding.
+
+Following the user's implementation-first direction, **the a31 renderer
+changes have not undergone full CI or actual OpenGL screenshots/game-view
+comparison yet**; prior a29 green results do not cover a30/a31. Keep PR
+Draft, master unchanged, no Windows preview release.
+
+
+## 0.3.0a32 — Streaming two-pass translucency migration (implementation-first)
+
+Added `render_layers.py`: conservative classification of known Minecraft
+water, stained/clear glass and selected translucent vanilla states, plus
+per-state resourcepack textures containing **partial** alpha. Unknown
+modded render-layer types are not guessed from names. Section keys can be
+sorted back-to-front using camera distance without rereading chunk NBT.
+
+`StreamingAtlas` now uses Qt QPainter `CompositionMode_Source` when
+inserting PNG tiles, **preserving their original alpha** rather than
+flattening transparent pixels against the original white atlas. It
+tracks which texture tiles contain genuinely partial alpha and passes a
+snapshot to the off-thread mesh classifier.
+
+The existing `greedy_section_geometry` retains its legacy flat-list API,
+but accepts optional `split_layers=True` with explicit translucent states:
+opaque triangles and translucent triangles are emitted separately while
+full-cube greedy merging, model-specific triangles, native blockstate
+identity and external-face culling are preserved. Interfaces between
+opaque blocks and translucent materials no longer hide the opaque
+background face; adjacent identical water/glass blocks suppress interior
+faces. `MeshBuildPool` supports a compatible optional two-byte-payload
+mode without changing the old default byte-returning worker API.
+
+`StreamingVoxel3DView` stores both layers in **one GPU buffer per
+Section**, draws opaque vertices first with normal depth writes, then
+draws the translucent subset with `GL_SRC_ALPHA /
+GL_ONE_MINUS_SRC_ALPHA`, `glDepthMask(GL_FALSE)` and **coarse
+back-to-front Section ordering**. The selection overlay draws after
+normal depth writes are restored. Layer opacity is adjustable through
+**View > 3D translucent opacity…**, persisted in QSettings, with no
+Section invalidation or world I/O. The standard alpha-cutout shader
+discards near-zero-alpha texture pixels in both passes.
+
+New focused `test_render_layers.py` and `test_translucent_atlas_qt.py`
+files document expected transparent/solid adjacency, transparent
+neighbor Section culling, worker backward compatibility, texture alpha
+retention and render-layer classification. Consistent with the user's
+explicit migration-first choice, these tests and full Mesa/Qt CI **have
+not yet been run on a32**. Prior green a29 workflows do not validate
+this source batch.
+
+Remaining renderer gaps: ordering is by Section center, **not per
+translucent face or fragment**, so intersecting glass/water may still
+produce artifacts. The global blended opacity is an approximation;
+Minecraft water-level surface geometry, biome/fluid tint, shader light,
+animated textures, refractive glass, weighted model alternatives and
+modded custom render types are NOT equivalent to the in-game renderer.
+No native map files or BE data are modified by these rendering changes.
+
+## 0.3.0a33 — Level-aware vanilla fluid surfaces (implementation-first)
+
+The streamed Qt6 3D viewport now constructs render-only sloped water/lava
+surfaces for **exact** `minecraft:water` / `minecraft:lava` blockstates
+with valid `level=0..15` values. The native state, Section NBT and region
+files remain unchanged. Source and flowing water levels use bounded corner
+height interpolation, clipped side quads, removal of connected-fluid
+interior faces, and six-cardinal-neighbor sampling. Diagonal neighbor
+Sections are not available, so corners never invent those samples.
+
+The fluid path is threaded through the existing two-pass greedy Section
+mesher, rather than a separate Qt render world. Ordinary opaque cubes,
+unknown modded block IDs, original custom model faces, old default mesh
+APIs and BE-saving safeguards retain their previous code paths. The
+resource atlas resolves vanilla still/flowing fluid tiles when available;
+for common vertically stacked animated PNGs it displays only the first
+unscaled frame. Every state level of one fluid shares those stable tiles.
+
+Added focused `test_fluid_geometry.py` and fluid-asset Qt tests for
+source/flowing/falling levels, neighbor borders, opaque adjacency, and
+backward compatibility. They are **committed as regression specifications**,
+not asserted to be passing; full Mesa, Qt, integration CI, and Minecraft
+runtime/game-save tests remain deferred under the user's migration-first
+direction.
+
+**Limits:** This is not the exact Minecraft fluid tessellator. Corner
+weighting and cross-boundary sampling are conservative approximations;
+no biome-aware fluid tint, waterlogged-subshape blending, animation
+playback, custom modded fluid renderers, per-face translucent sorting,
+or lighting propagation has been completed. Bedrock LevelDB and the
+remaining legacy Python2 editor capabilities are still outstanding.
+Keep Draft PR #1 open and unmerged; no Windows preview artifacts.
+
+## 0.3.0a34 — Native original Java world/player scalar editing and metadata restore
+
+Ported selected original MCEdit2 World Info and Players **write** controls into
+the Qt6 `WorldPanelsDock`, without loading legacy PySide1. New
+`metadata_edit.py` operates directly on existing **Java gzip NBT files**
+(`level.dat`, the `Data/Player` singleplayer compound or canonical
+`playerdata/<uuid>.dat`) rather than reconstructing world formats.
+
+- Explicit **existing scalar whitelist**: world name, game mode, difficulty,
+  command/hardcore flags, spawn X/Y/Z, game time and selected world-border
+  numerics; player health, food, XP, selected hotbar slot, air/fire and
+  invulnerability. Original NBT tag types must match each supported property.
+  No arbitrary NBT field, inventory, EnderItems, ItemStack or modded player
+  state insertion/deletion is enabled. Version-incompatible/missing tags
+  are rejected without guessing new schemas.
+- Uses the existing byte-span NBT scalar patcher and typed GUI conversion.
+  Every unrelated parsed NBT tag **remains byte-identical** in the
+  uncompressed original NBT. The complete gzip stream is recompressed, but
+  the complete compressed original is archived before replacement. There is
+  **no world DataVersion upgrade**. The native world's level.dat fingerprint
+  and spawn readout are synchronized only after an actual committed edit.
+- Immediate commits require **no pending EditSession region edits or
+  heightmap approvals**, matching world identity, unchanged
+  `level.dat`, unchanged displayed metadata snapshot, unchanged
+  original source file while preparing, original-world session.lock
+  ownership where supported and safe non-symlink paths. Each commit produces
+  a new original compressed NBT backup under
+  `.mcedit2-backups/<timestamp>-meta-<id>/...`, then an atomic
+  same-directory replacement retaining file mode.
+- Added **Restore original metadata backup…** to the World Info dock.
+  Only program-created metadata snapshot names and original target
+  paths are eligible; another inverse backup of the current target is
+  required before restoration. Restoring `level.dat` refuses a DataVersion
+  mismatch. The same session-lock, stale metadata and pending-edit checks
+  apply. Region backups and player-data backups remain separate.
+- These metadata edits are **deliberately outside** the existing region
+  EditSession Undo/Redo history. Use the explicit backup restore control
+  for reversal. This avoids claiming an atomic transaction across
+  unrelated chunk and metadata writers. World files must still be **offline
+  disposable copies**; lock behavior on all network filesystems cannot be
+  guaranteed.
+- Added `tests/test_metadata_edit.py` source-level regression
+  specifications for preserving modded NBT, inventory bytes, compressed
+  backup snapshots, stale-dialog/session-lock refusals, world position
+  refresh, inverse restoration and unsafe target rejection. As requested,
+  the full Linux Qt/Mesa CI and game-side compatibility matrix remain
+  **deferred**. No assertion of a passed suite or Windows build.
+
+**Remaining**: full player inventories/item counts, unknown modded
+metadata schema editors, advanced world generators, GUI metadata
+widgets, native map image writing, entities/BE graph moves, Bedrock
+LevelDB, full animation/render parity, modern chunk codec coverage,
+lighting/biome recalculation and live Minecraft version fixtures.
+Keep Draft PR #1 unmerged, only `python3-modern-editor` touched.
+
+## 0.3.0a35 — Original-format player ItemStack count / empty-slot editing (implementation-first)
+
+Expanded the native Java metadata writer and original MCEdit2 player Qt6 dock
+with a narrow, explicit **existing ItemStack** edit path. This is not a new
+item serializer or a cross-version inventory translator.
+
+- Supports existing entries in native `Inventory` and `EnderItems` on
+  the selected original singleplayer `Data/Player` or canonical
+  `playerdata/<uuid>.dat`. The selected tree row stores the exact original
+  NBT `TAG_List` member index; an index is **not** conflated with the
+  numeric `Slot` key.
+- **Edit existing stack count…** changes only the existing original numeric
+  `Count` (legacy) or `count` (modern) NBT value at a specified list
+  member, preserving its original Byte/Short/Int tag width. Conservative
+  supported counts are 1–127; no creation of empty stacks, identity
+  changes, modded component reserialization, or guessed DataFixer defaults.
+- **Move to empty native slot…** changes only that entry's original numeric
+  `Slot` value within its current container. Standard Inventory slots
+  0–35, 100–103 and -106 (legacy signed-byte offhand) and EnderItems
+  0–26 are accepted. No occupied target, duplicate existing Slot,
+  mod-added slot layout, container crossing, deletion, or wholesale
+  inventory rewriting is accepted.
+- Item `id`, modded `components`, nested custom NBT, enchantments,
+  other item entries, the list shape and the world `DataVersion` remain
+  unchanged at original uncompressed NBT byte-span level. The original
+  NBT `TAG_List` entry identity and count shape are validated before and
+  after the change. Unknown numeric field types, ambiguous dual
+  `count`/`Count`, unsupported slots, invalid data and noncanonical
+  `playerdata` names are rejected.
+- Both operations use the **same existing guarded metadata commit**
+  mechanism as 0.3.0a34: offline Minecraft `session.lock` check,
+  `level.dat` external-change guard, stale original player snapshot
+  comparison, no pending chunk/history/heightmap edits, compressed NBT
+  backup per write, atomic same-file replace and prior metadata-backup
+  restoration. These edits are **not** included in block-region Undo/Redo.
+- Added tests to `tests/test_metadata_edit.py` as source-level
+  specifications for original modded stack NBT preservation, Byte/Int
+  counts, empty/offhand slot moves, duplicate/occupied slot refusal,
+  stale dialog prevention and original gzip backup/restore.
+
+**Not claimed ready for valuable/live worlds:** Full Qt/Mesa Linux CI,
+real-game inventory round trips, modern snapshot-specific item schemas,
+modded containers and genuine Java/Bedrock multi-version validation are
+still pending under the migration-first workflow. No Windows build; Draft
+PR #1 stays unmerged. Further inventory parity needs whole-stack
+creation/deletion/transfer and inventory layout validation by version.
+
+## 0.3.0a36 — Loss-averse native ItemStack swaps and Inventory↔EnderItems transfers
+
+Ported the next original player-inventory workflow to Python 3 and Qt6:
+**swap two occupied native slots** or **move an existing stack between
+the same player's `Inventory` and `EnderItems` original NBT lists**.
+The new `inventory_transfer.py` is a pure original-byte-span NBT backend;
+the Players dock exposes **Transfer / swap existing ItemStack…** with an
+explicit confirmation identifying an occupied destination and swap partner.
+
+- Single-container swaps update only the two existing numeric `Slot` tag
+  payloads at their precise original byte offsets. Empty-slot movement
+  updates exactly one original numeric `Slot` tag; it does not rearrange
+  other item entries.
+- Cross-container moves retain the entire original item Compound payload
+  **byte-for-byte except `Slot`**, remove it from the original NBT List,
+  and append it to the existing destination List. An occupied destination
+  can be exchanged explicitly: the two complete original stack payloads
+  switch containers/slots in one original-file patch. Every unaffected
+  entry and unknown player/mod tag is preserved.
+- Both inventory lists must already exist. All participating list entries
+  must match recognized standard Inventory slots (0–35, 100–103, -106
+  offhand) or EnderItems slots (0–26), with unique original numeric
+  `Slot`, original `id` and one valid `Count` or `count` field.
+  Any unknown custom slot layout, invalid/missing/duplicate slot, ambiguous
+  count field, unrecognized NBT layout, over-limit list or unauthorized
+  occupied-slot overwrite is rejected.
+- The writer reuses the exact 0.3.0a34–a35 metadata commit path:
+  offline session lock, same-world `level.dat` fingerprint check, stale
+  player snapshot protection, no pending chunk edits or heightmap
+  approvals, complete original gzip file backup and atomic replacement.
+  The earlier inverse metadata restore UI can undo any successful transfer
+  by restoring the original compressed file. This is **not** part of
+  region Undo/Redo and is **not** a cross-player transfer.
+- `tests/test_inventory_transfer.py` contains source regression cases
+  covering byte-identical opaque components, same-list and cross-list
+  swaps, empty-list insertion, unsupported slots, no-accidental-overwrite,
+  roundtrip transfer and guarded disk save/inverse restoration.
+
+**Incomplete:** item creation/deletion, stack splitting/merging,
+modded slot layouts, arbitrary inventory item edits, native map updates,
+linked entity graph editing and version-specific modern component/item
+schemas. Source tests are committed, **not claimed executed/passed**;
+full Qt/Mesa CI, world/game reload tests and Windows packaging remain
+deferred until the broader migration is ready. Only existing Draft PR #1
+and `python3-modern-editor` are modified.
+
+## 0.3.0a37 — Existing original ItemStack split, strict merge and deletion
+
+Continued migrating MCEdit2's original-player inventory controls without
+inventing item registry data or normalizing modded ItemStack NBT. New
+`inventory_stacks.py` builds on the native, backup-protected `Inventory`
+and `EnderItems` edit and transfer paths.
+
+- **Split existing stack into an empty native slot:** clone the precise
+  original ItemStack Compound byte payload, changing only its native
+  `Slot` and numeric `Count`/`count` fields, and reduce the original
+  stack's count. The original stack must keep at least one item. A
+  cross-container split works within the *same player* only and only
+  when both native containers already exist. Unknown mod components,
+  enchantments, custom tags and unrelated list members are preserved.
+- **Merge into a strictly identical existing stack:** require an occupied
+  target with the same original `Count` tag name and NBT type and
+  **byte-identical entire ItemStack payload after removing only numeric
+  Slot and Count payloads**. Other modded metadata, identities, components,
+  nested tags and layout must match exactly. Full merge removes the
+  exhausted original list entry; partial merge leaves the exact
+  original metadata and decrements its count. No cross-player merge.
+- **Delete selected original stack:** explicitly remove one existing
+  original NBT List Compound and preserve every other stack's original
+  member bytes. An empty Compound List remains valid. This action
+  requires explicit confirmation because it destroys the selected
+  entry's contents.
+- Same native whitelist as a35/a36: standard Inventory (0–35,
+  100–103, signed-byte offhand -106) and EnderItems (0–26), unique
+  slots, existing original ID/Count fields, conservative numeric count
+  1–127, no new item identifiers or arbitrary modded container schemas.
+  Invalid slots, non-identical stacks, invalid count ranges, occupied
+  split destinations and absent original lists are refused without
+  changing the world.
+- Qt6 Players dock adds **Split / merge existing stacks…** and
+  **Delete selected existing stack…**. It discloses that there is *no*
+  version/mod-aware item registry lookup: Minecraft may use a smaller
+  per-item maximum (including unstackable items). This workflow is
+  experimental and must be used only on disposable offline world copies.
+- Writes share the guarded original `level.dat`/playerdata backend:
+  Minecraft session lock, stale dialog/fingerprint refusal, no pending
+  region edit transaction, complete compressed file backup and atomic
+  same-file replacement. **Inverse restore via original metadata backups**
+  is available. These changes do **not** participate in chunk
+  Undo/Redo and are not claimed cross-file atomic.
+- Added `tests/test_inventory_stacks.py` source regression cases for
+  same-/cross-container split and merge, full source removal, original
+  lowercase Int count, untouched modded fields, mismatched stacks,
+  invalid values and backup/restore.
+
+**Remaining:** registry-driven arbitrary ItemStack creation, broader mod
+inventories, version-specific item-component UI editors, native filled
+map painting/metadata edits, linked entity migrations, Bedrock LevelDB and
+other outstanding renderer/plugin parity. Tests have been **added but
+not run in a full Qt/Mesa/CI/game-world matrix** as requested. No
+Windows build, new PR, branch, merge or master changes.
+
+## 0.3.0a38 — Native original Java filled-map pixel canvas and guarded metadata
+
+Ported original MCEdit2 filled-map editing beyond the earlier **read-only**
+`map_N.dat` viewer. This migration operates **only on existing original
+Java gzip map files** under `world/data/`; it does not upgrade DataVersion,
+invent modern map palette colors or touch chunk region files.
+
+- New `native_map_edit.py` parses the original `data/colors` NBT
+  TAG_Byte_Array, validates width, height, exact array length and the
+  existing NBT tree, then patches **only changed pixel bytes** through
+  native NBT byte spans. The complete original map metadata, unknown
+  modded tags, unrelated array entries and original palette byte
+  values (including unsupported modern colors 208–255) remain intact.
+  Duplicate/out-of-bounds/invalid pixel requests fail before writing.
+- Qt6 **Paint original map pixels…** opens a staging-only interactive
+  `map_painter.py` canvas with mouse click/drag, native byte palette
+  selector, color sample, exact coordinate painting, bounded rectangle
+  fill and discard/revert staged changes. Explicit Save confirmation
+  is required before any write. The older MCEdit2 legacy palette is used
+  for previews. **Unsupported modern palette codes show diagnostic colors,
+  not invented 1.21+ colors.** The actual stored bytes are not converted.
+- A new **Edit original map scalar NBT…** action reuses the existing
+  NBT tree dialog but whitelists only existing matching native
+  `scale` (Byte, 0–4), `locked`, `trackingPosition`,
+  `unlimitedTracking` (Byte flags 0/1), and `xCenter`/
+  `zCenter` (Int) metadata tags. Original `colors`, dimension,
+  width/height, decoration entries and unknown mod data are never
+  editable through this generic scalar pathway.
+- Editing requires the Java native backend, a selected existing regular
+  `data/map_N.dat`, an unchanged original world `level.dat`
+  fingerprint, compatible session.lock and **no pending region edits**
+  or heightmap approvals. Stale UI snapshots are compared against the
+  original `data` NBT payload on disk before committing. The original
+  gzip file receives an exact compressed **backup first** in an
+  `.mcedit2-backups/<timestamp>-map-<id>/data/map_N.dat` snapshot;
+  replacement is an atomic same-directory original file write.
+- **Restore map backup…** browses only validated editor-generated
+  original-map backup paths, validates current/restored map dimensions,
+  refuses symlinks, files missing from the original world and external
+  level.dat changes, then archives a fresh inverse backup before
+  restoring the exact compressed source file. This is explicitly **outside
+  the region EditSession Undo/Redo system**.
+- New `tests/test_native_map_edit.py` supplies source-only synthetic
+  regression cases for pixel byte isolation, custom modded map field
+  preservation, unsupported palette-byte round-trip, metadata whitelist,
+  invalid geometry/coordinates, no-op, stale view, locks, gzip backup
+  and inverse restore. These tests were **not executed** under the
+  migration-first development plan.
+
+**Still missing**: accurate version-aware modern map color table and
+modded map palettes, decorated-map icon/marker editing, importing full
+palette images with guaranteed game color equivalence, changing map
+format/dimensions, Bedrock LevelDB maps, and actual Minecraft-version
+save/reload verification. No full Qt/Mesa CI pass or Windows packaging
+is claimed. All changes remain on Draft PR #1 / `python3-modern-editor`.
+
+## 0.3.0a39 — Native entity yaw/pitch and grouped within-chunk transforms
+
+Continued the Python 3/Qt6 original MCEdit2 entity editor migration by
+reusing the existing **native Java original-format entity save writer**.
+No world/UUID conversion or cross-file entity relocation was added.
+
+- `entity_edit.py` now reads an existing two-member `Rotation`
+  `TAG_List<TAG_Float>` and supports standalone whitelisted vanilla
+  entity yaw/pitch mutations by rewriting only the original two Float
+  payload bytes. Non-finite angles, unsupported/linked entities, absent
+  or incompatible Rotation lists and out-of-bounds values fail closed.
+  Original `Pos` (three Double values), entity ID, UUID, unknown mod
+  NBT, passengers and all unrelated tag bytes remain unchanged.
+- The native entity region/inline-entity chunk writer validates
+  **Pos and optionally Rotation** differences without changing
+  `patch_entity_positions`'s default Pos-only validation API.
+  Legacy entities **without** an original Rotation list remain eligible
+  for their prior Pos-only in-chunk edits; a Rotation field is never
+  invented. Staging can include both original Pos and Rotation for
+  one entity in the same chunk and the same save.
+- `entity_index.py` exposes optional read-only yaw/pitch in the entity
+  record. `entity_inspector.py` now shows those values and adds
+  **Edit selected entity yaw/pitch…** alongside existing position
+  editing and original NBT inspection. Both operations write through
+  native `EditSession` staging, one-action Undo/Redo, dirty-state
+  tracking, original region backup and save/reopen semantics.
+- **Move selected entities by offset (single undo)…** adds Qt6 list
+  multiselection and a bounded XYZ translate form. The core validates
+  the *entire* requested batch up front by asking the native backend
+  to test each candidate against the source entity and its current
+  storage chunk **without staging any write**. Invalid source/index,
+  duplicate entity selection, unsupported or linked NBT, cross-chunk
+  targets, nonnumeric input or more than 2048 selected members rejects
+  the batch. If all pass, one EditSession history entry groups the
+  individual Pos changes, with rollback on an unexpected partial
+  failure.
+- Source regression file `tests/test_entity_rotation.py` specifies
+  two-Float byte preservation, rejection of modded/linked entities,
+  dual Pos+Rotation edits, original Pos-only legacy compatibility,
+  grouped transaction preflight, single-undo behavior and original
+  separate `entities/*.mca` region save/backup/reopen. The
+  full Qt/Mesa CI, Minecraft-side reload and Windows packaging were
+  **not run** as the migration-first workflow is still in progress.
+
+**Remaining**: cross-chunk and cross-region entity migration,
+passenger/root-vehicle/leash UUID graph moves, native entity create/
+delete, complex riding and display item/model rendering, broad
+custom mod entity support, legacy plugin UI parity and complete
+version-by-version validation. Draft PR #1 stays open and unmerged
+on `python3-modern-editor`, with `master` unchanged.
+
+## 0.3.0a40 — Guarded original Java entity scalar NBT editing
+
+The migrated Qt6 entity inspector now includes an opt-in **Edit existing entity
+scalar NBT…** action, backed by strict native Anvil/MCRegion original-byte
+patching rather than arbitrary NBT deserialization and reconstruction.
+
+- New `entity_scalar.py` explicitly whitelists only *existing,
+  correctly typed, top-level* `NoAI`, `Silent`, `Glowing`,
+  `Invulnerable`, `NoGravity`, `CustomNameVisible`,
+  `PersistenceRequired` (Byte Boolean flags 0/1), plus existing
+  `Health` and `AbsorptionAmount` (Float 0–2048). No new fields
+  are synthesized; unrecognized historical kinds remain opaque and
+  unchanged, even if the entity's other original Pos fields are edited.
+  No version-specific mod data or entity registration is guessed.
+- Only the existing **simple standalone vanilla entity** allowlist is
+  editable. Unknown/modded IDs, `Passengers`, `Riding`, `Leash`,
+  `Attach`, ownership/root vehicle and other relationship fields
+  reject edits. The original Pos must belong to its existing storage
+  chunk; identity, UUID, world version, map state and all other NBT
+  remain immutable.
+- The scalar editor uses the original `nbt_scalar.patch_scalar`
+  byte-span patcher, preserving tag kind and every unrelated
+  original byte. Native `patch_entity_positions` now has an
+  **opt-in strict `allow_scalar`** verification path for the
+  actual Anvil region staging/saving code. Before on-disk write,
+  it revalidates the exact original entity structure and compares
+  all bytes except existing permitted scalar, Pos Double and
+  Rotation Float payload bytes. Arbitrary nested, modded or
+  UUID changes cannot accompany a scalar edit.
+- `NativeAnvilWorld` now exposes `get_entity_scalar` and
+  `set_entity_scalar`, integrated with the existing staged
+  `_entity_edits` dictionary. `EditSession.edit_entity_scalar`
+  creates a single Undo/Redo record per accepted operation and
+  coexists with previous Pos/Rotation and multi-entity edits.
+  The existing full-original-region backup precedes save.
+- `EntityListDialog` shows the existing NBT tree with a gated
+  scalar edit callback. The standard inspector may display many
+  original scalar tags, but **only the native whitelist** is
+  writable; unsupported entries produce an explicit refusal.
+  Saved edits refresh their current original entity payload.
+- `tests/test_entity_scalar.py` adds source-only specifications
+  for exact untouched UUID/opaque component bytes, Byte and Float
+  bounds, absent/wrong-typed fields, linked/modded source rejection,
+  unknown NBT hitchhiking prevention, composability with native
+  Pos/Rotation edits, EditSession Undo/Redo and separate
+  `entities/*.mca` backup/reopen.
+
+**Limitations:** This is not arbitrary entity NBT editing or a full
+entity creation/deletion/cross-chunk migration editor. Entity-specific
+game limits, linked graph handling and modded entity schemas remain
+unimplemented. New tests are **committed but have not been run** in
+the full PySide6/Mesa/CI or in-game version validation matrix.
+Windows packaging remains disabled. Only existing Draft PR #1 /
+`python3-modern-editor` is changed; `master` stays untouched.
+
+## 0.3.0a41 — Native original dropped-item and XP-orb entity deletion
+
+Expanded the Python 3/Qt6 MCEdit2 entity inspector with **guarded original
+Java entity List member removal**, retaining the original unknown NBT of
+all survivors and respecting world storage layout.
+
+- New `entity_delete.py` implements byte-preserving removal from existing
+  `Entities` TAG_List<TAG_Compound> under either modern root or legacy
+  `Level/Entities`. It reconstructs only the original NBT List's
+  element count and concatenation of unchanged original member payloads.
+  Unrelated world/chunk NBT and each survivor's original Entity compound
+  remain **byte-for-byte unchanged**.
+- **Intentionally narrow original entity allowlist:** only existing
+  unlinked `minecraft:item`, `minecraft:experience_orb`, legacy
+  `Item` and `XPOrb` from their actual original storage chunk. Any
+  Passenger/Riding/Leash/Owner/root-vehicle or other known linkage,
+  modded IDs, mobs, vehicles, malformed positions, invalid/duplicate
+  list indices or wrong chunk assignments are refused; no assumed
+  UUID graph rewrites or cross-chunk migration.
+- Native `NativeAnvilWorld` now retains a set of *original list indices*
+  for pending removals, separate from the prior indexed entity NBT edit
+  dictionary. Its Qt6 entity-list browser filters staged deletions
+  without renumbering surviving `EntityRecord.storage_index` values;
+  all other entities remain selectable/editable against their original
+  positions even when lower-numbered entries have been staged for
+  deletion. Deleting a record with pending original scalar/Pos/Rotation
+  edits is refused, preventing contradictory staged mutations.
+- `EditSession.delete_entities_in_chunk` preflights the **entire
+  bounded selection** before staging it as one history entry; a failed
+  candidate leaves every entity intact. Before Save, the operation
+  supports one-step Undo/Redo and uses existing rollback on staging
+  failures. Qt6 inspector adds **Delete selected dropped items /
+  XP orbs…** with explicit destructive confirmation.
+- On **Save**, the native region transaction first applies any valid
+  staged original entity edits, then removes selected original List
+  members in memory, parses and validates the result, and only then
+  creates a **complete original region file backup** before replacing
+  the native region. Both inline Java Anvil/MCRegion and separate
+  `entities/*.mca` storage are supported. `level.dat`, unknown
+  entity NBT, lighting/heightmaps, and unrelated region files are
+  not converted or rewritten.
+- **Undo limitation, made explicit:** committing a List contraction
+  shifts the persisted original entity indices, so all pre-save
+  session Undo/Redo history is invalidated after a successful Save
+  involving this structural action. After Save, use **File →
+  Restore native region backup…** for recovery. That restoration also
+  creates a fresh inverse backup. Other nonstructural operations retain
+  their existing prior Undo/Redo semantics.
+- `tests/test_entity_delete.py` adds source regression specifications
+  for identical surviving opaque entity bytes, type preservation of
+  empty Lists, modern and legacy layouts, malformed/linked/modded
+  refusal, original-index stability, all-or-nothing multi-delete
+  preflight, single-step staged Undo/Redo, mixed Pos edits with
+  deletion, original-region snapshots, saved reopen and inverse
+  region-backup restoration.
+
+**Not yet ported:** arbitrary entity creation; deletion of general
+living entities, passengers, vehicles or linked graph members;
+full modded identity/link schemas; cross-chunk and cross-region
+entity relocation. Original-world fixtures/CI/Qt/Mesa tests and
+Windows packaging are still deferred per migration-first priorities.
+Only the existing Draft PR #1 on `python3-modern-editor` was changed.

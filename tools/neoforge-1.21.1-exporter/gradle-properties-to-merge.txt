@@ -1,0 +1,7 @@
+# Merge these keys into official NeoForge 1.21.1 ModDevGradle MDK
+# gradle.properties. Retain upstream NeoForge and ModDevGradle versions.
+mod_id=mcedit2evidence
+mod_name=MCEdit2 Runtime Heightmap Evidence Exporter
+mod_license=MIT
+mod_version=0.1.0
+mod_group_id=org.mcedit2.evidence

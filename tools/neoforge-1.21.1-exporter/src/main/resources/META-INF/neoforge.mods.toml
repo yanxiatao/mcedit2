@@ -1,0 +1,27 @@
+modLoader="javafml"
+loaderVersion="[1,)"
+license="MIT"
+
+[[mods]]
+modId="mcedit2evidence"
+version="0.1.0"
+displayName="MCEdit2 Runtime Heightmap Evidence Exporter"
+authors="MCEdit2 Next contributors"
+description='''
+Opt-in, administrator-triggered exporter of read-only Minecraft 1.21.1 block
+state heightmap predicates and fluid state. No map editing functionality.
+'''
+
+[[dependencies.mcedit2evidence]]
+modId="neoforge"
+type="required"
+versionRange="[21.1,)"
+ordering="NONE"
+side="BOTH"
+
+[[dependencies.mcedit2evidence]]
+modId="minecraft"
+type="required"
+versionRange="[1.21.1]"
+ordering="NONE"
+side="BOTH"

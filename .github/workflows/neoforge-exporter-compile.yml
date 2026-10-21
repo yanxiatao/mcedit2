@@ -1,0 +1,103 @@
+name: Optional NeoForge 1.21.1 evidence exporter compile
+
+# No distributed binary and no world mutation; explicit opt-in only.
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [master]
+    types: [labeled]
+
+permissions:
+  contents: read
+
+jobs:
+  build-exporter:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.action == 'labeled' &&
+       github.event.label.name == 'run-next-exporter-ci')
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Fetch official 1.21.1 ModDevGradle MDK
+        run: |
+          git clone --depth 1 \
+            https://github.com/NeoForgeMDKs/MDK-1.21.1-ModDevGradle.git \
+            "$RUNNER_TEMP/official-mdk"
+      - name: Apply source-only exporter overlay
+        run: |
+          set -eu
+          src="tools/neoforge-1.21.1-exporter"
+          target="$RUNNER_TEMP/official-mdk"
+          rm -rf "$target/src/main/java/com/example/examplemod"
+          rm -f "$target/src/main/templates/META-INF/neoforge.mods.toml"
+          mkdir -p "$target/src/main/java/org/mcedit2/evidence" \
+                   "$target/src/main/resources/META-INF"
+          cp "$src/src/main/java/org/mcedit2/evidence/HeightmapEvidenceMod.java" \
+             "$target/src/main/java/org/mcedit2/evidence/"
+          cp "$src/src/main/resources/META-INF/neoforge.mods.toml" \
+             "$target/src/main/resources/META-INF/"
+          cat "$src/gradle-properties-to-merge.txt" >> "$target/gradle.properties"
+      - name: Build against actual Minecraft/NeoForge dependencies
+        run: |
+          cd "$RUNNER_TEMP/official-mdk"
+          chmod +x ./gradlew
+          ./gradlew build --no-daemon --stacktrace
+      - name: Verify exporter JAR exists (do not publish)
+        run: |
+          ls -lh "$RUNNER_TEMP/official-mdk/build/libs/"
+          test "$(find "$RUNNER_TEMP/official-mdk/build/libs" \
+            -maxdepth 1 -name '*mcedit2evidence*.jar' | wc -l)" -ge 1
+      - name: Run isolated headless Minecraft server and export runtime registry
+        timeout-minutes: 14
+        run: |
+          set -eu
+          cd "$RUNNER_TEMP/official-mdk"
+          # Only CI's ephemeral development server receives the JVM flag.
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("build.gradle")
+          src = path.read_text()
+          anchor = "programArgument '--nogui'"
+          assert src.count(anchor) == 1, "MDK server config changed"
+          src = src.replace(anchor,
+              anchor + "\n            systemProperty 'mcedit2.evidence.ciExport', 'true'")
+          path.write_text(src)
+          PY
+          mkdir -p run
+          printf 'eula=true\n' > run/eula.txt
+          set +e
+          MCEDIT2_EVIDENCE_CI=1 timeout 780 ./gradlew runServer --no-daemon --console=plain \
+              > "$RUNNER_TEMP/neoforge-exporter-runtime.log" 2>&1
+          exit_code=$?
+          set -e
+          tail -n 120 "$RUNNER_TEMP/neoforge-exporter-runtime.log"
+          if [ "$exit_code" -ne 0 ]; then
+            echo "NeoForge runtime export command failed (exit $exit_code)" >&2
+            exit "$exit_code"
+          fi
+          grep -q 'MCEDIT2_CI_EVIDENCE_OK' "$RUNNER_TEMP/neoforge-exporter-runtime.log"
+      - name: Verify exported game registry using Python 3 importer
+        run: |
+          set -eu
+          test_files=()
+          while IFS= read -r -d '' file; do test_files+=("$file"); done < <(
+            find "$RUNNER_TEMP/official-mdk" -path '*/mcedit2-evidence/*.json' -print0
+          )
+          if [ "${#test_files[@]}" -ne 1 ]; then
+            echo "Expected exactly one complete runtime JSON, found ${#test_files[@]}" >&2
+            exit 1
+          fi
+          PYTHONPATH=modern python3 \
+            tools/neoforge-1.21.1-exporter/verify_runtime_export.py "${test_files[0]}"
+      - name: Audit real Minecraft 1.21.1 game-generated region files (read-only)
+        run: |
+          set -eu
+          PYTHONPATH=modern python3 \
+            tools/neoforge-1.21.1-exporter/verify_runtime_world.py \
+            "$RUNNER_TEMP/official-mdk/run/world"

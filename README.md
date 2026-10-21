@@ -1,3 +1,43 @@
+> **MCEdit2 Next experimental Python 3 branch**
+>
+> You are viewing `python3-modern-editor`, an in-progress Qt6 and native Java
+> Anvil port. The legacy Python 2.7 instructions further down refer to the
+> original MCEdit2 and are **not** suitable for this branch's new application.
+> Use Python 3.12+, `python -m pip install -e .`, then
+> `python -m mcedit2_next`. The new app has **2D slice and experimental 3D OpenGL voxel views** (optional client-JAR
+> full-cube textures),
+> a plugin manager, undoable block editing, Java Anvil (.mca) and old MCRegion (.mcr)
+> original-format editing, guarded BE NBT scalar/structure editing,
+> a level-aware 3D fluid preview, guarded world/player metadata
+> scalar editing, and restricted original Java player **ItemStack count,
+> slot moves/swaps, Inventory↔EnderItems transfers, split, strict merge and
+> explicit deletion**. Unknown modded item NBT is preserved through original
+> byte-span edits; unsupported custom slots and unequal mod data are rejected.
+> The editor cannot infer each item's registry maximum stack size.
+> The Qt6 **Filled Maps** panel now supports a staged pixel painting canvas,
+> raw map palette byte editing, limited original map scalar metadata and
+> independent map_N.dat gzip backup/restore. Unsupported modern colors
+> have diagnostic previews, not invented palette mappings. Qt6 entity
+> inspection additionally supports undoable original Pos, yaw/pitch
+> Rotation, preflighted same-chunk multi-entity movement, and restricted
+> existing-typed entity scalar flags/Health/AbsorptionAmount edits.
+> It also supports guarded multi-selection deletion of original standalone
+> dropped items/XP orbs, preserving other entity NBT. Other entity types,
+> linked/modded entities and cross-chunk transforms remain refused.
+> Entity deletion supports Undo/Redo **before saving**; after saving,
+> recovery uses the complete native region backup because original List
+> indices have shifted. Complete original-file backups and explicit
+> restoration are provided. The **experimental BE-aware clipboard**
+> remains opt-in (Java 1.13+ only).
+> Metadata, ItemStack and map edits commit directly to their original
+> files, separate from region Undo/Redo; nondestructive native entity
+> edits use the region EditSession Undo/Redo. Version 0.3.0a41 has
+> not passed the full CI/game-world validation matrix; Windows packaging remains disabled.
+> It is **not yet fully equivalent to the original MCEdit2 editor**. Do not edit live or valuable maps. See the [migration checklist](MIGRATION_STATUS.md) for a feature-by-feature audit. For the
+> compatibility limits, developer instructions and plugin API, see
+> [MODERNIZATION.md](MODERNIZATION.md) and
+> [plugin development](doc/modern_plugins.md).
+
 [![Build status](https://ci.appveyor.com/api/projects/status/76956gfy2n7sl5me?svg=true)](https://ci.appveyor.com/project/codewarrior0/mcedit2)
 [![Build Status](https://travis-ci.org/mcedit/mcedit2.svg?branch=master)](https://travis-ci.org/mcedit/mcedit2)
 
