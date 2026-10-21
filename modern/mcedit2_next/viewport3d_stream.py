@@ -35,6 +35,8 @@ from .streaming_atlas import StreamingAtlas
 from .worldstream import SectionStreamer
 from .meshworker import MeshBuildPool
 from .render_layers import classify_translucent_states, section_depth_order
+from .clone_ghost_voxels import streaming_ghost_vertices
+from .fluid_geometry import fluid_info
 
 VERTEX = """#version 330 core
 layout (location=0) in vec3 position;
@@ -159,6 +161,7 @@ class StreamingVoxel3DView(Voxel3DView):
     def set_resources(self, files):
         super().set_resources(files)
         self._atlas = StreamingAtlas(self.resource_pack)
+        self._clone_ghost_cache = None
         self._mesh_pool.forget()
         self._mesh_failures.clear()
         self._atlas_revision = 0
@@ -410,6 +413,14 @@ class StreamingVoxel3DView(Voxel3DView):
             self._gpu[key] = MeshGPU(
                 buffer, len(payload) // 36, len(blended_bytes) // 36)
         self._vertex_count = sum(slot.vertices for slot in self._gpu.values())
+        # Reserve stable atlas tiles for the read-only Clone Tool ghost
+        # BEFORE checking atlas revision. No streamed Section is remeshed.
+        ghost_states = set(self.clone_preview_voxels.values())
+        ghost_tiles = self._atlas.tiles_for(ghost_states) if ghost_states else {}
+        ghost_excluded = (
+            set(self._atlas.models_for(ghost_states)) |
+            {state for state in ghost_states if fluid_info(state) is not None}
+        ) if ghost_states else set()
         if self._atlas_revision != self._atlas.revision:
             image = self._atlas.gpu_image()
             glActiveTexture(GL_TEXTURE0)
@@ -484,6 +495,37 @@ class StreamingVoxel3DView(Voxel3DView):
             glDepthMask(GL_TRUE)
             glDisable(GL_BLEND)
             glUniform1f(opacity_loc, 1.0)
+        # Independent bounded translucent material preview. This uses the
+        # same immutable source BlockStates and texture atlas as the world,
+        # but never modifies SectionStreamer/worker caches or original NBT.
+        if self.clone_preview_voxels:
+            cache_key = (tuple(target), self._atlas.revision,
+                         frozenset(ghost_excluded))
+            if (self._clone_ghost_cache is None or
+                    self._clone_ghost_cache[0] != cache_key):
+                vertices = streaming_ghost_vertices(
+                    self.clone_preview_voxels, target, ghost_tiles,
+                    excluded=ghost_excluded)
+                self._clone_ghost_cache = (cache_key, array("f", vertices).tobytes(),
+                                            len(vertices) // 9)
+            _, ghost_bytes, ghost_count = self._clone_ghost_cache
+            if ghost_count:
+                glUniform3f(offset_loc, 0., 0., 0.)
+                glBindBuffer(GL_ARRAY_BUFFER, self._buffer)
+                glBufferData(GL_ARRAY_BUFFER, len(ghost_bytes),
+                             ghost_bytes, GL_DYNAMIC_DRAW)
+                for i, n, offset in ((0, 3, 0), (1, 3, 12),
+                                     (2, 2, 24), (3, 1, 32)):
+                    glVertexAttribPointer(i, n, GL_FLOAT, GL_FALSE, 36,
+                                          ctypes.c_void_p(offset))
+                glEnable(GL_BLEND)
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+                glDepthMask(GL_FALSE)
+                glUniform1f(opacity_loc, 0.42)
+                glDrawArrays(GL_TRIANGLES, 0, ghost_count)
+                glDepthMask(GL_TRUE)
+                glDisable(GL_BLEND)
+                glUniform1f(opacity_loc, 1.0)
         if self.selection or self.clone_preview_boxes:
             vertices = self._selection_lines(target)
             # Both selection handles and clone ghost boxes use the same

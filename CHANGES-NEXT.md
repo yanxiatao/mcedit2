@@ -578,3 +578,25 @@ available and is not automatically replaced.
 - Added pure geometry, original Anvil NBT fidelity and offscreen
   Qt controller source regression specifications; no full CI,
   Mesa, game-world or Windows runs executed.
+
+## 0.3.0a51 — Bounded translucent Clone Tool BlockState ghost
+
+- For up to **2,048 planned block cells**, Clone Tool previews now
+  include atlas-textured or fallback-colored **semi-transparent
+  full-cube voxels**, as well as existing read-only 3D target
+  wireframes, mouse drag and grid snapping.
+- One original native BlockState snapshot is captured when
+  preview begins and reprojected without world rereads on
+  3D dragging. Repeat/rotate/mirror/scale and rigid group
+  translation follow the same coordinates as actual Apply.
+- Both classic and streaming OpenGL renderers have separate
+  non-depth-writing blended passes. Streaming uses the existing
+  stable texture atlas and cached preview geometry, without
+  remeshing chunks. Source BEs, unknown orientation, oversized
+  or unreadable selections use wireframe-only fallback.
+- **Complex block models and fluids are not yet accurately
+  represented** by the per-block preview. Apply still
+  independently preflights original BE/section/ID safety and
+  creates a normal one-step Undo/Redo edit.
+- Added pure projection/texture-geometry and offscreen Qt
+  source regressions, without running the full test matrix.

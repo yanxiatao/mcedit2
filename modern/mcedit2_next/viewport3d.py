@@ -46,9 +46,12 @@ FRAGMENT_SHADER = """#version 330 core
 in vec3 fragmentColor;
 in vec2 texCoord;
 uniform sampler2D textureAtlas;
+uniform float layerOpacity;
 out vec4 outColor;
 void main() {
-    outColor = vec4(fragmentColor, 1.0) * texture(textureAtlas, texCoord);
+    vec4 sampled = texture(textureAtlas, texCoord);
+    if (sampled.a < 0.1) discard;
+    outColor = vec4(fragmentColor, layerOpacity) * sampled;
 }
 """
 
@@ -112,6 +115,9 @@ class Voxel3DView(QOpenGLWidget):
         self._gl_error = None
         self._skipped = 0
         self.clone_preview_boxes = ()  # Read-only original coordinate boxes.
+        self.clone_preview_voxels = {}  # Bounded read-only native snapshot.
+        self._ghost_vertex_count = 0
+        self._clone_ghost_cache = None
         self._clone_drag = None  # (picked ray/plane start, vertical).
 
     @property
@@ -190,6 +196,15 @@ class Voxel3DView(QOpenGLWidget):
         """Request a 3D target-volume overlay, WITHOUT modifying chunks."""
         self.clone_preview_boxes = tuple(boxes)
         # Streaming subclass invalidate() does not rebuild decoded chunks.
+        self.invalidate()
+
+    def set_clone_preview_voxels(self, blocks):
+        """Show at most 2048 immutable-snapshot ghost cells without writes."""
+        from .clone_ghost_voxels import MAX_GHOST_VOXELS
+        if len(blocks) > MAX_GHOST_VOXELS:
+            raise ValueError("Textured preview exceeds voxel drawing budget")
+        self.clone_preview_voxels = dict(blocks)
+        self._clone_ghost_cache = None
         self.invalidate()
 
     def _selection_lines(self, target):
@@ -356,6 +371,7 @@ class Voxel3DView(QOpenGLWidget):
     def _build_mesh(self):
         if self.session is None:
             self._atlas_image, _ = make_atlas({})
+            self._ghost_vertex_count = 0
             return [], 0, 0
         r = max(4, min(24, int(self.radius)))
         # Sample bounded by 48^3 positions. Never generate new chunks.
@@ -376,20 +392,33 @@ class Voxel3DView(QOpenGLWidget):
                         blocks[(x, y, z)] = state
         self._skipped = skipped
         target = self.camera.target
-        self._atlas_image, tiles = make_atlas(blocks, self.resource_pack)
+        ghost = self.clone_preview_voxels
+        # Atlas state discovery must include BOTH original world and
+        # ghost states, even if their voxel coordinates overlap.
+        atlas_states = {
+            ("world", point): state for point, state in blocks.items()}
+        atlas_states.update(
+            {("ghost", point): state for point, state in ghost.items()})
+        self._atlas_image, tiles = make_atlas(
+            atlas_states, self.resource_pack)
         triangles = textured_mesh_blocks(blocks, target, tiles)
+        ghost_triangles = textured_mesh_blocks(ghost, target, tiles)
+        self._ghost_vertex_count = len(ghost_triangles) // 8
         selection = self._selection_lines(target)
-        return triangles + selection, len(triangles) // 8, len(selection) // 8
+        return (triangles + ghost_triangles + selection,
+                len(triangles) // 8, len(selection) // 8)
 
     def paintGL(self):
         from OpenGL.GL import (
             GL_ARRAY_BUFFER, GL_COLOR_BUFFER_BIT, GL_DEPTH_BUFFER_BIT,
             GL_DEPTH_TEST, GL_DYNAMIC_DRAW, GL_FALSE, GL_FLOAT, GL_LINES,
+            GL_BLEND, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
             GL_TRIANGLES, GL_TEXTURE_2D, GL_TEXTURE0, GL_RGBA, GL_UNSIGNED_BYTE,
             glActiveTexture, glBindTexture, glTexImage2D, glPixelStorei,
             GL_UNPACK_ALIGNMENT, glUniform1i,
             glBindBuffer, glBindVertexArray, glBufferData,
-            glClear, glClearColor, glDrawArrays, glEnable, glGetUniformLocation,
+            glClear, glClearColor, glDrawArrays, glEnable, glDisable,
+            glBlendFunc, glDepthMask, glGetUniformLocation, glUniform1f,
             glUniformMatrix4fv, glUseProgram, glViewport,
         )
         glViewport(0, 0, max(1, self.width()), max(1, self.height()))
@@ -418,14 +447,28 @@ class Voxel3DView(QOpenGLWidget):
         glUniformMatrix4fv(glGetUniformLocation(self._program, "projectionMatrix"),
                            1, GL_FALSE, (ctypes.c_float * 16)(*projection))
         glUniform1i(glGetUniformLocation(self._program, "textureAtlas"), 0)
+        opacity_loc = glGetUniformLocation(self._program, "layerOpacity")
+        glUniform1f(opacity_loc, 1.0)
         glActiveTexture(GL_TEXTURE0)
         glBindTexture(GL_TEXTURE_2D, self._texture)
         glBindVertexArray(self._vao)
         if self._vertex_count:
             glDrawArrays(GL_TRIANGLES, 0, self._vertex_count)
+        if self._ghost_vertex_count:
+            glEnable(GL_BLEND)
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+            glDepthMask(False)
+            glUniform1f(opacity_loc, 0.42)
+            glDrawArrays(GL_TRIANGLES, self._vertex_count,
+                         self._ghost_vertex_count)
+            glDepthMask(True)
+            glDisable(GL_BLEND)
+            glUniform1f(opacity_loc, 1.0)
         if self._line_count:
-            # Slight z fighting at the boundary is acceptable in this preview.
-            glDrawArrays(GL_LINES, self._vertex_count, self._line_count)
+            # Draw the original selection and clone target borders last.
+            glDrawArrays(
+                GL_LINES, self._vertex_count + self._ghost_vertex_count,
+                self._line_count)
         glBindVertexArray(0)
         glUseProgram(0)
 

@@ -1869,3 +1869,84 @@ freeform or fractional scaling/rotation, complex linked BE/entity
 graphs, and complete original MCEdit2 GUI/tool parity. The added
 source tests have deliberately not been executed against a full
 Qt/Mesa/Minecraft-version matrix or Windows packaging workflow.
+
+## 0.3.0a51 — Bounded read-only translucent Clone Tool material preview
+
+Expanded the Qt6 Clone Tool beyond a wireframe-only 3D placement UI.
+For plans of **up to 2,048 planned original block cells**, the
+preview now produces a translucent render of the original BlockState
+snapshot in both the classic and streaming OpenGL 3D views, alongside
+the existing per-copy wireframe bounds and white drag handle.
+
+- Added `clone_ghost_voxels.py`: snapshot original BlockStates
+  **once** from the selected source volume, refusing any source
+  Block Entity before representing it as an ordinary block-only
+  material ghost. Compute projected original positions from the
+  exact same immutable `CloneGhost` group-position/step formula
+  used by native Apply. Supports single offset, repeated, 90°
+  rotated/mirrored, and integer XYZ-scaled repeat modes.
+  The established conservative `transform_state` codec is
+  reused for every oriented voxel. Unknown oriented/modded
+  states refuse the voxel visualization rather than claiming
+  an invented direction. Later overlapping copies win, and
+  original air states erase preceding preview voxels before
+  filtering invisible geometry. None of this mutates the
+  editor session or region file.
+- The bounded GPU mesh is a simplified **full-cube preview**:
+  atlas-backed cube faces where textures exist, otherwise
+  deterministic native BlockState colors. The streaming
+  renderer uses its **existing stable atlas** and compatible
+  9-float GPU vertex layout, while refusing to draw guessed
+  cubes for resolved non-full-cube JSON models and fluids;
+  those shapes remain covered by visible wireframe bounds.
+  The classic renderer uses its original 8-float full-cube
+  texture path. Complex multipart models, fluid surfaces and
+  unrecognized modded render geometry are **not** represented
+  as accurate per-element meshes.
+- The translucent material is drawn in a separate bounded
+  alpha-blended pass (opacity 0.42) after world solids with
+  depth writes off. Both renderers retain the original
+  red/cyan/green selection and Clone Tool line overlays.
+  The streaming viewer caches immutable ghost geometry for
+  camera movement and uses no SectionStreamer edits,
+  background write jobs, modified NBT or chunk remeshing.
+  Resource-pack atlas replacement invalidates ghost UV
+  caches, and closing world sessions clears original
+  preview geometry and GPU counts.
+- The original source states are read **at most once when
+  creating the preview**; mouse dragging, absolute grid snap,
+  independent group translation and new wireframe projection
+  reuse the same cached native snapshot, requiring no
+  repeated disk or BlockState scans. Parameter/selection
+  changes invalidate the preview. The **Apply** action
+  still rereads the current original world and independently
+  validates all source/target BEs, valid original region
+  sections, legacy metadata, allowed orientation rules and
+  native-save constraints before staging a single grouped
+  Undo/Redo operation. A material preview is never approval
+  for a potentially unsafe world edit.
+- For selections over the 2,048 planned-cell visual limit,
+  unreadable original blocks, source BEs, or unsupported
+  orientation, the editor retains the bounded **wireframe-only**
+  target preview and explains the fallback in the Qt6 Tool
+  Palette and status bar. Large previews do not secretly
+  allocate oversized opaque region/atlas snapshots.
+- Added `tests/test_clone_ghost_voxels.py` source regressions
+  for exact original-state projection in every mode,
+  source caching and no disk writes, projected air/overlap
+  precedence, strict BE/orientation refusal, source/target
+  limits and original streaming atlas tile/mesh layout.
+  Added `tests/test_clone_ghost_qt.py` offscreen Qt
+  controller specifications for material previews, dragging
+  without new world reads, source BE fallback, oversized
+  wireframe fallback, clear/parameter-change cleanup and
+  single-step Undo/Redo. Updated the existing fake GL
+  viewport to support independent material ghost state.
+
+**Remaining:** fully accurate semitransparent block JSON element
+rendering for stairs, slabs, models and animated fluids; material
+preview for very large selections; sorted per-face alpha for
+intersecting translucent surfaces; linked/owned BE and entity
+ghosts; full Windows and Minecraft-version integration tests.
+The new tests were **committed as source only**, not executed
+against the full Qt/Mesa/real-world CI matrix.

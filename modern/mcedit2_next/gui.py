@@ -158,6 +158,8 @@ class MainWindow(QMainWindow):
         self.slice_view = SliceView()
         self.volume_view = None  # Created on demand for environments without GL 3.3.
         self._clone_preview = None  # (session, original Box, immutable geometry)
+        self._clone_preview_source_states = None  # Optional original snapshot.
+        self._clone_preview_visual_note = "Wireframe only."
         self._clone_drag_start_placement = None  # Frozen rigid-group position per gesture.
         self.view = self.slice_view
         self.active_brush = None
@@ -1146,6 +1148,38 @@ class MainWindow(QMainWindow):
         self.view.update()
         self.minimap_dock.canvas.update()
 
+    def _project_clone_preview_voxels(self, box, plan, originals):
+        """Reproject from one native source snapshot, with NO world reads on drag."""
+        from .clone_ghost_voxels import project_clone_ghost
+        return project_clone_ghost(
+            box, plan, originals,
+            legacy=bool(getattr(self.session.world, "legacy", False)))
+
+    def _set_clone_preview_visuals(self, box, plan, originals):
+        """Replace the bounded wireframe and optional full-cube ghost."""
+        from .clone_ghost_voxels import MAX_GHOST_VOXELS
+        blocks = {}
+        note = "Wireframe only."
+        if originals is not None and plan.planned_cells <= MAX_GHOST_VOXELS:
+            try:
+                blocks = self._project_clone_preview_voxels(
+                    box, plan, originals)
+                note = (
+                    f"Read-only translucent texture/color ghost: "
+                    f"{len(blocks):,} non-air blocks. "
+                    "Custom non-cubic models and fluids remain wireframe-only "
+                    "in streamed 3D.")
+            except (ValueError, OSError, KeyError) as exc:
+                note = f"Voxel ghost unavailable ({exc}); wireframe only."
+        elif plan.planned_cells > MAX_GHOST_VOXELS:
+            note = (
+                f"Voxel ghost capped at {MAX_GHOST_VOXELS:,} planned cells; "
+                "wireframe only.")
+        self.volume_view.set_clone_preview_boxes(plan.boxes)
+        self.volume_view.set_clone_preview_voxels(blocks)
+        self._clone_preview_visual_note = note
+        return note
+
     def begin_clone_preview_drag(self):
         """Capture rigid-group position, leaving repeat stride unchanged."""
         self._clone_drag_start_placement = (
@@ -1199,7 +1233,8 @@ class MainWindow(QMainWindow):
                 finally:
                     control.blockSignals(previous)
             self._clone_preview = (session, source, new)
-            self.volume_view.set_clone_preview_boxes(new.boxes)
+            self._set_clone_preview_visuals(
+                source, new, self._clone_preview_source_states)
             palette.set_clone_preview_summary(new)
             palette.apply_preview_button.setEnabled(True)
         except (ValueError, OverflowError) as exc:
@@ -1211,9 +1246,12 @@ class MainWindow(QMainWindow):
     def clear_clone_wireframe_preview(self):
         """Dismiss only the 3D preview; no native data is staged or edited."""
         self._clone_preview = None
-        self._clone_drag_start_offset = None
+        self._clone_preview_source_states = None
+        self._clone_preview_visual_note = "Wireframe only."
+        self._clone_drag_start_placement = None
         if self.volume_view is not None:
             self.volume_view.set_clone_preview_boxes(())
+            self.volume_view.set_clone_preview_voxels({})
         if hasattr(self, "tool_palette") and hasattr(
                 self.tool_palette, "preview_info"):
             self.tool_palette.preview_info.setText("No clone preview active.")
@@ -1239,12 +1277,28 @@ class MainWindow(QMainWindow):
             raise ValueError(
                 "3D Clone Tool preview requires an available OpenGL viewport")
         self.clear_clone_wireframe_preview()
+        from .clone_ghost_voxels import (
+            MAX_GHOST_VOXELS, snapshot_clone_states,
+        )
+        originals = None
+        reason = None
+        if plan.planned_cells <= MAX_GHOST_VOXELS:
+            try:
+                originals = snapshot_clone_states(
+                    self.session, original_box)
+            except (ValueError, OSError, KeyError) as exc:
+                reason = str(exc)
         self._clone_preview = (self.session, original_box, plan)
-        self.volume_view.set_clone_preview_boxes(plan.boxes)
+        self._clone_preview_source_states = originals
+        note = self._set_clone_preview_visuals(
+            original_box, plan, originals)
+        if reason:
+            note = f"Voxel ghost unavailable ({reason}); wireframe only."
+            self._clone_preview_visual_note = note
         self.statusBar().showMessage(
-            f"Read-only 3D Clone Tool preview: {len(plan.boxes)} "
-            f"target wireframe(s), {plan.planned_cells:,} planned cells. "
-            "Orbit/zoom freely; click Apply in the Tool Palette to commit.")
+            f"Read-only Clone Tool preview: {len(plan.boxes)} target(s), "
+            f"{plan.planned_cells:,} planned cells. {note} "
+            "Apply reruns native BE and Section checks.")
         return plan
 
     def apply_clone_wireframe_preview(self):

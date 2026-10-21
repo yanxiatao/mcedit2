@@ -18,7 +18,12 @@ class FakeVolumeView:
     def __init__(self):
         self.selection = (1, 0, 1, 0)
         self.boxes = ()
+        self.voxels = {}
         self.invalidates = 0
+
+    def set_clone_preview_voxels(self, blocks):
+        self.voxels = dict(blocks)
+        self.invalidates += 1
 
     def set_clone_preview_boxes(self, boxes):
         self.boxes = tuple(boxes)

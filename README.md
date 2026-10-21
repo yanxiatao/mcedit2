@@ -19,8 +19,14 @@
 > placement). Dragging moves all copies together without altering
 > their n×step spacing. Apply revalidates original native data,
 > while Clear dismisses the preview without writes.
-> This is a geometry-only wireframe, not a textured voxel ghost or
-> a guarantee that BE/target sections are writable. The block-only
+> For previews of up to **2,048 planned block cells**, both 3D
+> renderers also display a read-only semi-transparent **full-cube
+> material/color ghost** from one cached original BlockState snapshot.
+> The streamed renderer uses the existing texture atlas without
+> remeshing native world chunks; custom multi-element models and
+> fluid surfaces are not yet accurate per-block ghosts. Larger or
+> unsafe selections fall back to the wireframe, with a UI explanation.
+> This is not proof that target BEs/sections are writable. All block-only
 > cloning operations share single-step Undo, full BE/native target
 > preflight and persistent Qt6 copy-count/orientation/scale controls;
 > guarded BE NBT scalar/structure
@@ -55,7 +61,7 @@
 > remains opt-in (Java 1.13+ only).
 > Metadata, ItemStack and map edits commit directly to their original
 > files, separate from region Undo/Redo; nondestructive native entity
-> edits use the region EditSession Undo/Redo. Version 0.3.0a50 has
+> edits use the region EditSession Undo/Redo. Version 0.3.0a51 has
 > not passed the full CI/game-world validation matrix; Windows packaging remains disabled.
 > It is **not yet fully equivalent to the original MCEdit2 editor**. Do not edit live or valuable maps. See the [migration checklist](MIGRATION_STATUS.md) for a feature-by-feature audit. For the
 > compatibility limits, developer instructions and plugin API, see

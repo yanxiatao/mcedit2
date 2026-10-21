@@ -216,7 +216,10 @@ class ToolPaletteDock(QDockWidget):
             self.preview_snap.addItem(f"{grid}-block absolute world grid", grid)
         preview_form.addRow("Drag snap", self.preview_snap)
         preview_note = QLabel(
-            "Read-only target volume wireframes (not textured voxel ghosts). "
+            "Up to 2048 planned block cells show an optional translucent "
+            "resource-pack full-cube ghost alongside target wireframes; "
+            "larger/unsafe selections use wireframes only. This does not "
+            "simulate Block Entities, fluids or custom model shapes. "
             "Ctrl+Alt+drag the WHITE cross at the first preview box center "
             "to reposition horizontally; Ctrl+Alt+Shift+drag for Y. "
             "Snap aligns the first box minimum to the absolute world grid. "
@@ -454,7 +457,8 @@ class ToolPaletteDock(QDockWidget):
             f"First copy: {plan.boxes[0][0]} → {plan.boxes[0][1]}. "
             f"Step: {plan.offset}. Group position: {plan.placement}. "
             "Cyan = earlier copies, green = last. "
-            "Wireframes are read-only; Apply performs native preflight.")
+            "All previews are read-only; Apply performs native preflight. "
+            + self.editor._clone_preview_visual_note)
 
     def preview_clone(self):
         try:
