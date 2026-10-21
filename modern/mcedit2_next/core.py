@@ -505,6 +505,43 @@ class EditSession:
         states = tuple(self.world.get_block(*point) for point in source)
         return self._commit(list(zip(targets, states)))
 
+    def clone_box_repeated(self, box: Box, offset: Position,
+                           repetitions: int) -> int:
+        """Tile an original block-only snapshot at consecutive step offsets.
+
+        Corresponds to MCEdit2 CloneTool's repeat/tiling workflow. Each
+        stamp uses the SAME original snapshot, including when a destination
+        overlaps the source. Later stamps win if destinations overlap.
+        Deduplicating the targets before _commit is essential: duplicate
+        history entries for one cell would corrupt the Undo baseline.
+
+        No entities or Block Entities are transferred. All source and
+        target BE positions, native IDs and existing destination sections
+        are checked before staging a single world edit.
+        """
+        dx, dy, dz = self._offset3(offset)
+        if type(repetitions) is not int or not 1 <= repetitions <= 128:
+            raise ValueError("Clone repeat count must be an integer in 1..128")
+        if not (dx or dy or dz):
+            raise ValueError("Clone tiling requires a nonzero XYZ step")
+        # Cap *planned* work before materializing any source/target blocks,
+        # even when many stamps overlap and the unique destination is small.
+        self._check_size(box.volume * repetitions)
+        source = tuple(box.points())
+        # Read the complete original source before any staged world mutation.
+        self._ensure_block_only(source)
+        original_states = tuple(self.world.get_block(*point)
+                                for point in source)
+        destinations: dict[Position, Any] = {}
+        for repeat in range(1, repetitions + 1):
+            ox, oy, oz = dx * repeat, dy * repeat, dz * repeat
+            for (x, y, z), state in zip(source, original_states):
+                # Keys are unique; later stamps take precedence. A target
+                # may overlap the source, but the snapshot cannot cascade.
+                destinations[(x + ox, y + oy, z + oz)] = state
+        self._ensure_block_only(destinations)
+        return self._commit(list(destinations.items()))
+
     def move_box(self, box: Box, offset: Position, air: Any) -> int:
         """Shift a selection without converting its block states or metadata.
 

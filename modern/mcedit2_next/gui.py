@@ -297,6 +297,8 @@ class MainWindow(QMainWindow):
         self.add_action(edit_menu, "Paste with BE NBT (experimental)…", "", self.paste_with_be)
         self.add_action(edit_menu, "Paste at center", "Ctrl+V", self.paste)
         self.add_action(edit_menu, "Clone selection by offset…", "", self.clone_selection)
+        self.add_action(edit_menu, "Repeat clone / tile selection…", "",
+                        self.repeat_clone_selection)
         self.add_action(edit_menu, "Move selection by offset…", "", self.move_selection)
         self.add_action(edit_menu, "Rotate selection clockwise 90°", "",
                         lambda: self.transform_selection("clockwise"))
@@ -1742,6 +1744,27 @@ class MainWindow(QMainWindow):
         if offset is None:
             return
         self._perform(lambda: self.session.clone_box(self._box(), offset))
+
+    def repeat_clone_selection(self, repetitions=None):
+        """CloneTool-style repetition from the menu or the persistent dock."""
+        offset = self._selection_offset("Repeat clone / tile selection…")
+        if offset is None:
+            return
+        if not any(offset):
+            QMessageBox.information(
+                self, "Repeated clone", "Choose a nonzero XYZ step.")
+            return
+        if repetitions is None:
+            repetitions, ok = QInputDialog.getInt(
+                self, "Repeated original-state clone",
+                "Number of copies (each offset is a multiple of the XYZ step; "
+                "later copies win where targets overlap). "
+                "Block Entities and entities are excluded.",
+                2, 1, 128)
+            if not ok:
+                return
+        self._perform(lambda: self.session.clone_box_repeated(
+            self._box(), offset, repetitions))
 
     def move_selection(self):
         offset = self._selection_offset("Move selection by offset…")

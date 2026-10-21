@@ -28,6 +28,7 @@ class ToolPaletteDock(QDockWidget):
         ("Flood-fill within selection", "flood_selection"),
         ("Line between selected corners", "selection_line"),
         ("Clone selected volume…", "clone_selection"),
+        ("Repeat clone / tile selection…", "repeat_clone_selection"),
         ("Move selected volume…", "move_selection"),
         ("Rotate selection clockwise 90°", "rotate_clockwise"),
         ("Mirror selection East / West", "mirror_x"),
@@ -145,6 +146,21 @@ class ToolPaletteDock(QDockWidget):
         self.sphere_hollow.setObjectName("tool_palette_sphere_hollow")
         shape_form.addRow(self.sphere_hollow)
         vertical.addWidget(self.shape_params)
+
+        clone_group = QGroupBox("Repeat clone / tiling", root)
+        clone_form = QFormLayout(clone_group)
+        self.repeat_count = QSpinBox(clone_group)
+        self.repeat_count.setObjectName("tool_palette_clone_repeat_count")
+        self.repeat_count.setRange(1, 128)
+        self.repeat_count.setValue(2)
+        clone_form.addRow("Number of copies", self.repeat_count)
+        repeat_info = QLabel(
+            "Choose Repeat clone / tile selection, then enter the XYZ "
+            "step. Copies use original block states, not cascading results. "
+            "No entities or Block Entities are transferred.")
+        repeat_info.setWordWrap(True)
+        clone_form.addRow(repeat_info)
+        vertical.addWidget(clone_group)
 
         transform_group = QGroupBox("Selection bounds · no block edits", root)
         transform_form = QFormLayout(transform_group)
@@ -347,6 +363,8 @@ class ToolPaletteDock(QDockWidget):
                      self.editor.view.center_z),
                     self.sphere_radius.value(), self.editor._block(),
                     self.sphere_hollow.isChecked()))
+            elif action == "repeat_clone_selection":
+                self.editor.repeat_clone_selection(self.repeat_count.value())
             elif action == "rotate_clockwise":
                 self.editor.transform_selection("clockwise")
             elif action in ("mirror_x", "mirror_z"):

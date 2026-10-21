@@ -10,7 +10,7 @@ still exist. This is an engineering checklist rather than a release promise.
 | Desktop editor and menus | Qt6 MainWindow, tool palette, World Info / Players / Chunk / Maps docks, history, minimap, queued imports and searchable Block Picker | Guarded world/player scalar and existing ItemStack edits; native Java filled-map pixel canvas and limited map metadata fields with independent gzip backup/restore; still lacks arbitrary item creation, modded slot editors, accurate modern map colors and original widget parity |
 | 2D and 3D map views | 2D slice; OpenGL 3.3 Section streaming; Java blockstate variant/multipart JSON elements and rotated noncubic meshes while retaining greedy opaque cubes | Per-face translucent sorting, biome-aware fluid tint, animated texture playback, complex mod renderers, entity models, lighting and LOD (level-aware water/lava meshes are approximate) |
 | Camera, picking and selection | Orbit, zoom, 3D ray selection, coordinate jump | Full MCEdit2 camera/navigation/selection widgets |
-| Clone/move, copy, fill, replace, paint and undo | Native offset clone/move, original square/round/diamond/cylinder/parabolic dome fill/replace brushes, flood fill, shapes, statistics, filters, dock tools, session history panel and transactions | More rotation variants, modded transformation rules, entities/BE-aware movement and persistent/branching history |
+| Clone/move, copy, fill, replace, paint and undo | Native offset clone/move and original-block-state repeat/tiling clone, guarded by BE/target preflight and one-step Undo/Redo; square/round/diamond/cylinder/parabolic dome fill/replace, flood fill, statistics, filters, dock tools, session history | Full original repeat preview/rotation/scaling/drag handles, modded transformations, linked BE/entity-aware movement and persistent/branching history |
 | Java 1.13+ Anvil | Native paletted Sections and guarded region rewrites | Newer codecs, full chunk heightmap/light/biome maintenance and real-world version matrix |
 | Java 1.2–1.12 Anvil (.mca) | Native numeric IDs and metadata in original 16³ Sections | Mod-specific block geometry, lighting/heightmap updates, real-world game fixtures |
 | Java Beta 1.3–1.1 MCRegion (.mcr) | Native XZY 128-height chunks, ID/metadata editing, backup and reopening | Old-style lighting/heightmap recalculation, real-world game fixtures | 
@@ -1496,3 +1496,52 @@ analysis, automatic registry-driven ItemStack creation or complete
 old MCEdit2 UI parity. These new regression cases are committed as
 source; the full real-world/Qt/Mesa/CI and Windows packaging checks
 have deliberately not been run.
+
+## 0.3.0a45 — Repeated original-state CloneTool tiling
+
+Ported an additional original MCEdit2 Clone Tool workflow into the
+Python 3/Qt6 editor: **repeat clone/tiling by XYZ step**, available from
+the Edit menu and the dockable Tool Palette with a persistent
+repeat-count control.
+
+- `EditSession.clone_box_repeated(box, step, repetitions)` accepts
+  1–128 repeats, constrained by the session's existing total-block
+  safety limit **before loading source data**. The source selection is
+  snapshotted only once and copied at `source + n × (dx,dy,dz)`
+  for n=1..repetitions, retaining the original BlockState (including
+  version-specific state properties / legacy numeric ID+metadata).
+- When stamps overlap the source or other stamped destinations,
+  source values **never cascade**. Later stamps overwrite earlier
+  stamps, and deduplicated target coordinates produce **exactly one
+  before/after Undo entry per changed block**, so Undo/Redo can
+  restore original overwritten source and destination contents.
+- The operation is explicitly **block-only**, just like the existing
+  conservative offset Clone tool. All original source/target Block
+  Entity coordinates are checked before mutation; the backend
+  preflights every changed target against existing native Java
+  sections, unsupported IDs and protected positions before any
+  staging. Entity NBT, unknown/modded BE payloads, biome data,
+  lighting/heightmaps and untouched native chunk data are not
+  transformed. Missing original chunks are not generated.
+- Edit menu `Repeat clone / tile selection…` prompts for XYZ step
+  and repeat count. The tool dock adds a repeat/tiling choice and
+  persistent count (1–128); repeat executes via the same guarded
+  session transaction. A rejected step, count, source BE, destination
+  BE, invalid ID or missing section creates no staged blocks or Undo
+  record.
+- `tests/test_clone_tiling.py` includes source-only specifications
+  for disjoint and overlapping stamps, last-writer-wins with original
+  snapshot, single grouped Undo/Redo, oversized/boolean count and
+  zero/fractional-offset refusal, source/target BE fail-closed
+  protection, late native section and state preflight, exact legacy
+  ID/metadata retention, modern unknown mod BlockState retention,
+  both native Java Anvil and MCRegion original NBT byte preservation,
+  full-region backup, save/reopen and post-save Undo.
+
+**Remaining original Clone Tool gaps:** independent rotation/scaling
+preview, visual ghost-placement/drag manipulation, per-copy palette or
+entity/Block Entity aware tiling, complex modded orientation/identity
+graph updates and large-volume streaming of edits. No full
+Minecraft-version/Qt/Mesa test suite or Windows packaging run has
+been executed for this migration-first iteration; the source test
+cases have not been claimed to pass.

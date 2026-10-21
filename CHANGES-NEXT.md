@@ -481,3 +481,17 @@ available and is not automatically replaced.
 - Added source regression specifications for same-target and
   multi-region batches, exact UUID/NBT fidelity, atomic rejection,
   region recovery and save/reopen. Full tests remain deferred.
+
+## 0.3.0a45 — Repeated selection clone / tiling
+
+- Ported original Clone Tool repeat-count workflow to Qt6 Edit menu
+  and dockable Tool Palette with persistent copy-count control.
+- All 1–128 copies use **one pre-mutation source snapshot** at
+  `n × XYZ step`; overlapping targets use last-stamp-wins and one
+  Undo/Redo entry per unique coordinate.
+- Block Entity source/target protection, native section/ID preflight
+  and existing session block caps reject unsafe edits before staging.
+  Other original Java Block Entity and unknown NBT remain untouched.
+- Added source regressions for overlap, bounds, Undo/Redo, BE safety,
+  original Java Anvil mod blockstates and old MCRegion IDs/metadata,
+  backups and reopen. Full CI/game-world testing remains deferred.
