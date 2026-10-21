@@ -465,3 +465,19 @@ available and is not automatically replaced.
 - Added source regressions for original bytes/UUID, negative chunk math,
   missing-target refusal, same-region and cross-region backup/reopen.
   Full version CI/Windows builds and game-world reload remain deferred.
+
+## 0.3.0a44 — Multi-select cross-chunk loose entity transfers
+
+- Added Qt6 **Transfer selected items / XP orbs by offset…**:
+  computes destination XYZ for every selected original entity while
+  preserving original UUID and opaque ItemStack/mod NBT bytes.
+- Bounded native group preflight refuses an entire selection if even
+  one target is a missing/nonexistent chunk, same-chunk target,
+  duplicate source/index/UUID, unsafe referenced entity or
+  conflicting staged change. No partial disk or staged NBT writes.
+- Successful batches share one pre-save Undo/Redo record. All touched
+  source and target native regions are backed up on Save; cross-file
+  replacements remain best-effort rollback, not crash-atomic.
+- Added source regression specifications for same-target and
+  multi-region batches, exact UUID/NBT fidelity, atomic rejection,
+  region recovery and save/reopen. Full tests remain deferred.

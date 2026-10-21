@@ -26,7 +26,10 @@
 > preserving existing modded ItemStack/unknown NBT bytes. Native
 > original-UUID transfer between already-existing Java chunks is also
 > available for standalone dropped items/XP orbs, even across region
-> files, with source/target full-region backups. Missing or unrecognized
+> files, with source/target full-region backups. Multiple original items
+> and XP orbs may transfer together by XYZ offset as one preflighted,
+> Undo/Redo-grouped action; any unsafe target refuses the whole group.
+> Missing or unrecognized
 > UUID layouts, referenced/linked/modded entities and cross-dimension
 > transfers remain refused. Entity List changes support Undo/Redo
 > **before saving**; after saving, recovery uses the complete native
@@ -35,7 +38,7 @@
 > remains opt-in (Java 1.13+ only).
 > Metadata, ItemStack and map edits commit directly to their original
 > files, separate from region Undo/Redo; nondestructive native entity
-> edits use the region EditSession Undo/Redo. Version 0.3.0a43 has
+> edits use the region EditSession Undo/Redo. Version 0.3.0a44 has
 > not passed the full CI/game-world validation matrix; Windows packaging remains disabled.
 > It is **not yet fully equivalent to the original MCEdit2 editor**. Do not edit live or valuable maps. See the [migration checklist](MIGRATION_STATUS.md) for a feature-by-feature audit. For the
 > compatibility limits, developer instructions and plugin API, see

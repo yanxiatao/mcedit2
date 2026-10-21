@@ -739,6 +739,57 @@ class NativeAnvilWorld:
                 raise UnsafeFormat("Destination already has a staged matching entity")
         return dcx, dcz, updated
 
+    def prepare_entity_transfer_batch(self, cx: int, cz: int, updates):
+        """Preflight an entire multi-entity move without staging any edits.
+
+        All source identities, original chunk membership, existing terrain
+        and destination entity chunks, pending transforms and UUIDs are
+        checked before the EditSession is allowed to stage the first move.
+        """
+        from .entity_clone import MAX_ADDITIONS
+        if type(cx) is not int or type(cz) is not int:
+            raise UnsafeFormat("Invalid source chunk for grouped transfer")
+        if not isinstance(updates, (tuple, list)) or not updates:
+            raise UnsafeFormat("Grouped transfer needs selected original entities")
+        if len(updates) + len(self._entity_transfers) > MAX_ADDITIONS:
+            raise UnsafeFormat("Combined transfer batch exceeds safety limit")
+        prepared = []
+        selected = set()
+        batch_uuids = set()
+        dest_counts = defaultdict(int)
+        for item in updates:
+            if (not isinstance(item, (tuple, list)) or len(item) != 3 or
+                    item[0] not in ("chunk", "entities") or
+                    type(item[1]) is not int or item[1] < 0):
+                raise UnsafeFormat("Invalid entity transfer batch member")
+            source, index, destination = item
+            key = (source, index)
+            if key in selected:
+                raise UnsafeFormat("Duplicate original entity selected for transfer")
+            selected.add(key)
+            dcx, dcz, payload = self.prepare_entity_transfer(
+                source, cx, cz, index, destination)
+            identity = original_entity_uuid(payload)
+            if identity in batch_uuids:
+                raise UnsafeFormat(
+                    "Two selected original entities share a UUID; abort batch")
+            batch_uuids.add(identity)
+            dest_counts[(source, dcx, dcz)] += 1
+            prepared.append((source, index, dcx, dcz, payload))
+        for (source, dcx, dcz), number in dest_counts.items():
+            original = self._entity_chunk(source, dcx, dcz)
+            count = len(_entity_list(nbt.parse(original)).children)
+            pending_new = sum(
+                1 for src, x, z, token in self._entity_additions
+                if (src, x, z) == (source, dcx, dcz))
+            pending_transfers = sum(
+                1 for (src, sx, sz, idx), (x, z, payload)
+                in self._entity_transfers.items()
+                if (src, x, z) == (source, dcx, dcz))
+            if count + pending_new + pending_transfers + number > nbt.MAX_COLLECTION_ITEMS:
+                raise UnsafeFormat("Grouped transfer overflows destination entity List")
+        return tuple(prepared)
+
     def set_entity_transferred(self, source: str, cx: int, cz: int, index: int,
                                dcx: int, dcz: int, payload: bytes,
                                moved: bool) -> None:

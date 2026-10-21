@@ -10,7 +10,8 @@ from .nbt_inspector import NBTInspectorDialog
 class EntityListDialog(QDialog):
     def __init__(self, entries, chunk, parent=None, on_move=None,
                  on_rotate=None, on_move_many=None, on_edit_scalar=None,
-                 on_delete=None, on_clone=None, on_transfer=None):
+                 on_delete=None, on_clone=None, on_transfer=None,
+                 on_transfer_many=None):
         super().__init__(parent)
         self.entries = tuple(entries)
         self.on_move = on_move
@@ -20,6 +21,7 @@ class EntityListDialog(QDialog):
         self.on_delete = on_delete
         self.on_clone = on_clone
         self.on_transfer = on_transfer
+        self.on_transfer_many = on_transfer_many
         self.chunk = chunk
         self.setWindowTitle(f"Entities in chunk {chunk} — original NBT")
         self.resize(650, 430)
@@ -45,6 +47,12 @@ class EntityListDialog(QDialog):
             self.batch_button.setObjectName("entity_batch_move")
             self.batch_button.clicked.connect(self.edit_multiple_positions)
             layout.addWidget(self.batch_button)
+        if self.on_transfer_many is not None:
+            self.batch_transfer_button = QPushButton(
+                "Transfer selected items / XP orbs by offset…", self)
+            self.batch_transfer_button.setObjectName("entity_batch_transfer")
+            self.batch_transfer_button.clicked.connect(self.transfer_selected_entities)
+            layout.addWidget(self.batch_transfer_button)
         if self.on_transfer is not None:
             self.transfer_button = QPushButton(
                 "Move dropped item / XP orb to another existing chunk…", self)
@@ -229,6 +237,81 @@ class EntityListDialog(QDialog):
                 self._refresh_items()
         except Exception as exc:
             QMessageBox.warning(self, "Entity rotation refused", str(exc))
+
+    def transfer_selected_entities(self):
+        """Same original chunk, bounded multi-selection and XYZ offset."""
+        if self.on_transfer_many is None:
+            return
+        selected = self.items.selectedItems()
+        if not selected:
+            QMessageBox.information(
+                self, "Grouped entity transfer", "Select source entities first.")
+            return
+        indices = sorted(self.items.row(item) for item in selected)
+        records = [self.entries[index] for index in indices]
+        from .entity_delete import DELETABLE_ENTITY_IDS
+        if any(
+            record.storage_index < 0 or
+            record.identifier not in DELETABLE_ENTITY_IDS or
+            record.position is None for record in records
+        ):
+            QMessageBox.warning(
+                self, "Grouped entity transfer refused",
+                "Only original standalone vanilla dropped items and XP orbs "
+                "with a saved list index can be transferred. "
+                "No staged clones/transfers or unknown entity IDs.")
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Transfer selected entities by XYZ offset")
+        form = QFormLayout(dialog)
+        fields = []
+        for label in ("Offset X", "Offset Y", "Offset Z"):
+            field = QDoubleSpinBox(dialog)
+            field.setRange(-29_999_999., 29_999_999.)
+            field.setDecimals(4)
+            field.setSingleStep(16.)
+            form.addRow(label, field)
+            fields.append(field)
+        form.addRow(QLabel(
+            f"Selected {len(records)} original entities. Every destination "
+            "must be in a DIFFERENT already-existing native Java chunk. "
+            "The whole batch is rejected if even one fails preflight. "
+            "All original UUIDs and non-Pos NBT bytes are preserved."))
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel, parent=dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        offsets = tuple(field.value() for field in fields)
+        if not any(offsets):
+            return
+        updates = [
+            (record.source, record.storage_index,
+             tuple(record.position[axis] + offsets[axis] for axis in range(3)))
+            for record in records
+        ]
+        answer = QMessageBox.question(
+            self, "Transfer original entities as a group",
+            f"Stage moving {len(records)} original entities between "
+            "already-existing native Java chunks as ONE Undo/Redo step? "
+            "The complete batch is preflighted before any change. "
+            "All touched source and destination region files are backed up "
+            "when saved. After Save, recover using Restore native region "
+            "backup; multi-file writes are not crash-atomic.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            updated = self.on_transfer_many(updates)
+            if updated is not None:
+                self.entries = tuple(updated)
+                self._refresh_items()
+        except Exception as exc:
+            QMessageBox.warning(self, "Grouped entity transfer refused", str(exc))
 
     def transfer_selected_entity(self):
         if self.on_transfer is None:

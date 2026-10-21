@@ -16,7 +16,7 @@ still exist. This is an engineering checklist rather than a release promise.
 | Java Beta 1.3–1.1 MCRegion (.mcr) | Native XZY 128-height chunks, ID/metadata editing, backup and reopening | Old-style lighting/heightmap recalculation, real-world game fixtures | 
 | Bedrock / Pocket Edition | No new LevelDB backend | Entire Bedrock adapter; will edit native LevelDB formats, not migrate worlds |
 | BE NBT | Native NBT tree viewer, guarded scalar editing (types 1–6, 8) across modern/legacy Anvil and MCRegion, experimental clipboard | Array resizing/structural compound edit, mod-specific links/identity, safe BE moves |
-| Entities / players | Original NBT inspector, guarded scalar/Pos/Rotation, batch translate and player ItemStack tools; native dropped-item/XP-orb deletion, UUID-fresh same-chunk clone and original UUID-preserving cross-chunk/region transfer with pre-save Undo/Redo and full backups | General registered entity creation, mobs/vehicles, linked passenger/owner graphs, custom mod entity schemas, and robust cross-entity references remain unported |
+| Entities / players | Original NBT inspector, guarded scalar/Pos/Rotation, group same-chunk translate and player ItemStack tools; native loose item/orb deletion, UUID-fresh cloning, original-UUID cross-chunk transfer and preflighted group cross-chunk offset transfers with one-step Undo/Redo and original region backups | General entity creation, mobs/vehicles, cross-dimension moves, passenger/owner graphs, modded identity/registry schemas and cross-entity references remain unported |
 | Original Java filled maps | Qt6 native map_N.dat inspector, staging pixel paint/rectangle canvas, exact colors-array byte patches, whitelisted map metadata scalar edits, original gzip backup/restore | Full modern 208+ palette preview, modded map palettes, decorations/icons, world-side rendering fixtures, arbitrarily resizable map NBT and Bedrock maps |
 | Vanilla .nbt structures | Block-only import/export | Entity/BE-aware structure transactions |
 | Sponge v2/v3 .schem | Block-only import/export; strict nested Sponge v3 codec | BE/entity/biome payloads, rich metadata transfer and real-world fixtures |
@@ -1441,3 +1441,58 @@ passengers, leashes, owners and graph references; proven global UUID
 collision-free scans across entire worlds; mod-specific linked identities.
 No new CI/Minecraft-version fixture tests or Windows builds have been
 executed. The existing Draft PR and branch are preserved.
+
+## 0.3.0a44 — Preflighted group cross-chunk entity transfer
+
+Building on the original Java item/orb transfer added in a43, the
+new Qt6 inspector can transfer **multiple selected original standalone
+dropped items and experience orbs** with a shared XYZ offset, including
+destination chunks in different existing native regions.
+
+- `NativeAnvilWorld.prepare_entity_transfer_batch` fully preflights
+  every member without mutating staged data. It verifies each original
+  storage source and index, same standalone whitelist, existing source
+  and destination terrain/entity chunks, absence of pending
+  conflicting Pos/scalar/Rotation/deletion edits, and recognized UUID
+  collisions with both destination original and staged entries.
+  The batch additionally rejects duplicate source selections and
+  duplicate UUIDs across selected entities, accounts for other pending
+  additions/transfers against each destination List length, and limits
+  the aggregate pending transfer count to 128. If any candidate is
+  rejected, the entire batch is refused without changing staged NBT.
+- `EditSession.transfer_entities_to_chunks` uses one preflight result
+  to stage all original source-removal + target-append pairs as **one
+  Undo/Redo history entry**, using existing `_apply` rollback when
+  staging unexpectedly fails. The previous single-entity API remains.
+  Undo/Redo is valid before Save; after an original entity List
+  structural Save, old index-based history is discarded as in a43.
+- Qt6 `EntityListDialog` now includes **Transfer selected items /
+  XP orbs by offset…** for extended/multiple selection. Enter one
+  X/Y/Z offset; every computed destination must be in a DIFFERENT
+  pre-existing native Java chunk. It shows explicit multi-region
+  backup and non-crash-atomic persistence warnings, never touches
+  the live world until Save, and refreshes staged source members.
+- All source UUIDs remain unchanged; only the existing original Pos
+  TAG_Double values are patched, and each original unknown/modded
+  ItemStack, other entity tag and unrelated block entity stays in
+  the native original encoding. Save first preflights all touched
+  original regions; the original complete source/target region files
+  are backed up before replacement with best-effort rollback if a
+  normal write fails.
+- `tests/test_entity_batch_transfer.py` adds **source-only**
+  coverage for two simultaneous transfers into one destination,
+  single-step Undo/Redo and same-UUID redo, byte-for-byte original
+  ItemStack/UUID preservation, missing destination rollback with
+  no partial staging, same-chunk and duplicate-selection refusal,
+  duplicate selected UUID refusal, bounded batch size, transfers
+  into different already-existing region files, save/reopen and
+  complete original region backup restoration.
+
+**Still not supported:** arbitrary living/mob/vehicle entities,
+entity group passenger/leash/owner UUID graph migration,
+creating missing chunks or region files, cross-dimension moves,
+full modded entity schema discovery, global identity reference
+analysis, automatic registry-driven ItemStack creation or complete
+old MCEdit2 UI parity. These new regression cases are committed as
+source; the full real-world/Qt/Mesa/CI and Windows packaging checks
+have deliberately not been run.

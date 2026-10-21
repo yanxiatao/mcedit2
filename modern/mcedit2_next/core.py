@@ -714,6 +714,31 @@ class EditSession:
         self.dirty = True
         return 1
 
+    def transfer_entities_to_chunks(self, cx: int, cz: int,
+                                    updates: list[tuple[str, int, tuple]]) -> int:
+        """Move independent items/orbs to existing chunks in one Undo step.
+
+        Every move is prepared and UUID-checked without staging first. If
+        any later staging unexpectedly fails, _apply rolls back earlier
+        changes and leaves the operation out of Undo history.
+        """
+        preparer = getattr(self.world, "prepare_entity_transfer_batch", None)
+        if not callable(preparer):
+            raise ValueError("World backend cannot preflight grouped entity transfers")
+        prepared = preparer(cx, cz, updates)
+        changes = [
+            EntityTransfer(source, cx, cz, index, dcx, dcz, payload)
+            for source, index, dcx, dcz, payload in prepared
+        ]
+        if not changes:
+            return 0
+        self._apply(changes, reverse=False)
+        self.undo_stack.append(changes)
+        self.undo_stack = self.undo_stack[-100:]
+        self.redo_stack.clear()
+        self.dirty = True
+        return len(changes)
+
     def clone_entity_in_chunk(self, source: str, cx: int, cz: int,
                               index: int, position) -> int:
         """Duplicate only a safe original dropped item/orb with fresh UUID.
