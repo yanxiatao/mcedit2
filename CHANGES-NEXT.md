@@ -561,3 +561,20 @@ available and is not automatically replaced.
   Apply redoes all native section, BE, ID and orientation preflight.
 - New pure-math, camera-ray and offscreen Qt controller source
   regressions added; complete Mesa/game-world tests remain deferred.
+
+## 0.3.0a50 — Drag entire Clone Tool group without changing spacing
+
+- Separate absolute **Group position XYZ** from repeated-copy
+  **Step XYZ**. The n-th copy is planned and written at
+  original source minimum + group position + n×step.
+- Qt6 Tool Palette now exposes both vectors independently.
+  Ctrl+Alt / Shift mouse dragging changes only group placement,
+  preserving the spacing and footprint of every other clone.
+  1/2/4/8/16-block original-world snapping remains supported.
+- Native repeated, rotated/mirrored and integer-scaled writes
+  accept optional placement (default zero for old callers).
+  Apply revalidates original BE/native region safety and groups
+  changes as one Undo/Redo history entry.
+- Added pure geometry, original Anvil NBT fidelity and offscreen
+  Qt controller source regression specifications; no full CI,
+  Mesa, game-world or Windows runs executed.

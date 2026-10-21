@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QApplication
 from mcedit2_next.clone_preview import (
     first_clone_handle_center, plan_clone_ghost,
     ghost_wireframe_vertices, snapped_clone_drag_offset,
+    snapped_clone_drag_placement,
 )
 from mcedit2_next.core import Box
 from mcedit2_next.viewport3d import Voxel3DView
@@ -43,6 +44,28 @@ class CloneDragGeometryTests(unittest.TestCase):
             ((-1, -64, 1), (0, -63, 2)),
         ))
         self.assertEqual(ghost.planned_cells, 2)
+
+    def test_rigid_group_snap_keeps_repeat_stride(self):
+        source = Box.from_corners((-7, -64, -1), (-7, -64, -1))
+        placement = snapped_clone_drag_placement(
+            source, (4, 0, 0), (0, 0, 0), (-2, 0, 0), 4)
+        self.assertEqual(placement, (-1, 0, 1))
+        plan = plan_clone_ghost(
+            source, "repeat", (4, 0, 0), 3, placement=placement)
+        self.assertEqual(plan.offset, (4, 0, 0))
+        self.assertEqual(plan.placement, placement)
+        self.assertEqual(plan.boxes, (
+            ((-4, -64, 0), (-3, -63, 1)),
+            ((0, -64, 0), (1, -63, 1)),
+            ((4, -64, 0), (5, -63, 1)),
+        ))
+
+    def test_bad_rigid_group_snap_refuses_before_ui(self):
+        source = Box.from_corners((0, 0, 0), (0, 0, 0))
+        for placement in ((True, 0, 0), (0, 1.5, 0), (1,), "0"):
+            with self.subTest(placement=placement), self.assertRaises(ValueError):
+                snapped_clone_drag_placement(
+                    source, (4, 0, 0), placement, (2, 0, 0), 4)
 
     def test_invalid_drag_grid_and_noninteger_displacement_refused(self):
         source = Box.from_corners((0, 0, 0), (0, 0, 0))
@@ -114,10 +137,11 @@ class CloneDragQtTests(unittest.TestCase):
         self.assertEqual(view.boxes[0][0], (17, 64, 0))
         window.begin_clone_preview_drag()
         window.update_clone_preview_drag((2, 0, 0))
-        self.assertEqual(palette.preview_offset["x"].value(), 19)
+        self.assertEqual(palette.preview_offset["x"].value(), 16)
+        self.assertEqual(palette.preview_placement["x"].value(), 3)
         self.assertEqual(view.boxes, (
             ((20, 64, 0), (21, 65, 1)),
-            ((39, 64, 0), (40, 65, 1)),
+            ((36, 64, 0), (37, 65, 1)),
         ))
         self.assertEqual(world.writes, 0)
         self.assertFalse(window.session.dirty)
@@ -128,7 +152,7 @@ class CloneDragQtTests(unittest.TestCase):
         self.assertEqual(len(window.session.undo_stack), 1)
         self.assertEqual(world.get_block(20, 64, 0),
                          world.get_block(1, 64, 0))
-        self.assertEqual(world.get_block(39, 64, 0),
+        self.assertEqual(world.get_block(36, 64, 0),
                          world.get_block(1, 64, 0))
         self.assertEqual(view.boxes, ())
 
@@ -142,7 +166,10 @@ class CloneDragQtTests(unittest.TestCase):
         window.update_clone_preview_drag((0, 5, 0))
         self.assertEqual(tuple(
             palette.preview_offset[axis].value()
-            for axis in ("x", "y", "z")), (16, 4, 0))
+            for axis in ("x", "y", "z")), (16, 0, 0))
+        self.assertEqual(tuple(
+            palette.preview_placement[axis].value()
+            for axis in ("x", "y", "z")), (0, 4, 0))
         self.assertEqual(view.boxes[0][0], (17, 68, 0))
         self.assertEqual(world.writes, 0)
         window.finish_clone_preview_drag()
@@ -164,10 +191,10 @@ class CloneDragQtTests(unittest.TestCase):
         palette.preview_clone()
         window.begin_clone_preview_drag()
         previous = tuple(
-            control.value() for control in palette.preview_offset.values())
+            control.value() for control in palette.preview_placement.values())
         window.update_clone_preview_drag((29_999_999, 0, 0))
         self.assertEqual(tuple(
-            control.value() for control in palette.preview_offset.values()),
+            control.value() for control in palette.preview_placement.values()),
             previous)
         self.assertEqual(view.boxes[0][0], (17, 64, 0))
         self.assertEqual(world.writes, 0)

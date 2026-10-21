@@ -33,11 +33,13 @@ class CloneGhost:
     footprint: tuple[int, int, int]
     planned_cells: int
     boxes: tuple[BoxEdges, ...]
+    placement: tuple[int, int, int] = (0, 0, 0)
 
 
 def plan_clone_ghost(box, mode: str, offset, repetitions: int,
                      *, orientation: str | None = None,
-                     scale=(1, 1, 1), max_blocks: int = 32768) -> CloneGhost:
+                     scale=(1, 1, 1), max_blocks: int = 32768,
+                     placement=(0, 0, 0)) -> CloneGhost:
     """Plan all target boxes before reading world state or modifying data."""
     if mode not in ("offset", "repeat", "transformed", "scaled"):
         raise ValueError("Unknown Clone Tool preview mode")
@@ -45,6 +47,10 @@ def plan_clone_ghost(box, mode: str, offset, repetitions: int,
             any(type(value) is not int for value in offset)):
         raise ValueError("Clone preview XYZ offset must contain three integers")
     offset = tuple(offset)
+    if (not isinstance(placement, (tuple, list)) or len(placement) != 3 or
+            any(type(value) is not int for value in placement)):
+        raise ValueError("Clone group placement requires three integer coordinates")
+    placement = tuple(placement)
     if not any(offset):
         raise ValueError("Clone preview requires a nonzero XYZ offset")
     if type(repetitions) is not int or not 1 <= repetitions <= MAX_GHOST_BOXES:
@@ -59,7 +65,8 @@ def plan_clone_ghost(box, mode: str, offset, repetitions: int,
         footprint = transformed_size(box.size, orientation)
     elif mode == "scaled":
         scaled = plan_scaled_clone(
-            box, offset, scale, repetitions, max_blocks)
+            box, offset, scale, repetitions, max_blocks,
+            placement=placement)
         footprint = scaled.output_size
         scale = scaled.scale
     else:
@@ -78,7 +85,8 @@ def plan_clone_ghost(box, mode: str, offset, repetitions: int,
     boxes = []
     for index in range(1, repetitions + 1):
         low = tuple(
-            box.minimum[axis] + offset[axis] * index for axis in range(3))
+            box.minimum[axis] + placement[axis] +
+            offset[axis] * index for axis in range(3))
         high = tuple(
             low[axis] + footprint[axis] for axis in range(3))
         for axis in (0, 2):
@@ -88,7 +96,7 @@ def plan_clone_ghost(box, mode: str, offset, repetitions: int,
     return CloneGhost(
         tuple(box.minimum), tuple(box.maximum), mode, offset,
         repetitions, orientation, tuple(scale), footprint,
-        planned, tuple(boxes))
+        planned, tuple(boxes), placement)
 
 
 def first_clone_handle_center(boxes):
@@ -128,6 +136,29 @@ def snapped_clone_drag_offset(source_box, starting_offset, delta,
         world_snap = round(candidate_world / grid) * grid
         shifted[axis] = world_snap - source_box.minimum[axis]
     return tuple(shifted)
+
+
+def snapped_clone_drag_placement(source_box, step, starting_placement,
+                                 delta, grid: int, *, vertical=False):
+    """Move all copies rigidly, snapping the first volume's world minimum.
+
+    Unlike snapped_clone_drag_offset, this never changes per-copy stride.
+    Horizontal mode changes X/Z, vertical mode only Y. All validation
+    happens before the caller changes its previous valid preview.
+    """
+    if (not isinstance(step, (tuple, list)) or len(step) != 3 or
+            any(type(v) is not int for v in step)):
+        raise ValueError("Clone repeat stride must contain three integers")
+    if (not isinstance(starting_placement, (tuple, list)) or
+            len(starting_placement) != 3 or
+            any(type(v) is not int for v in starting_placement)):
+        raise ValueError("Clone rigid-group placement must contain three integers")
+    # Reuse existing world-grid math by considering the first-copy
+    # world offset = stride + rigid placement.
+    initial = tuple(step[i] + starting_placement[i] for i in range(3))
+    adjusted = snapped_clone_drag_offset(
+        source_box, initial, delta, grid, vertical=vertical)
+    return tuple(adjusted[i] - step[i] for i in range(3))
 
 
 def ghost_wireframe_vertices(boxes, target):

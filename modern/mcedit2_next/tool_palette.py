@@ -202,6 +202,14 @@ class ToolPaletteDock(QDockWidget):
             field.setValue(16 if axis == "x" else 0)
             self.preview_offset[axis] = field
             preview_form.addRow("Step " + axis.upper(), field)
+        self.preview_placement = {}
+        for axis in ("x", "y", "z"):
+            field = QSpinBox(preview_group)
+            field.setObjectName("tool_palette_clone_group_placement_" + axis)
+            field.setRange(-30_000_000, 30_000_000)
+            field.setValue(0)
+            self.preview_placement[axis] = field
+            preview_form.addRow("Group position " + axis.upper(), field)
         self.preview_snap = QComboBox(preview_group)
         self.preview_snap.setObjectName("tool_palette_clone_preview_snap")
         for grid in (1, 2, 4, 8, 16):
@@ -212,8 +220,8 @@ class ToolPaletteDock(QDockWidget):
             "Ctrl+Alt+drag the WHITE cross at the first preview box center "
             "to reposition horizontally; Ctrl+Alt+Shift+drag for Y. "
             "Snap aligns the first box minimum to the absolute world grid. "
-            "For Repeat/Rotate/Scale, subsequent copies follow n × XYZ step, "
-            "not a rigid translation of the entire group. "
+            "All copies move rigidly; Step X/Y/Z still controls spacing. "
+            "Group position X/Y/Z independently translates the whole group. "
             "Orbit/zoom remains available; Apply revalidates native data.")
         preview_note.setWordWrap(True)
         preview_form.addRow(preview_note)
@@ -242,7 +250,8 @@ class ToolPaletteDock(QDockWidget):
         for widget in (
                 self.preview_mode, self.clone_orientation, self.preview_snap,
                 self.repeat_count, *self.scale_factors.values(),
-                *self.preview_offset.values()):
+                *self.preview_offset.values(),
+                *self.preview_placement.values()):
             if isinstance(widget, QComboBox):
                 widget.currentIndexChanged.connect(
                     lambda _value: self.clear_clone_preview())
@@ -433,7 +442,9 @@ class ToolPaletteDock(QDockWidget):
         count = self.repeat_count.value() if mode != "offset" else 1
         orientation = self.clone_orientation.currentData() if mode == "transformed" else None
         scale = tuple(self.scale_factors[axis].value() for axis in ("x", "y", "z"))
-        return mode, offset, count, orientation, scale
+        placement = tuple(
+            self.preview_placement[axis].value() for axis in ("x", "y", "z"))
+        return mode, offset, count, orientation, scale, placement
 
     def set_clone_preview_summary(self, plan):
         self.preview_info.setText(
@@ -441,15 +452,17 @@ class ToolPaletteDock(QDockWidget):
             f"{plan.footprint} per copy, "
             f"{plan.planned_cells:,} planned cells. "
             f"First copy: {plan.boxes[0][0]} → {plan.boxes[0][1]}. "
-            f"Step: {plan.offset}. Cyan = earlier copies, green = last. "
+            f"Step: {plan.offset}. Group position: {plan.placement}. "
+            "Cyan = earlier copies, green = last. "
             "Wireframes are read-only; Apply performs native preflight.")
 
     def preview_clone(self):
         try:
-            mode, offset, copies, orientation, scale = (
+            mode, offset, copies, orientation, scale, placement = (
                 self._clone_preview_parameters())
             plan = self.editor.show_clone_wireframe_preview(
-                mode, offset, copies, orientation=orientation, scale=scale)
+                mode, offset, copies, orientation=orientation, scale=scale,
+                placement=placement)
             if plan is None:
                 return
             self.set_clone_preview_summary(plan)

@@ -23,10 +23,12 @@ class ScaledClonePlan:
     first_max: tuple[int, int, int]
     all_min: tuple[int, int, int]
     all_max: tuple[int, int, int]
+    placement: tuple[int, int, int] = (0, 0, 0)
 
 
 def plan_scaled_clone(box, step, scale, repetitions: int,
-                      max_blocks: int) -> ScaledClonePlan:
+                      max_blocks: int, *,
+                      placement=(0, 0, 0)) -> ScaledClonePlan:
     """Compute exact repeated copy bounds and work limit without loading NBT.
 
     Every source cell expands into sx*sy*sz unchanged native BlockStates.
@@ -38,6 +40,10 @@ def plan_scaled_clone(box, step, scale, repetitions: int,
             type(value) is not int for value in step):
         raise ValueError("Clone step must have three integer coordinates")
     step = tuple(step)
+    if (not isinstance(placement, (tuple, list)) or len(placement) != 3 or
+            any(type(value) is not int for value in placement)):
+        raise ValueError("Clone placement must have three integer coordinates")
+    placement = tuple(placement)
     if not any(step):
         raise ValueError("Scaled clone needs a nonzero XYZ step")
     if not isinstance(scale, (tuple, list)) or len(scale) != 3 or any(
@@ -55,9 +61,12 @@ def plan_scaled_clone(box, step, scale, repetitions: int,
     if count > max_blocks:
         raise ValueError(
             f"Scaled clone would plan {count:,} blocks; limit is {max_blocks:,}")
-    first = tuple(box.minimum[axis] + step[axis] for axis in range(3))
+    first = tuple(
+        box.minimum[axis] + placement[axis] + step[axis]
+        for axis in range(3))
     last = tuple(
-        box.minimum[axis] + step[axis] * repetitions for axis in range(3))
+        box.minimum[axis] + placement[axis] + step[axis] * repetitions
+        for axis in range(3))
     first_max = tuple(first[axis] + output_size[axis] - 1 for axis in range(3))
     all_min = tuple(min(first[axis], last[axis]) for axis in range(3))
     all_max = tuple(
@@ -69,4 +78,4 @@ def plan_scaled_clone(box, step, scale, repetitions: int,
             raise ValueError("Scaled clone extends beyond Java world X/Z limits")
     return ScaledClonePlan(
         step, scale, repetitions, output_size, count,
-        first, first_max, all_min, all_max)
+        first, first_max, all_min, all_max, placement)

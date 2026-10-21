@@ -506,7 +506,8 @@ class EditSession:
         return self._commit(list(zip(targets, states)))
 
     def clone_box_repeated(self, box: Box, offset: Position,
-                           repetitions: int) -> int:
+                           repetitions: int, *,
+                           placement: Position = (0, 0, 0)) -> int:
         """Tile an original block-only snapshot at consecutive step offsets.
 
         Corresponds to MCEdit2 CloneTool's repeat/tiling workflow. Each
@@ -520,6 +521,7 @@ class EditSession:
         are checked before staging a single world edit.
         """
         dx, dy, dz = self._offset3(offset)
+        px, py, pz = self._offset3(placement)
         if type(repetitions) is not int or not 1 <= repetitions <= 128:
             raise ValueError("Clone repeat count must be an integer in 1..128")
         if not (dx or dy or dz):
@@ -534,7 +536,8 @@ class EditSession:
                                 for point in source)
         destinations: dict[Position, Any] = {}
         for repeat in range(1, repetitions + 1):
-            ox, oy, oz = dx * repeat, dy * repeat, dz * repeat
+            ox, oy, oz = (px + dx * repeat, py + dy * repeat,
+                          pz + dz * repeat)
             for (x, y, z), state in zip(source, original_states):
                 # Keys are unique; later stamps take precedence. A target
                 # may overlap the source, but the snapshot cannot cascade.
@@ -543,7 +546,8 @@ class EditSession:
         return self._commit(list(destinations.items()))
 
     def clone_box_transformed(self, box: Box, offset: Position,
-                              operation: str, repetitions: int = 1) -> int:
+                              operation: str, repetitions: int = 1, *,
+                              placement: Position = (0, 0, 0)) -> int:
         """Clone rotated/mirrored native block states without changing source.
 
         The transform is evaluated against ONE snapshot of the original
@@ -555,6 +559,7 @@ class EditSession:
             MOVES, transform_position, transform_state, transformed_size,
         )
         dx, dy, dz = self._offset3(offset)
+        px, py, pz = self._offset3(placement)
         if operation not in MOVES:
             raise ValueError("Unsupported clone rotation/mirror operation")
         if type(repetitions) is not int or not 1 <= repetitions <= 128:
@@ -579,9 +584,9 @@ class EditSession:
         destinations: dict[Position, Any] = {}
         for repeat in range(1, repetitions + 1):
             origin = (
-                box.minimum[0] + dx * repeat,
-                box.minimum[1] + dy * repeat,
-                box.minimum[2] + dz * repeat,
+                box.minimum[0] + px + dx * repeat,
+                box.minimum[1] + py + dy * repeat,
+                box.minimum[2] + pz + dz * repeat,
             )
             for (rx, ry, rz), state in transformed:
                 # Later stamps override earlier ones on overlaps.
@@ -596,7 +601,8 @@ class EditSession:
 
     def clone_box_scaled(self, box: Box, offset: Position,
                          scale: tuple[int, int, int],
-                         repetitions: int = 1) -> int:
+                         repetitions: int = 1, *,
+                         placement: Position = (0, 0, 0)) -> int:
         """Nearest-neighbour integer-scale clone from one original snapshot.
 
         This is a conservative block-only operation: no BE/entity payloads
@@ -611,18 +617,20 @@ class EditSession:
         """
         from .clone_scaling import plan_scaled_clone
         plan = plan_scaled_clone(
-            box, offset, scale, repetitions, self.max_blocks)
+            box, offset, scale, repetitions, self.max_blocks,
+            placement=placement)
         source = tuple(box.points())
         self._ensure_block_only(source)
         originals = tuple(self.world.get_block(*point) for point in source)
         sx, sy, sz = plan.scale
         dx, dy, dz = plan.step
+        px, py, pz = plan.placement
         targets: dict[Position, Any] = {}
         # Every stamp uses the SAME pre-mutation original snapshot.
         for stamp in range(1, plan.repetitions + 1):
-            base_x = box.minimum[0] + stamp * dx
-            base_y = box.minimum[1] + stamp * dy
-            base_z = box.minimum[2] + stamp * dz
+            base_x = box.minimum[0] + px + stamp * dx
+            base_y = box.minimum[1] + py + stamp * dy
+            base_z = box.minimum[2] + pz + stamp * dz
             for (x, y, z), native in zip(source, originals):
                 tx = base_x + (x - box.minimum[0]) * sx
                 ty = base_y + (y - box.minimum[1]) * sy

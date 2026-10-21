@@ -1806,3 +1806,66 @@ fractional/downscaling, full modded BE/entity identity graph copying
 and full original Clone Tool UI parity. The new test cases were
 committed as source without executing the full GL/Mesa/Qt,
 real-world Minecraft-version, CI or Windows package test matrix.
+
+## 0.3.0a50 — Rigid-group Clone Tool translation independent of repeat stride
+
+Completed a key original Clone Tool placement behavior in the native
+Python 3/Qt6 editor: **whole-group position and per-copy spacing are
+now independent**. Previously dragging the first destination
+rewrote the XYZ repeat step and moved subsequent stamps by different
+multiples. As of a50 the 3D drag translates the entire group,
+preserving relative spacing, orientation and scaling.
+
+- The immutable read-only `CloneGhost` plan now contains two
+  separate three-integer vectors: `offset` (per-copy original XYZ
+  stride) and `placement` (one fixed group translation). For
+  repeat index n, each target starts at
+  `source.minimum + placement + n × offset`.
+  This same formula is implemented in the pure scaled geometry
+  planner, repeated native clones, strict rotated/mirrored native
+  clones and integer-scaled native clones. The one-copy offset
+  clone uses the sum of both vectors on Apply. All old call sites
+  remain behavior-compatible because placement defaults to zero.
+- The Qt6 Tool Palette now has independently editable
+  **Step X/Y/Z** and **Group position X/Y/Z** controls. The existing
+  Ctrl+Alt left mouse white-handle gesture and Shift vertical drag
+  now change only the group position; the original repeat stride
+  remains unchanged. The first destination minimum still snaps to
+  a selectable **absolute original-world grid** of 1, 2, 4, 8,
+  or 16 blocks, including negative world coordinates. A rejected
+  target leaves all previously valid preview geometry and spin-box
+  values intact. The preview summary displays both group position
+  and step to avoid any ambiguity.
+- `snapped_clone_drag_placement` is a pure helper built on the
+  original verified grid math. It validates all integer vectors
+  before computing new positions, translates the first copy,
+  and derives an updated rigid-group vector while leaving the
+  step untouched. Both OpenGL paths reuse the existing bounded
+  cyan/green wireframe and white drag control; GPU chunk meshes
+  are not rewritten simply to reposition a preview.
+- The actual **Apply preview** route uses the *same group placement
+  vector* that produced the wireframe. Existing originals are
+  still snapshotted once, transformed only by the verified
+  native orientation codec, or duplicated without interpreting
+  opaque/modded original BlockStates. Original source/target
+  Block Entity checks, native sections, ID/metadata guards,
+  region backup and single-step Undo/Redo remain in effect.
+  A failed Apply must leave the original save unchanged.
+- `tests/test_clone_group_placement.py` supplies source-level
+  regression specifications for rigid spacing, transformed and
+  scaled output envelopes, incorrect/out-of-bounds placement,
+  snapshot and overlap undo semantics, opaque modded state copies,
+  rejected destination Block Entities, and original Java Anvil
+  region/unknown NBT byte preservation. Additional
+  `tests/test_clone_group_placement_qt.py` cases specify mouse
+  movement vs editable XYZ step, manual group position, scaled
+  Apply, invalidation, and no native changes before Apply.
+  Updated the previous drag and GL white-cross vertex source
+  expectations for the current behavior.
+
+**Not yet implemented:** per-block translucent textured voxel
+ghosts, automatic native chunk/Block Entity collision markers,
+freeform or fractional scaling/rotation, complex linked BE/entity
+graphs, and complete original MCEdit2 GUI/tool parity. The added
+source tests have deliberately not been executed against a full
+Qt/Mesa/Minecraft-version matrix or Windows packaging workflow.

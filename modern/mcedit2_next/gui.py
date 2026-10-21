@@ -158,7 +158,7 @@ class MainWindow(QMainWindow):
         self.slice_view = SliceView()
         self.volume_view = None  # Created on demand for environments without GL 3.3.
         self._clone_preview = None  # (session, original Box, immutable geometry)
-        self._clone_drag_start_offset = None  # Frozen first-box offset per gesture.
+        self._clone_drag_start_placement = None  # Frozen rigid-group position per gesture.
         self.view = self.slice_view
         self.active_brush = None
         self.active_brush_shape = None
@@ -1147,15 +1147,15 @@ class MainWindow(QMainWindow):
         self.minimap_dock.canvas.update()
 
     def begin_clone_preview_drag(self):
-        """Capture initial XYZ step; do not write blocks while dragging."""
-        self._clone_drag_start_offset = (
-            self._clone_preview[2].offset
+        """Capture rigid-group position, leaving repeat stride unchanged."""
+        self._clone_drag_start_placement = (
+            self._clone_preview[2].placement
             if self._clone_preview is not None else None)
 
     def update_clone_preview_drag(self, displacement):
-        """Keep wireframe, spin-box step, and eventual Apply in lockstep."""
+        """Move all preview boxes together and retain their original spacing."""
         record = self._clone_preview
-        initial = self._clone_drag_start_offset
+        initial = self._clone_drag_start_placement
         if record is None or initial is None:
             return
         session, source, old = record
@@ -1164,36 +1164,35 @@ class MainWindow(QMainWindow):
             self.clear_clone_wireframe_preview()
             return
         from .clone_preview import (
-            plan_clone_ghost, snapped_clone_drag_offset,
+            plan_clone_ghost, snapped_clone_drag_placement,
         )
         palette = self.tool_palette
         vertical = bool(displacement[1]) and not (
             displacement[0] or displacement[2])
-        # Viewport passes horizontal displacements with Y=0, and a
-        # Shift-drag displacement with only Y. A zero displacement uses
-        # the original offset without resnapping to avoid a snap jump.
+        # Viewport reports X/Z for horizontal and Y for Shift-vertical.
+        # Zero displacement leaves the current preview unchanged.
         if not any(displacement):
             return
         try:
-            step = snapped_clone_drag_offset(
-                source, initial, displacement,
+            placement = snapped_clone_drag_placement(
+                source, old.offset, initial, displacement,
                 palette.preview_snap.currentData(), vertical=vertical)
             new = plan_clone_ghost(
-                source, old.mode, step, old.repetitions,
+                source, old.mode, old.offset, old.repetitions,
                 orientation=old.orientation, scale=old.scale,
-                max_blocks=self.session.max_blocks)
-            if old.offset == new.offset:
+                max_blocks=self.session.max_blocks, placement=placement)
+            if old.placement == new.placement:
                 return
             # Do not trigger the palette's invalidate-preview signal
             # while transferring a world coordinate from the 3D handle.
-            for axis, value in zip(("x", "y", "z"), new.offset):
-                control = palette.preview_offset[axis]
+            for axis, value in zip(("x", "y", "z"), new.placement):
+                control = palette.preview_placement[axis]
                 if not control.minimum() <= value <= control.maximum():
                     raise ValueError(
-                        "Dragged XYZ step cannot be represented by the "
-                        "original Clone Tool coordinate controls")
-            for axis, value in zip(("x", "y", "z"), new.offset):
-                control = palette.preview_offset[axis]
+                        "Dragged group position is outside Clone Tool "
+                        "coordinate controls")
+            for axis, value in zip(("x", "y", "z"), new.placement):
+                control = palette.preview_placement[axis]
                 previous = control.blockSignals(True)
                 try:
                     control.setValue(value)
@@ -1207,7 +1206,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Clone drag refused: " + str(exc))
 
     def finish_clone_preview_drag(self):
-        self._clone_drag_start_offset = None
+        self._clone_drag_start_placement = None
 
     def clear_clone_wireframe_preview(self):
         """Dismiss only the 3D preview; no native data is staged or edited."""
@@ -1221,7 +1220,8 @@ class MainWindow(QMainWindow):
             self.tool_palette.apply_preview_button.setEnabled(False)
 
     def show_clone_wireframe_preview(self, mode, offset, repetitions,
-                                     *, orientation=None, scale=(1, 1, 1)):
+                                     *, orientation=None, scale=(1, 1, 1),
+                                     placement=(0, 0, 0)):
         """Compute a bounded, read-only geometry preview in the 3D viewport."""
         if self.session is None or self.view.selection is None:
             raise ValueError("Open an offline world and select a 3D region first")
@@ -1230,7 +1230,7 @@ class MainWindow(QMainWindow):
         plan = plan_clone_ghost(
             original_box, mode, offset, repetitions,
             orientation=orientation, scale=scale,
-            max_blocks=self.session.max_blocks)
+            max_blocks=self.session.max_blocks, placement=placement)
         # View switching may fail without a supported OpenGL context.
         # Never keep a half-created preview in that case.
         if self.view_mode.currentIndex() != 1:
@@ -1265,16 +1265,21 @@ class MainWindow(QMainWindow):
 
         def execute():
             if plan.mode == "offset":
-                count = session.clone_box(original, plan.offset)
+                effective = tuple(
+                    plan.offset[i] + plan.placement[i] for i in range(3))
+                count = session.clone_box(original, effective)
             elif plan.mode == "repeat":
                 count = session.clone_box_repeated(
-                    original, plan.offset, plan.repetitions)
+                    original, plan.offset, plan.repetitions,
+                    placement=plan.placement)
             elif plan.mode == "transformed":
                 count = session.clone_box_transformed(
-                    original, plan.offset, plan.orientation, plan.repetitions)
+                    original, plan.offset, plan.orientation, plan.repetitions,
+                    placement=plan.placement)
             elif plan.mode == "scaled":
                 count = session.clone_box_scaled(
-                    original, plan.offset, plan.scale, plan.repetitions)
+                    original, plan.offset, plan.scale, plan.repetitions,
+                    placement=plan.placement)
             else:
                 raise ValueError("Unsupported clone preview mode")
             # Only remove the preview AFTER the EditSession successfully

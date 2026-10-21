@@ -95,10 +95,12 @@ class CloneGhostGeometryTests(unittest.TestCase):
         plan = plan_clone_ghost(
             box, "repeat", (2, 0, 0), 2, max_blocks=16)
         raw = ghost_wireframe_vertices(plan.boxes, (4.5, 4.5, 5.5))
-        self.assertEqual(len(raw), 2 * 12 * 2 * 8)
+        # Each box contributes 12 edges of two 8-float vertices,
+        # plus three white center-handle axes (two vertices each).
+        self.assertEqual(len(raw), (2 * 12 * 2 + 3 * 2) * 8)
         self.assertEqual(raw[:3], [.5, -.5, -.5])
         self.assertEqual(raw[3:6], [.13, .94, 1.0])
-        self.assertEqual(raw[-5:-2], [0.42, 1.0, 0.34])
+        self.assertEqual(raw[-5:-2], [.98, .98, 1.0])
         self.assertEqual(ghost_wireframe_vertices((), (0, 0, 0)), [])
 
     def test_preview_geometry_rejects_malformed_unbounded_boxes(self):
