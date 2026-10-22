@@ -58,7 +58,9 @@ class BEAwareMoveTests(unittest.TestCase):
             session = EditSession(world)
             moved = session.move_box_with_nbt(
                 Box.from_corners((2, -62, 3), (3, -62, 3)), (1, 0, 0))
-            self.assertEqual(moved, 3)
+            # The overlapping middle BE is byte-for-byte identical after
+            # relocation, so only two cells actually change.
+            self.assertEqual(moved, 2)
             self.assertEqual(len(session.undo_stack), 1)
             self.assertEqual(world.get_block(2, -62, 3), make_block("minecraft:air"))
             self.assertIsNone(world.get_block_entity_raw(2, -62, 3))

@@ -52,7 +52,7 @@ class OriginalBETransferTests(unittest.TestCase):
             be_tag = root.require("blocks", 9).children[0].require("nbt", 10)
             self.assertEqual(raw[be_tag.payload_start:be_tag.end], original_be)
             self.assertEqual(disk.read_bytes(), before_file)
-            with self.assertRaisesRegex(StructureError, "block entities"):
+            with self.assertRaisesRegex(StructureError, "explicit BE import tool"):
                 decode_structure(raw)
             session = EditSession(world)
             modified = place_be_transfer(session, transfer, (8, -62, 3))

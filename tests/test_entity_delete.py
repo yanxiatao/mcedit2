@@ -239,7 +239,7 @@ class EntityDeletionSessionTests(unittest.TestCase):
             after = extract_chunk(filename.read_bytes(), 0, 0)[0]
             self.assertEqual(read_entities(after), ())
             self.assertEqual(nbt.parse(after).require(
-                "Level", 10).require("Entities", 9).children, [])
+                "Level", 10).require("Entities", 9).children, ())
             self.assertEqual(world.last_backup.joinpath(
                 "region/r.0.0.mcr").read_bytes(), old_region_bytes)
 

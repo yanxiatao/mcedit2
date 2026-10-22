@@ -119,6 +119,9 @@ class DownscaleSessionTests(unittest.TestCase):
     def test_late_destination_section_failure_does_not_stage_partial_move(self):
         box = Box.from_corners((0, 0, 0), (4, 0, 0))
         self.world.states[(0, 0, 0)] = "mod:opaque"
+        # Ensure the final x=12 target is an actual write (not an air->air
+        # no-op); the fake backend must reject that late missing section.
+        self.world.states[(4, 0, 0)] = "mod:opaque_tail"
         self.world.writable = {
             (10, 0, 0), (11, 0, 0), (0, 0, 0), (2, 0, 0), (4, 0, 0)}
         with self.assertRaisesRegex(ValueError, "Section missing"):

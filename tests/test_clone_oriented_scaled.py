@@ -109,7 +109,11 @@ class OrientedScaledNativeTests(unittest.TestCase):
         self.assertEqual(len(entries), len({entry[0] for entry in entries}))
         # A 180° turn swaps both source X positions; each stamp copies
         # the ORIGINAL states, not the modifications from the first.
-        self.assertEqual(self.world.get_block(4, 0, 0), self.north)
+        # Rotation applies to both position AND directional block state.
+        # A north-facing stair is south-facing after a 180-degree turn.
+        self.assertEqual(
+            self.world.get_block(4, 0, 0),
+            make_block("minecraft:oak_stairs[facing=south,half=bottom,shape=straight]"))
         self.assertEqual(self.world.get_block(1, 0, 0),
                          make_block("minecraft:stone"))
         self.assertTrue(self.session.undo())

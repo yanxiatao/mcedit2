@@ -560,10 +560,15 @@ class EditSession:
             raise ValueError("Clone destination-air mask must be Boolean")
         from .clone_mask import is_vanilla_source_air
         entries = targets.items() if isinstance(targets, dict) else targets
+        # A malformed/modded world can contain a real original BE alongside
+        # an air BlockState. The target-air mask must NEVER treat that BE as
+        # replaceable. Ordinary no-mask clones still refuse BE destinations.
+        checker = getattr(self.world, "has_block_entity", None)
         selected = [
             (point, state) for point, state in entries
             if not only_replace_air
-            or is_vanilla_source_air(self.world.get_block(*point))
+            or (is_vanilla_source_air(self.world.get_block(*point))
+                and not (callable(checker) and checker(*point)))
         ]
         self._ensure_block_only(point for point, _ in selected)
         return selected

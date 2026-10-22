@@ -2895,3 +2895,68 @@ Minecraft+mod validation, modded entity link and UUID semantics,
 Bedrock support, and safe huge-world unlimited indexing. All
 work remains in existing Draft PR #1 `python3-modern-editor`
 and does not modify `master`.
+
+## 0.3.0a70 — First full Python 3 CI run + private real-world archive audit
+
+Ran a real GitHub Actions full top-level migrated Python 3 test suite
+from the original Draft PR, instead of relying on documentation-only
+regressions. Prior CI only ran a handpicked subset and normally skipped
+draft PR updates. The `python3-modern.yml` workflow now also runs on
+`python3-modern-editor` pushes and has a dedicated exhaustive
+`full-modern-regression` job including native and offscreen Qt6
+tests. Original Python 2 `tests/test_mceditlib` is deliberately
+excluded from Python 3 compile checks; core tasks no longer import Qt
+tests without installing PySide6. Old Python 2 library migration is
+**not** declared complete.
+
+The first true full run executed **873 tests** and exposed 7
+regressions (5 assertions, 2 errors). Repaired native clone target
+air-mask safety so it **never overwrites an existing Block Entity,
+even if an invalid/modded world places the BE on an air BlockState**.
+The other cases were incorrect/obsolete test expectations or
+fixtures: 180° directional stair rotation, reduced clone's late
+target write being an unmodified air no-op, immutable tuple-based
+NBT `children`, byte-identical overlapping BE move write count,
+expected expert transfer import error wording, and a Qt6 patched
+dialog method signature. A repeat of all 873 tests plus three
+core Python versions, Qt startup and Mesa GL smoke **succeeded**
+before adding the new archive runner.
+
+Two user-supplied **private real modded Java world archives** were
+inspected locally without GitHub uploading them. Both archives have
+root `level.dat` and original region files. Independent read-only
+sector/decompression/NBT inspection found:
+- **1.12.2 / DataVersion 1343**: 637 indexed terrain chunks,
+  3,225 original Sections, 33 Block Entities and 304 inline
+  Entities; zero malformed generated chunk NBT reads.
+- **1.21.1 / DataVersion 3955**: 2,338 indexed terrain chunks
+  (56,112 original Sections), 1,329 Block Entities, 155
+  standalone Entity chunks with 405 records; zero malformed
+  generated chunk NBT reads. It also contains **72 zero-byte
+  .mca placeholders**, distinguished from actually populated
+  or damaged generated chunks. Missing/invalid region headers
+  remain visible in ordinary native index safety diagnostics.
+
+Added `scripts/validate_real_world_archives.py`, an optional
+**read-only real ZIP + native backend** smoke runner. It extracts
+only level.dat/terrain/entity regions into a private temporary
+directory; does not extract playerdata, modify originals, issue
+Save or upload the archive. On a checkout with dependencies:
+```
+python scripts/validate_real_world_archives.py 1.12.2.zip 1.21.1.zip
+```
+It enumerates and parses EVERY generated native chunk, tests an
+explicitly capped sample of actual decoded native BlockState
+Sections, validates original coordinates and Entity NBT and
+reports malformed *populated* region headers separately from
+zero-byte placeholders. The test `tests/test_real_world_archives.py`
+uses synthetic archives to run this script on CI. The provided
+real-world ZIPs remain in the conversation sandbox, NOT in GitHub;
+the **native editor backend smoke against those two user ZIPs
+has not run on GitHub Actions**. The local ZIP inspection was an
+independent read-only scanner, not a claim of a successful
+in-game editor Save or complete world/version parity.
+
+Version metadata in `pyproject.toml` was synchronized with
+`modern/mcedit2_next/__init__.py` (now 0.3.0a70). Remains an
+experimental Draft PR, with `master` unchanged.

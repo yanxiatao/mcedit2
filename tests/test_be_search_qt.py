@@ -70,8 +70,7 @@ class NativeBESearchQtTests(unittest.TestCase):
                 return QDialog.DialogCode.Accepted
             raise AssertionError("Unexpected BE search Qt modal dialog")
 
-        with patch("mcedit2_next.gui.QDialog.exec", autospec=True,
-                   side_effect=modal):
+        with patch("mcedit2_next.gui.QDialog.exec", new=modal):
             window.find_original_block_entities()
         self.assertEqual(dialog_events, ["criteria", "result"])
         self.assertEqual(window._box().minimum, (2, -62, 3))

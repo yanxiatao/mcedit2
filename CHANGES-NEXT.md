@@ -899,3 +899,30 @@ available and is not automatically replaced.
 - Added native disk-backed and offscreen Qt regression
   **test sources**; runtime verification of large real
   modded worlds and Windows/OpenGL remains outstanding.
+
+## 0.3.0a70 — CI regression repair + private original world checks
+
+- Enabled CI on the feature branch and added one exhaustive
+  Python 3 top-level migrated `unittest` job (including native
+  and Qt tests), rather than only a selected legacy list. Original
+  Python 2 tests are not compiled as if migrated Python 3.
+- First full run: 873 tests, five failures/two errors; all seven
+  cases diagnosed/fixed. **Native safety fix:** destination-air
+  clone masks never write atop BEs attached to air-state cells.
+  Subsequent 873-test full run plus Python 3.12/3.13/3.14,
+  Qt6 and Mesa OpenGL jobs passed.
+- Audited two private user Java world ZIPs locally, using
+  read-only sector/NBT parsing. Version 1343: 637 terrain
+  chunks, 33 BEs. Version 3955: 2338 terrain chunks,
+  1329 BEs, 155 separate Entity chunks, and 72 empty
+  region-file placeholders; no populated chunk NBT errors.
+- Added `scripts/validate_real_world_archives.py` for the real
+  archives to be tested through the native backend without
+  publishing ZIP contents, plus a synthetic archive validation
+  regression for CI. Running this backend validator on the
+  actual supplied ZIPs must occur in an environment with the
+  full source tree and dependencies. GitHub Actions cannot
+  directly access chat-uploaded ZIPs.
+- Aligned packaged `pyproject.toml` and runtime version
+  to 0.3.0a70. Real game/OS/3D editing parity tests remain
+  outstanding.
