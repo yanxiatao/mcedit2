@@ -2705,3 +2705,63 @@ heightmaps. Full real modded-world, Qt/OpenGL hardware/Windows
 testing is NOT complete; new test files are provided as
 **source only**. Keep Draft PR #1 on `python3-modern-editor`;
 `master` untouched.
+
+## 0.3.0a67 — Cross-chunk native Block Entity ID find / read-only navigation
+
+Ported a broader original MCEdit2 world-inspection workflow beyond the
+previous nearby-only 3D BE marker overlay. **Find original Block Entities
+by ID** is available in the Qt6 Edit menu and persistent Tool Palette.
+Search uses the **native original Java NBT** from the selected X/Y/Z
+region (or the current 16×16 chunk at all supported heights if no
+selection). The displayed form accepts **exact namespaced original
+BE IDs** or `*` for all types; optionally includes in-memory staged
+creation, modification and deletion records. No Minecraft block or BE
+NBT is converted, repaired, saved, regenerated or overwritten.
+
+- New `be_search.py`: search across **at most 64 chunks**, with
+  **256 listed results**, while keeping an exact total of the valid
+  decoded matches. Each chunk is parsed once, checks original NBT
+  xPos/zPos, strict existing BE `id` and TAG_Int x/y/z, and rejects
+  duplicate/out-of-chunk records or malformed staged coordinates.
+  Hard limit of 4096 merged BE records/chunk. Entries are filtered
+  by the exact **inclusive XYZ selection**, not quart-aligned
+  blocks or an entire matching chunk.
+- Unsaved staged additions, modifications and removals show statuses
+  `created`, `modified`, `deleted` separately from unchanged
+  `original`. Equal-byte staged records report `original`;
+  pending deletion exposes the old original ID explicitly, so the
+  user does not mistake the record for a currently present BE.
+  Optional original-only search bypasses the staged overlay.
+- A failed/absent chunk produces an explicit per-chunk diagnostic
+  and **no partial result from that chunk**. The report states
+  requested versus successfully decoded chunks, complete/partial
+  coverage, exact match count, list truncation and original BE
+  coordinates. Missing reads are **never** treated as proof that
+  a matching BE is absent. The bounded search is read-only and
+  does not create world chunks.
+- Qt6 results list supports **Go to selected BE / double-click**
+  to select the exact 1×1×1 XYZ cell and center the 2D viewport.
+  Search retains the original-world identity and refuses to
+  navigate a result after switching world/dimension. Reports are
+  read-only and copyable. No OpenGL context is required to search.
+- **Bug fix from a66:** the 3D native BE overlay now renders
+  original/staged wireframe boxes **even when no 3D selection exists**.
+  Previously the generic selection-line helper returned early
+  and omitted BE markers during ordinary world browsing.
+- New `tests/test_be_search.py` synthetic disk-backed regression
+  source covers named modded IDs, wildcard/negative matches,
+  original-only versus staged add/modify/delete, exact XYZ
+  filtering, missing chunks, invalid staged identities, duplicate
+  coordinates, bounded searches, truncated result lists and
+  preservation of original disk bytes. New
+  `tests/test_be_search_qt.py` adds offscreen Qt search-form,
+  result navigation and unselected 3D overlay geometry source.
+
+**Remaining work:** world-wide indexed BE search with progress and
+cancellation, native standalone entity selection/filters, complete
+MCEdit2 tool parity, modded BE semantic/UUID/network repair, full
+PySide6/OpenGL on-device testing and game-world format matrix.
+This is a read-only finder with **source-level test specifications,
+not claimed executed tests**. Original Draft PR #1 and its
+`python3-modern-editor` branch remain unchanged in scope,
+and `master` was not modified.

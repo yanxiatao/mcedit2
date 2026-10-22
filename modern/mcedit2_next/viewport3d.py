@@ -243,6 +243,12 @@ class Voxel3DView(QOpenGLWidget):
         """Show ordinary selection and any read-only target clone bounds."""
         ghost = ghost_wireframe_vertices(self.clone_preview_boxes, target)
         if self.selection is None:
+            # BE markers are a separate read-only layer. They must render
+            # even when the editor has NO active selection (normal browsing).
+            if self.show_be_markers and self.be_marker_snapshot is not None:
+                from .be_markers import be_marker_line_vertices
+                ghost.extend(be_marker_line_vertices(
+                    self.be_marker_snapshot.markers, target))
             return ghost
         x1, z1, x2, z2 = self.selection
         a = (min(x1, x2), min(self.y_lo, self.y_hi), min(z1, z2))

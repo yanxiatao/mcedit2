@@ -846,3 +846,19 @@ available and is not automatically replaced.
 - Added disk-backed native and offscreen Qt **test source**.
   Full real-world GL/runtime matrix and broad MCEdit2 feature
   parity remain outstanding.
+
+## 0.3.0a67 — Read-only multi-chunk original Block Entity search
+
+- Added native Java BE exact namespaced-ID / wildcard search over a
+  selected XYZ area or current chunk, strict 64-chunk cap, 256
+  listed results and total hit counts. Native NBT record validation
+  and original chunk identity checks prevent silently treating
+  malformed reads as complete search results.
+- Optional unsaved BE staged overlay identifies originals,
+  modifications, additions and deletions without rewriting data.
+  Missing chunks are recorded as **partial coverage**, not absent
+  BEs. Qt6 Edit-menu and Tool Palette results allow exact XYZ
+  navigation and a copyable report.
+- Fixed 3D BE wireframes disappearing when there was no selection.
+- Added native disk-backed and offscreen Qt regression **source**;
+  broad real-world Windows/OpenGL runtime validation is pending.

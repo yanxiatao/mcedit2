@@ -393,6 +393,8 @@ class MainWindow(QMainWindow):
                         self.paint_sampled_biome)
         self.add_action(edit_menu, "Find exact native biome in selection…", "",
                         self.find_native_biomes)
+        self.add_action(edit_menu, "Find original Block Entities by ID…", "",
+                        self.find_original_block_entities)
         self.add_action(edit_menu, "Copy selection", "Ctrl+C", self.copy)
         self.add_action(edit_menu, "Copy with BE NBT (experimental)…", "", self.copy_with_be)
         self.add_action(edit_menu, "Paste with BE NBT (experimental)…", "", self.paste_with_be)
@@ -2094,6 +2096,145 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.No)
         if result == QMessageBox.StandardButton.Yes:
             self._perform(lambda: self.session.paint_biome_box(box, name))
+
+    def _go_to_block_entity(self, point):
+        """Navigate to an exact original BE location without editing NBT."""
+        if self.world is None or self.session is None:
+            raise ValueError("Open a Java world first")
+        if (not isinstance(point, tuple) or len(point) != 3 or
+                any(type(v) is not int for v in point)):
+            raise ValueError("Native BE location must have integer XYZ coordinates")
+        x, y, z = point
+        if self.view_mode.currentIndex() != 0:
+            self.view_mode.setCurrentIndex(0)
+        # Changing Y clears the current selection; set it BEFORE highlighting.
+        self.y_spin.setValue(y)
+        for view in (self.slice_view, self.volume_view):
+            if view is not None:
+                view.center_x, view.center_z = x, z
+        self.select_coordinates(point, point)
+        self.slice_view.update()
+        self.statusBar().showMessage(
+            f"Located original Block Entity at X={x}, Y={y}, Z={z} (read only)")
+
+    def find_original_block_entities(self):
+        """Search original/staged Block Entities by exact native ID and location."""
+        if self.world is None or self.session is None:
+            QMessageBox.information(
+                self, "Find original Block Entities", "Open a Java world first.")
+            return
+        if self.view.selection is None:
+            cx, cz = self.view.center_x >> 4, self.view.center_z >> 4
+            box = Box(
+                (cx * 16, -2048, cz * 16),
+                (cx * 16 + 15, 4095, cz * 16 + 15))
+            label = f"Current chunk ({cx}, {cz}), all supported Y"
+        else:
+            box = self._box()
+            label = f"Selected 3D area {box.minimum} to {box.maximum}"
+        criteria = QDialog(self)
+        criteria.setWindowTitle("Find original Java Block Entities")
+        form = QFormLayout(criteria)
+        name = QLineEdit("*", criteria)
+        name.setObjectName("find_original_be_id")
+        name.setToolTip(
+            "Exact namespaced BE id, e.g. minecraft:chest; '*' finds all IDs. "
+            "No partial/fuzzy matching, registry remapping or NBT normalization.")
+        form.addRow("Original BE ID ('*' = all)", name)
+        staged_box = QCheckBox(
+            "Include unsaved BE changes and show staged deletions", criteria)
+        staged_box.setObjectName("find_original_be_include_staged")
+        staged_box.setChecked(True)
+        form.addRow(staged_box)
+        scope = QLabel(
+            label + ". Maximum 64 existing/missing chunks and "
+            "256 listed results. Absent/unreadable chunks are reported "
+            "as incomplete, NOT assumed empty.", criteria)
+        scope.setWordWrap(True)
+        form.addRow(scope)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel, criteria)
+        buttons.accepted.connect(criteria.accept)
+        buttons.rejected.connect(criteria.reject)
+        form.addRow(buttons)
+        if criteria.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        from .be_search import find_block_entities
+        try:
+            found = find_block_entities(
+                self.world, box.minimum, box.maximum, name.text().strip(),
+                include_staged=staged_box.isChecked())
+        except Exception as exc:
+            QMessageBox.warning(self, "Original BE find refused", str(exc))
+            return
+
+        from PySide6.QtWidgets import QListWidget, QPlainTextEdit
+        viewer = QDialog(self)
+        viewer.resize(790, 610)
+        viewer.setWindowTitle(
+            f"Original BE find — {found.matching_records} matches" +
+            (" (PARTIAL)" if not found.complete else ""))
+        layout = QVBoxLayout(viewer)
+        summary = QLabel(
+            f"Matches: {found.matching_records:,}; listed "
+            f"{len(found.matches)}. Decoded {found.scanned_chunks}/"
+            f"{found.expected_chunks} original chunks. "
+            + ("INCOMPLETE: some chunks are unreadable or absent."
+               if not found.complete else
+               "Complete within the selected original world scope."),
+            viewer)
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+        hits = QListWidget(viewer)
+        hits.setObjectName("native_be_search_results")
+        for match in found.matches:
+            x, y, z = match.point
+            hits.addItem(
+                f"X={x}, Y={y}, Z={z} [{match.status}] {match.identifier}")
+            hits.item(hits.count()-1).setData(
+                Qt.ItemDataRole.UserRole, match.point)
+        layout.addWidget(hits)
+        diagnostics = QPlainTextEdit(viewer)
+        diagnostics.setReadOnly(True)
+        diagnostics.setObjectName("native_be_search_report")
+        diagnostics.setPlainText(found.report())
+        layout.addWidget(diagnostics)
+        controls = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Close, viewer)
+        go = controls.addButton(
+            "Go to selected BE", QDialogButtonBox.ButtonRole.ActionRole)
+        go.setEnabled(bool(found.matches))
+        searched_world = self.world
+
+        def navigate():
+            item = hits.currentItem()
+            if item is None:
+                return
+            if self.world is not searched_world:
+                QMessageBox.warning(
+                    viewer, "BE navigation refused",
+                    "World/dimension changed since scan; rerun search.")
+                return
+            try:
+                self._go_to_block_entity(
+                    item.data(Qt.ItemDataRole.UserRole))
+            except Exception as exc:
+                QMessageBox.warning(
+                    viewer, "BE navigation refused", str(exc))
+                return
+            viewer.accept()
+
+        go.clicked.connect(navigate)
+        hits.itemDoubleClicked.connect(lambda item: navigate())
+        copy = controls.addButton(
+            "Copy report", QDialogButtonBox.ButtonRole.ActionRole)
+        copy.clicked.connect(
+            lambda: QApplication.clipboard().setText(diagnostics.toPlainText()))
+        controls.rejected.connect(viewer.accept)
+        layout.addWidget(controls)
+        viewer.exec()
 
     def _go_to_biome_quart(self, point):
         """Navigate to, but never modify, the matched native 4x4x4 cell."""

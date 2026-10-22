@@ -47,6 +47,7 @@ class ToolPaletteDock(QDockWidget):
         ("Find exact native biome in selection…", "find_native_biomes"),
         ("Replace native blocks", "filtered_replace_dialog"),
         ("Find original blocks…", "find_blocks_in_selection"),
+        ("Find original Block Entities by exact ID…", "find_original_block_entities"),
         ("Count original blocks…", "show_selection_statistics"),
         ("Copy selected volume", "copy"),
         ("Paste at view center", "paste"),
