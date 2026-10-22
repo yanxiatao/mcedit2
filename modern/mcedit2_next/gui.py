@@ -326,6 +326,8 @@ class MainWindow(QMainWindow):
                         lambda: self.transform_selection("mirror_x"))
         self.add_action(edit_menu, "Mirror selection North/South (Z)", "",
                         lambda: self.transform_selection("mirror_z"))
+        self.add_action(edit_menu, "Mirror selection Up/Down (Y) — guarded", "",
+                        lambda: self.transform_selection("mirror_y"))
         self.add_action(edit_menu, "Fill selection", "Ctrl+F", self.fill)
         self.add_action(edit_menu, "Flood-fill connected blocks within selection", "",
                         self.flood_selection)
@@ -2022,6 +2024,7 @@ class MainWindow(QMainWindow):
             ("Rotate counterclockwise 90°", "counterclockwise"),
             ("Mirror East / West", "mirror_x"),
             ("Mirror North / South", "mirror_z"),
+            ("Mirror Up / Down (supported vanilla only)", "mirror_y"),
         ]
         if operation is None:
             names = [label for label, _ in choices]
@@ -2145,6 +2148,7 @@ class MainWindow(QMainWindow):
             ("Clockwise 270°", "clockwise_270"),
             ("Mirror east/west", "mirror_x"),
             ("Mirror north/south", "mirror_z"),
+            ("Mirror up/down (guarded)", "mirror_y"),
         ):
             orientation.addItem(label, op)
         orientation.setObjectName("clone_oriented_scaled_orientation")

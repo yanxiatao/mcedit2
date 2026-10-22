@@ -2103,3 +2103,58 @@ inventories or linked multiblock systems, photorealistic full-model
 transparent ghosts, or crash-atomic multi-region transactions.
 Full CI, Mesa/Qt/Windows builds and live version-matrix testing
 remain deferred as requested.
+
+## 0.3.0a55 — Guarded Up/Down (Y) mirroring in native Clone Tool
+
+Added loss-averse **vertical reflection** as an explicit original-format
+editor operation rather than pretending arbitrary Minecraft blocks have
+universal pitch/roll metadata conversions. It is supported both by the
+in-place Qt6 selection transform and by the existing Clone Tool oriented
+single/repeated copy, rotate-then-scale and read-only 3D ghost planning.
+
+- `transforms.py` now recognizes `mirror_y`. Geometry reflects the
+  local selection coordinate `y → sizeY−1−y` while preserving X/Z
+  coordinates and the bounding-box dimensions. Applying the operation
+  twice restores the original position and supported native state.
+- For modern Java vanilla blocks, only explicitly verified simple
+  transformations are allowed: stairs `half=top/bottom`, slabs
+  `type=top/bottom/double`, trapdoors `half=top/bottom`, original
+  `axis=x/y/z` logs/wood/stems/hyphae/pillars, and verified static
+  invariant blocks. Horizontal `facing`, stair `shape`, power/open
+  flags, waterlogging and other whitelisted metadata remain unchanged.
+  Missing/wrong-valued required fields and unknown properties fail
+  closed.
+- For legacy numeric Java worlds, original stair upper-half bit 4
+  and the original vanilla slab upper-half bit 8 (IDs 44/126/182)
+  are inverted with all other original metadata bits retained.
+  Verified invariant IDs and existing log IDs retain exact metadata;
+  other numeric IDs, modded blocks, modern doors/observers/pistons
+  and custom/linked vertical geometries are deliberately refused.
+- `EditSession.transform_selection`, `clone_box_transformed`,
+  `clone_box_oriented_scaled`, the 3D Clone Tool preview plan and
+  bounded original-state ghost projection all reuse the **same**
+  native coordinate/state mapping. The Qt6 Edit menu, clone dialogs,
+  tool dock and orientation combo now expose an explicit guarded
+  `Mirror Up / Down` choice. No dedicated fake NBT conversion is used.
+- All original Block Entity sources and targets are rejected before
+  mutation by existing BE checks; unsupported custom block orientation
+  and invalid/missing original native sections refuse the whole
+  operation without a partial staged write. Existing Undo/Redo
+  grouping, full-region original backups and unrelated BE/entity NBT
+  preservation remain unchanged.
+- Added source regression specifications in
+  `tests/test_clone_vertical_mirror.py` for involutive geometry,
+  correct modern slab/stair/trapdoor and legacy stair/slab metadata,
+  unsupported modern/modded/linked refusal, BE and late-section
+  fail-closed checks, original-state 3D ghost matching actual
+  oriented clones, combined oriented+scaled copies, single-step
+  Undo/Redo, and original Anvil / MCRegion save, backup and opaque
+  NBT preservation.
+
+**Not implemented:** arbitrary-angle X/Z-axis rotation, roll/pitch
+of complex blocks, vertical mirroring of doors/multiblock structures,
+entity/passenger graphs, modded orientation registries or unsafe
+linked Block Entity NBT. Tests above are committed as **source-only**
+and have not been run against the full Qt/Mesa/Minecraft-version
+matrix or packaged for Windows. The existing Draft PR and branch are
+retained; `master` is untouched.

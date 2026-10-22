@@ -24,6 +24,8 @@ MOVES = {
                  "north": "north", "south": "south"},
     "mirror_z": {"north": "south", "south": "north",
                  "east": "east", "west": "west"},
+    "mirror_y": {"north": "north", "south": "south",
+                 "east": "east", "west": "west"},
 }
 IDENTITY = {"north": "north", "east": "east",
             "south": "south", "west": "west"}
@@ -208,6 +210,80 @@ def _modern(state: BlockState, op: str) -> BlockState:
     return BlockState(state.name, tuple(sorted(result.items())))
 
 
+def _vertical_modern(state: BlockState) -> BlockState:
+    """Mirror known original vanilla blocks across a horizontal plane.
+
+    This is intentionally narrower than horizontal rotation: double-height
+    doors, beds, attached blocks, pistons, custom models and linked geometry
+    need structure-wide reasoning, not a local string substitution. Reject
+    them instead of silently corrupting the source map.
+    """
+    if not state.name.startswith("minecraft:"):
+        raise UnsafeFormat("Unknown modded vertical reflection semantics")
+    name = state.name[len("minecraft:"):]
+    props = dict(state.properties)
+    if not props:
+        if _allowed_vanilla(state.name, props):
+            return state
+        raise UnsafeFormat(
+            f"No verified vertical reflection for {state.name}")
+    if name.endswith("_stairs"):
+        required = {"facing", "half", "shape"}
+        if (not required.issubset(props) or
+                not set(props).issubset(required | {"waterlogged"}) or
+                props["facing"] not in CARDINAL or
+                props["half"] not in ("top", "bottom") or
+                props["shape"] not in ("straight", "inner_left", "inner_right",
+                                       "outer_left", "outer_right") or
+                props.get("waterlogged", "false") not in ("true", "false")):
+            raise UnsafeFormat("Unrecognized vanilla stair vertical geometry")
+        props["half"] = ("top" if props["half"] == "bottom" else "bottom")
+    elif name.endswith("_slab"):
+        if (not {"type"}.issubset(props) or
+                not set(props).issubset({"type", "waterlogged"}) or
+                props["type"] not in ("top", "bottom", "double") or
+                props.get("waterlogged", "false") not in ("true", "false")):
+            raise UnsafeFormat("Unrecognized vanilla slab vertical geometry")
+        if props["type"] != "double":
+            props["type"] = ("top" if props["type"] == "bottom" else "bottom")
+    elif name.endswith("_trapdoor"):
+        required = {"facing", "half", "open", "powered"}
+        if (not required.issubset(props) or
+                not set(props).issubset(required | {"waterlogged"}) or
+                props["facing"] not in CARDINAL or
+                props["half"] not in ("top", "bottom") or
+                any(props[key] not in ("true", "false") for key in
+                    ("open", "powered")) or
+                props.get("waterlogged", "false") not in ("true", "false")):
+            raise UnsafeFormat("Unrecognized vanilla trapdoor vertical geometry")
+        props["half"] = ("top" if props["half"] == "bottom" else "bottom")
+    elif name.endswith(("_log", "_wood", "_stem", "_hyphae", "_pillar")):
+        if set(props) != {"axis"} or props["axis"] not in ("x", "y", "z"):
+            raise UnsafeFormat("Unrecognized vanilla log/pillar orientation")
+        # Mirroring flips the sign of an axis, not its (unsigned) direction.
+        return state
+    else:
+        raise UnsafeFormat(
+            f"Vertical reflection requires a verified vanilla block type: "
+            f"{state.name}")
+    return BlockState(state.name, tuple(sorted(props.items())))
+
+
+def _vertical_legacy(state: BlockState) -> BlockState:
+    """Preserve preflattening ID/meta, changing only verified vertical bits."""
+    ident, data = id_meta(state)
+    if ident in LEGACY_INVARIANT or ident in LEGACY_LOGS:
+        return native_state(ident, data)
+    if ident in LEGACY_STAIRS:
+        if not 0 <= data <= 7:
+            raise UnsafeFormat("Invalid original legacy stair half/facing metadata")
+        return native_state(ident, data ^ 4)
+    if ident in (44, 126, 182):  # vanilla lower/upper half slabs
+        return native_state(ident, data ^ 8)
+    raise UnsafeFormat(
+        f"Legacy numeric ID {ident}:{data} has no verified Y mirror mapping")
+
+
 def _legacy(state: BlockState, op: str) -> BlockState:
     ident, data = id_meta(state)
     if ident in LEGACY_INVARIANT:
@@ -240,6 +316,8 @@ def transform_state(state: BlockState, op: str, *, legacy: bool = False) -> Bloc
         raise ValueError(f"Unknown horizontal transform {op!r}")
     if not isinstance(state, BlockState):
         raise TypeError("Expected a native BlockState")
+    if op == "mirror_y":
+        return _vertical_legacy(state) if legacy else _vertical_modern(state)
     return _legacy(state, op) if legacy else _modern(state, op)
 
 
@@ -258,6 +336,8 @@ def transform_position(point: tuple[int, int, int],
         return sx - 1 - x, y, sz - 1 - z
     if op == "mirror_x":
         return sx - 1 - x, y, z
+    if op == "mirror_y":
+        return x, sy - 1 - y, z
     return x, y, sz - 1 - z
 
 

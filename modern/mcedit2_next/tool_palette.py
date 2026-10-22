@@ -39,6 +39,7 @@ class ToolPaletteDock(QDockWidget):
         ("Rotate selection clockwise 270°", "rotate_clockwise_270"),
         ("Mirror selection East / West", "mirror_x"),
         ("Mirror selection North / South", "mirror_z"),
+        ("Mirror selection Up / Down (guarded)", "mirror_y"),
         ("Replace native blocks", "filtered_replace_dialog"),
         ("Find original blocks…", "find_blocks_in_selection"),
         ("Count original blocks…", "show_selection_statistics"),
@@ -169,6 +170,7 @@ class ToolPaletteDock(QDockWidget):
             ("Rotate counterclockwise 90°", "counterclockwise"),
             ("Mirror East / West", "mirror_x"),
             ("Mirror North / South", "mirror_z"),
+            ("Mirror Up / Down (guarded)", "mirror_y"),
         ):
             self.clone_orientation.addItem(label, operation)
         clone_form.addRow("Copy orientation", self.clone_orientation)
@@ -549,7 +551,7 @@ class ToolPaletteDock(QDockWidget):
                 self.editor.transform_selection("half_turn")
             elif action == "rotate_clockwise_270":
                 self.editor.transform_selection("clockwise_270")
-            elif action in ("mirror_x", "mirror_z"):
+            elif action in ("mirror_x", "mirror_y", "mirror_z"):
                 self.editor.transform_selection(action)
             else:
                 getattr(self.editor, action)()

@@ -645,3 +645,19 @@ available and is not automatically replaced.
   plus source regressions for original Anvil and MCRegion data.
 - Consolidated duplicate independently added oriented-scale
   Python definitions. Full CI/game-version/Windows checks deferred.
+
+## 0.3.0a55 — Guarded vertical Y-mirror clone/selection
+
+- Added `mirror_y` native coordinate/reflection semantics to the
+  existing Qt6 in-place selection transforms, oriented copies,
+  rotate-then-scale clones and 3D ghost plans. Supported original
+  vanilla stairs/slabs/trapdoors swap upper and lower positions,
+  verified original logs/invariant blocks retain their native state,
+  and original MCRegion stair/slab metadata uses only known flip bits.
+- Missing/malformed vanilla properties, modded orientations, doors,
+  linked/unknown vertical geometry and unverified old numeric IDs
+  are refused. BE source/target preflight and original region backups
+  preserve unrelated entity and modded NBT; Undo/Redo remains grouped.
+- Added source-only regression cases for vertical involution, modern
+  and legacy metadata, read-only ghost fidelity, native save/reopen,
+  unsafe refusal and BE protection. Full testing deferred.
