@@ -262,6 +262,9 @@ class NativeAnvilWorld:
             raise UnsafeFormat(
                 "Modern DataVersion with old .mcr regions; refusing conversion")
         self.region_extension = ".mcr" if self.is_mcregion else ".mca"
+        # Legacy BE transfers preserve original Blocks/Data/Add ID+metadata.
+        # MCRegion remains excluded: its storage/writer semantics differ.
+        self.lossless_legacy_be_transfer = self.legacy and not self.is_mcregion
         self.last_backup: Path | None = None
 
     @staticmethod
@@ -563,8 +566,8 @@ class NativeAnvilWorld:
 
     def get_cell(self, x: int, y: int, z: int) -> CellSnapshot:
         """Capture block state and unchanged (or staged) BE NBT as one value."""
-        if self.legacy:
-            raise UnsafeFormat("BE transfer is not verified for old numeric formats")
+        if self.is_mcregion:
+            raise UnsafeFormat("MCRegion BE transfer is not supported")
         point = (x, y, z)
         payload = self.get_block_entity_raw(*point)
         if payload is not None:
@@ -578,14 +581,19 @@ class NativeAnvilWorld:
         Used only by an explicit BE-aware transaction. The regular block
         editor continues to refuse all BE destinations.
         """
-        if self.legacy:
-            raise UnsafeFormat("Lossless BE transfer unavailable for old Anvil")
+        if self.is_mcregion:
+            raise UnsafeFormat("MCRegion BE transfer is not supported")
         point = (x, y, z)
         if not isinstance(snapshot, CellSnapshot) or not isinstance(snapshot.block, BlockState):
             raise ValueError("Expected a complete Block Entity cell snapshot")
         original = palette.block_entity_raw(self._chunk(x >> 4, z >> 4), point)
         if original is not None and not allow_existing_be:
             raise UnsafeFormat("BE at destination cannot be overwritten")
+        if self.legacy:
+            # Keep original numeric ID + metadata; do not look up modded IDs.
+            numeric, metadata = legacy_anvil.id_meta(snapshot.block)
+            if snapshot.block_entity is not None and numeric == 0:
+                raise UnsafeFormat("Cannot attach legacy BE to native numeric air")
         if snapshot.block_entity is not None:
             validate_payload(snapshot.block_entity, point)
             if snapshot.block.name in ("minecraft:air", "minecraft:cave_air"):
@@ -594,6 +602,13 @@ class NativeAnvilWorld:
         base_state = section[((y & 15) << 8) | ((z & 15) << 4) | (x & 15)]
         if original == snapshot.block_entity and base_state != snapshot.block:
             raise UnsafeFormat("Refusing to change a protected BE block without changing BE NBT")
+        if self.legacy:
+            if original is not None and snapshot.block_entity is None and (
+                    legacy_anvil.id_meta(snapshot.block) != (0, 0)):
+                raise UnsafeFormat("Legacy BE removal requires original numeric air (0,0)")
+            if original is None and snapshot.block_entity is not None and (
+                    base_state == snapshot.block):
+                raise UnsafeFormat("Legacy BE creation requires a changed native block ID/meta")
         # Validation is complete before either staging dictionary is mutated.
         if base_state == snapshot.block:
             self._edits.pop(point, None)
@@ -1186,27 +1201,47 @@ class NativeAnvilWorld:
                 else:
                     additions = be_by_chunk.get((cx, cz), {})
                     if self.legacy:
-                        if additions:
-                            # Old formats allow only in-place editing of
-                            # existing BE compounds, never copy or relocation.
-                            for point, new_payload in additions.items():
-                                old_payload = palette.block_entity_raw(chunk, point)
-                                if old_payload is None or new_payload is None:
-                                    raise UnsafeFormat(
-                                        "Legacy BE creation/removal/movement is disabled")
+                        allowed = set()
+                        for point, new_payload in additions.items():
+                            old_payload = palette.block_entity_raw(chunk, point)
+                            if old_payload is not None:
                                 validate_payload(old_payload, point)
+                            if new_payload is not None:
                                 validate_payload(new_payload, point)
+                            # In-place BE structure/scalar changes remain legal
+                            # only when the native numeric block itself does not change.
+                            if old_payload is not None and new_payload is not None:
                                 original_id = nbt.parse(nbt.make_tag(
                                     10, "", old_payload)).require("id", 8).value
                                 revised_id = nbt.parse(nbt.make_tag(
                                     10, "", new_payload)).require("id", 8).value
                                 if original_id != revised_id:
                                     raise UnsafeFormat("Legacy BE identity cannot change")
+                                if point in updates:
+                                    raise UnsafeFormat("Legacy BE identity edit cannot alter block ID/meta")
+                                continue
+                            if self.is_mcregion:
+                                raise UnsafeFormat("MCRegion BE creation/removal is disabled")
+                            # A new/deleted legacy BE must have an explicitly
+                            # changed raw ID/meta at the SAME coordinate.
+                            if point not in updates:
+                                raise UnsafeFormat("Legacy BE transfer requires matching numeric block edit")
+                            numeric = legacy_anvil.id_meta(updates[point])
+                            if old_payload is not None and new_payload is None:
+                                if numeric != (0, 0):
+                                    raise UnsafeFormat("Legacy BE removal must clear native ID/meta")
+                                allowed.add(point)
+                            elif old_payload is None and new_payload is not None:
+                                if numeric[0] == 0:
+                                    raise UnsafeFormat("Legacy BE creation cannot use numeric air")
+                            else:
+                                raise UnsafeFormat("Invalid legacy BE stage")
                         if self.is_mcregion:
                             patched = mcregion.patch_blocks(chunk, updates)
                         else:
                             patched = legacy_anvil.patch_blocks(
-                                chunk, updates, self.version)
+                                chunk, updates, self.version,
+                                allowed_be_positions=frozenset(allowed))
                         patched = patch_block_entities(patched, additions)
                     else:
                         patched = palette.patch_blocks(

@@ -169,13 +169,20 @@ def get_block(raw: bytes, x: int, y: int, z: int) -> BlockState:
                   _nibble(meta, index))
 
 
-def patch_blocks(raw: bytes, changes: dict, version: int = 0) -> bytes:
-    """Patch native Blocks/Data/Add without upgrading a world or its version."""
+def patch_blocks(raw: bytes, changes: dict, version: int = 0, *,
+                 allowed_be_positions=frozenset()) -> bytes:
+    """Patch native Blocks/Data/Add without upgrading a world or its version.
+
+    Existing BE cells remain protected unless this exact coordinate is being
+    deleted/moved through an explicit BE-aware transaction. This allowance
+    never modifies an NBT list itself; patch_block_entities handles that.
+    """
     if not changes:
         return raw
     root = nbt.parse(raw)
     protected = _be_positions(root)
-    if any(point in protected for point in changes):
+    if any(point in protected and point not in allowed_be_positions
+           for point in changes):
         raise UnsafeFormat("Refusing to overwrite legacy block entity data")
     original_be = _be_tag(root)
     before = nbt.bytes_of(raw, original_be) if original_be else None

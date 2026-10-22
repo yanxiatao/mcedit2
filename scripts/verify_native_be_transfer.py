@@ -56,6 +56,11 @@ def _candidates(world, max_sources=2):
                 if source.block.name in (
                         "minecraft:air", "minecraft:cave_air", "minecraft:void_air"):
                     continue
+                if world.legacy:
+                    from mcedit2_next.legacy_anvil import id_meta
+                    if (id_meta(source.block)[0] == 0 or
+                            source.block == target.block):
+                        continue  # Numeric air BE / unchanged target state is unsafe.
                 payload = source.block_entity
                 if payload is None:
                     continue
@@ -297,48 +302,10 @@ def verify_archive(archive: str | Path, *, max_sources=2):
         world = NativeAnvilWorld(str(root))
         try:
             version = world.version
-            if world.legacy:
-                # Real 1.12.2 raw numeric IDs/metadata are not safe for
-                # native named BlockState-based BE placement or relocation.
-                # Explicitly assert that no edit/undo entry is created.
-                index = RegionIndex(world.region_dir, world.region_extension)
-                source = None
-                for chunk in sorted(index.chunks):
-                    bes = block_entity_positions(world._chunk(*chunk))
-                    if bes:
-                        source = sorted(bes)[0]
-                        break
-                if source is None:
-                    raise ValueError("Legacy world contains no original BE fixture")
-                session = EditSession(world)
-                for call in (
-                    lambda: session.clone_box_with_nbt(Box(source,source),(1,0,0)),
-                    lambda: session.move_box_with_nbt(Box(source,source),(1,0,0)),
-                ):
-                    try:
-                        call()
-                    except ValueError:
-                        pass
-                    else:
-                        raise AssertionError("Legacy numeric BE transfer accepted unsafely")
-                if session.undo_stack or world._edits or world._be_edits:
-                    raise AssertionError("Legacy refusal changed staging")
-                legacy_report = {"archive": archive.name,
-                                 "data_version": version,
-                                 "passed": True,
-                                 "status": "legacy-safe-refusal",
-                                 "original_zip_unchanged": True,
-                                 "operations": []}
-                candidates = None
-            else:
-                candidates, index = _candidates(
-                    world, max_sources=max_sources)
+            candidates, index = _candidates(world, max_sources=max_sources)
+            legacy = world.legacy
         finally:
             world.close()
-    if candidates is None:
-        if hashlib.sha256(archive.read_bytes()).hexdigest() != digest:
-            raise AssertionError("Legacy private original ZIP changed")
-        return legacy_report
     results = [
         _exercise(archive, digest, candidate, operation)
         for candidate in candidates for operation in ("clone", "move")]
@@ -346,7 +313,8 @@ def verify_archive(archive: str | Path, *, max_sources=2):
         raise AssertionError("Private original ZIP changed")
     return {
         "archive": archive.name, "data_version": version,
-        "status": "named-Anvil-roundtrip", "passed": True,
+        "status": ("numeric-Anvil-roundtrip" if legacy else
+                   "named-Anvil-roundtrip"), "passed": True,
         "sources": len(candidates),
         "operations": results, "original_zip_unchanged": True,
         "limits": ("Original BE root XYZ-only relocation; does not repair "

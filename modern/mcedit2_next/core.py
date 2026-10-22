@@ -679,8 +679,10 @@ class EditSession:
             raise ValueError("BE clone requires a nonzero XYZ step")
         if type(repetitions) is not int or not 1 <= repetitions <= 32:
             raise ValueError("BE clone repetitions must be an integer in 1..32")
-        if getattr(self.world, "legacy", True) or getattr(self.world, "is_mcregion", True):
-            raise ValueError("BE clone requires named Java Anvil, not numeric blocks")
+        if (getattr(self.world, "is_mcregion", True) or
+                (getattr(self.world, "legacy", True) and
+                 not getattr(self.world, "lossless_legacy_be_transfer", False))):
+            raise ValueError("BE clone requires named Java Anvil or validated numeric Anvil")
         # Limit planned work BEFORE loading or producing potentially duplicated
         # target cells; a highly overlapping tiling cannot bypass the limit.
         self._check_size(box.volume * repetitions)
@@ -709,6 +711,10 @@ class EditSession:
             # resembles air. A real BE is never skipped as source air.
             if snap.block_entity is not None and is_vanilla_source_air(snap.block):
                 raise ValueError(f"Original Block Entity exists on air at {point}")
+            if snap.block_entity is not None and getattr(self.world, "legacy", False):
+                from .legacy_anvil import id_meta
+                if id_meta(snap.block)[0] == 0:
+                    raise ValueError(f"Original legacy BE uses numeric air ID at {point}")
             if skip_air and snap.block_entity is None and is_vanilla_source_air(snap.block):
                 continue
             if snap.block_entity is not None:
@@ -1022,9 +1028,10 @@ class EditSession:
                 any(type(v) is not int for v in box.minimum + box.maximum)
                 or any(box.minimum[i] > box.maximum[i] for i in range(3))):
             raise ValueError("BE-aware move requires a valid bounded 3D Box")
-        if (getattr(self.world, "legacy", True) or
-                getattr(self.world, "is_mcregion", True)):
-            raise ValueError("BE-aware move requires named Java Anvil")
+        if (getattr(self.world, "is_mcregion", True) or
+                (getattr(self.world, "legacy", True) and
+                 not getattr(self.world, "lossless_legacy_be_transfer", False))):
+            raise ValueError("BE-aware move requires named Java Anvil or validated numeric Anvil")
         offset = self._offset3(offset)
         if not any(offset):
             return 0
@@ -1059,6 +1066,11 @@ class EditSession:
             if not isinstance(snap, CellSnapshot) or not isinstance(snap.block, BlockState):
                 raise ValueError(f"Incomplete native BE cell at {point}")
             originals[point] = snap
+            if (point in sources and snap.block_entity is not None and
+                    getattr(self.world, "legacy", False)):
+                from .legacy_anvil import id_meta
+                if id_meta(snap.block)[0] == 0:
+                    raise ValueError(f"Original legacy BE uses numeric air ID at {point}")
             if point not in sources and checker(*point):
                 raise ValueError(
                     f"External destination BE at {point} must not be overwritten")

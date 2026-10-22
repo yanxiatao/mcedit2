@@ -3135,10 +3135,13 @@ class MainWindow(QMainWindow):
                 self, "Native BE clone",
                 "Open a named Java Anvil world and select a bounded 3D source.")
             return
-        if self.world.legacy or self.world.is_mcregion:
+        if (self.world.is_mcregion or
+                (self.world.legacy and
+                 not getattr(self.world, "lossless_legacy_be_transfer", False))):
             QMessageBox.warning(
                 self, "Native BE clone unavailable",
-                "BE-preserving clone requires named Java Anvil.")
+                "BE-preserving clone needs named Java Anvil or the validated "
+                "original numeric Blocks/Data/Add Anvil backend.")
             return
         offset = self._selection_offset(
             "Clone selection WITH original BE NBT…", with_be=True)
@@ -3549,10 +3552,13 @@ class MainWindow(QMainWindow):
                 self, "Move selection with BE NBT",
                 "Open a native Java Anvil world and select a 3D region.")
             return
-        if self.world.legacy or self.world.is_mcregion:
+        if (self.world.is_mcregion or
+                (self.world.legacy and
+                 not getattr(self.world, "lossless_legacy_be_transfer", False))):
             QMessageBox.warning(
                 self, "BE move unavailable",
-                "Original BE move requires named Java Anvil, not numeric IDs.")
+                "BE move requires named Java Anvil or the validated "
+                "original numeric Blocks/Data/Add Anvil backend.")
             return
         offset = self._selection_offset(
             "Move selection WITH original BE NBT…", with_be=True)

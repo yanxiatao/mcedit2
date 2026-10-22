@@ -3148,3 +3148,75 @@ losslessly but be logically invalid in-game. No general legacy
 all-dimension edits, game-client load tests or exhaustive mod
 compatibility matrix. PR #1 stays Draft on `python3-modern-editor`;
 `master` was not modified.
+
+## 0.3.0a74 — Native 1.12 numeric-ID Block Entity Move/Clone (no DataFixer)
+
+**Added guarded original Java 1.2–1.12 Anvil (.mca) Block Entity
+copy/move**, where the world still uses native Blocks/Data/Add arrays,
+rather than paletted named BlockStates. Each source block retains its
+exact original **numeric ID 0..4095 + metadata 0..15**, including
+unknown/modded ID values and high ID bits carried by Add. Its original
+opaque BE NBT is copied byte-for-byte except the strict root TAG_Int
+x/y/z values. No mapping to newer Java block names, DataFixer,
+modded capability reconstruction or in-game link/UUID repair happens.
+
+- `EditSession.clone_box_with_nbt` and `move_box_with_nbt`
+  now accept **explicitly capability-marked** original native numeric
+  Anvil worlds. MCRegion (.mcr), synthetic/fake legacy backends
+  without full native support and absent generated chunks/sections
+  remain explicitly forbidden. Qt6 Clone/Move menu actions expose
+  this capability after checking the native world adapter.
+- Native `get_cell`/`set_cell` preserve the entire original
+  numeric BlockState as an opaque id/meta pair and all original
+  BE bytes. New BE data cannot be attached to ID 0; BE deletion
+  requires replacing the original cell with numeric air (0,0);
+  creation requires an actual change to the original numeric
+  state. The reader rejects malformed source BE records, including
+  real-world original BEs attached to numeric air, rather than
+  inventing a plausible block ID.
+- The legacy `patch_blocks` writer keeps its **default block-only
+  BE overwrite prohibition**. Only a strictly controlled
+  `allowed_be_positions` set of explicitly deleted BE source
+  coordinates permits its original Blocks/Data/Add arrays to be
+  updated. The native Save transaction requires an aligned
+  original numeric block change for each created/deleted legacy
+  BE, verifies the exact NBT id/coordinates and rejects an
+  unpaired/orphaned payload before writing any region file.
+  All other untouched BE records and non-block tags retain
+  original bytes. Undo/Redo remain atomic with preflight
+  guarding existing BE targets, source anomaly, missing
+  regions/chunks/sections and coordinate bounds.
+- The original private **1.12.2 DataVersion 1343** Java world
+  now passes **four** real native Move/Clone roundtrips:
+  two original `ebwizardry:bookshelf` BEs with opaque
+  **792-byte and 771-byte** NBT payloads, each cloned and
+  moved across existing generated chunk boundaries. After
+  Undo/Redo and native Save/reopen, exact ID+metadata and
+  relocated BE NBT match expected originals, and
+  **377 untouched generated chunks** in affected regions
+  retain byte-identical raw NBT for each operation.
+  All nearby unrelated BEs remain unchanged, BE-target
+  collisions are refused without staging, and original
+  region backups restore the original bytes. Source ZIP
+  files remain private and unmodified.
+- The **1.21.1 DataVersion 3955** private world was retested
+  using the same updated original backend: existing Lootr
+  barrel cross-region and 5,146-byte original spawner
+  copy/move cases still pass, as do refusal and backup checks.
+- Upgraded `scripts/verify_native_be_transfer.py` to
+  exercise both original numeric and modern Java region
+  backends against private ZIP copies, instead of the
+  prior numeric-only rejection. Added comprehensive
+  `tests/test_legacy_be_transfer.py` synthetic cross-region
+  ID=511, metadata=13, original high-bit Add regression,
+  collision rejection, numeric-air anomaly refusal and
+  block-only BE protection.
+
+**Remaining scope:** This establishes **format-level byte-safe
+1.12 Anvil BE transfer in guarded selected cases**, not automatic
+reconstruction of modded multiblock logic, tick scheduling,
+linked UUIDs, unknown machine adjacency semantics, older
+MCRegion, game-client success or exhaustive versions/mods.
+Never assume numeric ID 0 BEs are safely movable; those
+remain refused. Draft PR #1 on `python3-modern-editor` retained,
+and `master` remains untouched.

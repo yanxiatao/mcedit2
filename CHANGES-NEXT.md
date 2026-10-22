@@ -986,3 +986,23 @@ available and is not automatically replaced.
 - Added repeatable private-ZIP BE transfer runner and synthetic
   cross-region regression tests to the existing Draft PR.
   The full migrated CI suite passed 887 tests in 95 modules.
+
+## 0.3.0a74 — Safe Java 1.12 native numeric BE clone/move
+
+- Enabled guarded original Java Anvil numeric ID/meta BE-aware
+  Clone/Move, including raw IDs up to 4095 and high Add nibbles,
+  without replacing old blocks with guessed modern names.
+- Save now validates paired original BE creation/removal and
+  numeric block changes; ordinary legacy block-only writes
+  still cannot overwrite BEs. Refuses malformed air-state BEs,
+  absent chunks and occupied BE targets before staging.
+  Old MCRegion format stays unsupported.
+- Qt6 Edit menu enables the verified native numeric backend.
+  Extended real ZIP audit to four actual 1.12.2
+  `ebwizardry:bookshelf` clone/move tests (792-/771-byte
+  original NBT), plus previously passing four 1.21.1 BE
+  transfers. Original metadata and NBT, unedited chunks and
+  region backups verified unchanged.
+- New synthetic regression `test_legacy_be_transfer.py`
+  exercises numeric ID 511/data 13 and legacy data safety.
+  Full GUI/OS and mod semantic behavior are still not claimed.
