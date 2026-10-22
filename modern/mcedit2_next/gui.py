@@ -291,6 +291,8 @@ class MainWindow(QMainWindow):
                         self.cancel_world_surface)
         self.add_action(file_menu, "Audit native world compatibility (read-only)…", "",
                         self.audit_world_compatibility)
+        self.add_action(file_menu, "Inspect original biome slice (read-only)…", "",
+                        self.inspect_original_biomes)
         self.add_action(file_menu, "Restore native region backup…", "", self.restore_world_backup)
         self.add_action(file_menu, "Add resource pack / client JAR…", "", self.add_resource_archive)
         self.add_action(file_menu, "Clear resource archives", "", self.clear_resource_archives)
@@ -1692,6 +1694,46 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Experimental WORLD_SURFACE approved for chunk {cx},{cz}. "
             "Save requires a separate confirmation; cancel via File menu.")
+
+    def inspect_original_biomes(self):
+        """Inspect stored Java biome palette/IDs at the displayed slice Y."""
+        if self.world is None or self.session is None:
+            QMessageBox.information(
+                self, "Native biomes", "Open a Java world first.")
+            return
+        cx, cz = self.view.center_x >> 4, self.view.center_z >> 4
+        y = self.y_spin.value()
+        try:
+            report = self.world.inspect_biomes(cx, cz, y).report()
+        except Exception as exc:
+            QMessageBox.warning(self, "Native biome inspection refused", str(exc))
+            return
+        from PySide6.QtWidgets import QPlainTextEdit
+        dialog = QDialog(self)
+        dialog.setWindowTitle(
+            f"Original biomes — chunk {cx}, {cz}, Y={y} — READ ONLY")
+        dialog.resize(690, 470)
+        layout = QVBoxLayout(dialog)
+        summary = QLabel(
+            "Shows only original stored biome values at the current view Y. "
+            "Legacy numeric IDs are deliberately not guessed as names. "
+            "This inspection never changes world files, staged edits, "
+            "undo history or biome data.", dialog)
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+        contents = QPlainTextEdit(dialog)
+        contents.setObjectName("original_biome_slice_report")
+        contents.setReadOnly(True)
+        contents.setPlainText(report)
+        layout.addWidget(contents)
+        controls = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, dialog)
+        copy_button = controls.addButton(
+            "Copy report", QDialogButtonBox.ButtonRole.ActionRole)
+        copy_button.clicked.connect(
+            lambda: QApplication.clipboard().setText(contents.toPlainText()))
+        controls.rejected.connect(dialog.accept)
+        layout.addWidget(controls)
+        dialog.exec()
 
     def preview_world_surface(self):
         """Inspect a strictly bounded candidate, never write Heightmaps NBT."""

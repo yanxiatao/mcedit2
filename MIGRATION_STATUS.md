@@ -2311,3 +2311,36 @@ air definitions, full version-specific chunk semantics. New tests
 remain source-only and have not been run as complete Qt/Mesa/world
 CI or Windows packaging checks. Work remains only in the existing
 Draft PR #1 / `python3-modern-editor`; `master` is untouched.
+
+## 0.3.0a59 — Read-only original Java biome inspection
+
+Added a current-Y native chunk biome inspector that reads the ORIGINAL chunk
+NBT from the existing Java Anvil/MCRegion adapter without materializing
+new chunks or calling any block/biome writer. The Qt6 File menu provides
+**Inspect original biome slice (read-only)** for the viewport's chunk/Y.
+
+- Java 1.18+ section `biomes.palette`/`data` is decoded as 64
+  4×4×4 quart-biome cells using padded native long packing. Constant palettes
+  with omitted data are accepted; missing/duplicated sections, invalid IDs,
+  wrong array sizes, nonzero unused packed bits and malformed namespaces
+  refuse inspection rather than fabricating values.
+- Older Java `Biomes` ByteArray[256], IntArray[256] and
+  IntArray[1024] formats are sampled at their original 2D column or 3D quart
+  resolution. Numerical IDs are explicitly labeled `legacy-id:N`, not
+  converted to guessed current biome names; modern modded names are retained
+  verbatim, including their namespaces.
+- The report counts 256 block columns at the chosen Y and labels the
+  world's chunk DataVersion and exact source encoding. It uses the original
+  disk chunk, never staged block replacements or a rewritten biome palette.
+  Native region fingerprint checks remain in effect.
+- `tests/test_biome_inspector.py` adds synthetic NBT tests for modern
+  quart geometry, modded palettes, legacy arrays, corrupt bit packing,
+  duplicate/missing sections, and unchanged original world/BE bytes and
+  session edit/Undo state during a read.
+
+**Still missing:** editing or importing biomes, handling version-specific
+registry remapping and datapack biome validity, biome overlays, multi-chunk
+painting and real Minecraft-version game-world verification. The new source
+tests are committed as specifications; complete runtime, Qt, Windows and
+game-version CI execution remains deferred. Work is confined to the existing
+Draft PR #1 and original branch, without touching `master`.

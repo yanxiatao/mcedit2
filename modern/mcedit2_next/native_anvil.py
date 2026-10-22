@@ -287,6 +287,21 @@ class NativeAnvilWorld:
                         result.append(namespace_folder.name + ":" + name)
         return result
 
+    def inspect_biomes(self, cx: int, cz: int, y: int):
+        """Read original stored biomes in one chunk slice, no edits or saves.
+
+        Deliberately bypasses staged block changes. The world fingerprint
+        mechanism still rejects externally changed regions.
+        """
+        from .biome_inspector import inspect_biome_slice
+        if any(type(v) is not int for v in (cx, cz, y)):
+            raise ValueError("Biome inspector coordinates must be integers")
+        raw = self._chunk(cx, cz)
+        snapshot = inspect_biome_slice(raw, y, default_version=self.version)
+        if (snapshot.chunk_x, snapshot.chunk_z) != (cx, cz):
+            raise ValueError("Original biome chunk coordinates do not match region")
+        return snapshot
+
     def preview_world_surface(self, cx: int, cz: int, *,
                               min_y: int, height: int):
         """Strict read-only candidate: not an automatic save or relight."""

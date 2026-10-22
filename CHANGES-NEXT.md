@@ -714,3 +714,17 @@ available and is not automatically replaced.
   wireframe outlines, not speculative occupancy-aware voxel ghosts.
 - Added native exact-air/BE/overlap/Anvil byte-preservation and
   regression test source. Full CI and real-world builds deferred.
+
+## 0.3.0a59 — Original biome inspector (read-only)
+
+- Added native Java read-only biome slice inspection in the Qt6 File menu.
+  Java 1.18+ section biome palettes decode exact original names and quart
+  geometry; pre-1.18 byte/int 256-cell and 1024-cell biome arrays are
+  reported as numerical legacy IDs instead of guessed biome names.
+- Malformed or ambiguous biome storage, unsupported packed indices, duplicate
+  sections, missing Y sections and corrupt padding are refused. Unknown
+  modded modern biome names remain unchanged.
+- Inspecting never stages biome edits, changes block Undo state, writes
+  a region or normalizes original modded BE/unknown chunk NBT.
+  Synthetic decoder/backend regression source added, not a substitute
+  for full Minecraft-version/Qt/Mesa/Windows testing.
