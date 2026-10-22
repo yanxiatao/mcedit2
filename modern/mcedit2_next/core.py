@@ -489,25 +489,38 @@ class EditSession:
                         f"Block entity at {point}; clone/move are block-only. "
                         "Use an explicit BE-aware tool after checking mod links.")
 
-    def clone_box(self, box: Box, offset: Position) -> int:
+    def clone_box(self, box: Box, offset: Position, *,
+                  skip_air: bool = False) -> int:
         """Clone a selection by a fixed offset without changing blockstates.
 
         The source is fully captured before any modification, including for
         overlapping selections. Entity and BE data are never copied here.
         """
+        if type(skip_air) is not bool:
+            raise ValueError("Clone source-air mask must be Boolean")
         dx, dy, dz = self._offset3(offset)
         self._check_size(box.volume)
         if not (dx or dy or dz):
             return 0
         source = tuple(box.points())
-        targets = tuple((x + dx, y + dy, z + dz) for x, y, z in source)
-        self._ensure_block_only((*source, *targets))
+        # Check EVERY source BE, even if its block state looks like air.
+        self._ensure_block_only(source)
         states = tuple(self.world.get_block(*point) for point in source)
-        return self._commit(list(zip(targets, states)))
+        from .clone_mask import is_vanilla_source_air
+        targets = [
+            ((x + dx, y + dy, z + dz), state)
+            for (x, y, z), state in zip(source, states)
+            if not (skip_air and is_vanilla_source_air(state))
+        ]
+        # Only actual writes require destination BE checks. A protected BE
+        # underneath a skipped air source position is left unchanged.
+        self._ensure_block_only(point for point, _ in targets)
+        return self._commit(targets)
 
     def clone_box_repeated(self, box: Box, offset: Position,
                            repetitions: int, *,
-                           placement: Position = (0, 0, 0)) -> int:
+                           placement: Position = (0, 0, 0),
+                           skip_air: bool = False) -> int:
         """Tile an original block-only snapshot at consecutive step offsets.
 
         Corresponds to MCEdit2 CloneTool's repeat/tiling workflow. Each
@@ -520,6 +533,8 @@ class EditSession:
         target BE positions, native IDs and existing destination sections
         are checked before staging a single world edit.
         """
+        if type(skip_air) is not bool:
+            raise ValueError("Clone source-air mask must be Boolean")
         dx, dy, dz = self._offset3(offset)
         px, py, pz = self._offset3(placement)
         if type(repetitions) is not int or not 1 <= repetitions <= 128:
@@ -534,11 +549,17 @@ class EditSession:
         self._ensure_block_only(source)
         original_states = tuple(self.world.get_block(*point)
                                 for point in source)
+        from .clone_mask import is_vanilla_source_air
+        # Frozen mask from the ORIGINAL source, never the previous stamp.
+        selected_states = [
+            (point, state) for point, state in zip(source, original_states)
+            if not (skip_air and is_vanilla_source_air(state))
+        ]
         destinations: dict[Position, Any] = {}
         for repeat in range(1, repetitions + 1):
             ox, oy, oz = (px + dx * repeat, py + dy * repeat,
                           pz + dz * repeat)
-            for (x, y, z), state in zip(source, original_states):
+            for (x, y, z), state in selected_states:
                 # Keys are unique; later stamps take precedence. A target
                 # may overlap the source, but the snapshot cannot cascade.
                 destinations[(x + ox, y + oy, z + oz)] = state

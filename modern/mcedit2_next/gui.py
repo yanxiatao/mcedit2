@@ -301,6 +301,10 @@ class MainWindow(QMainWindow):
         self.add_action(edit_menu, "Paste with BE NBT (experimental)…", "", self.paste_with_be)
         self.add_action(edit_menu, "Paste at center", "Ctrl+V", self.paste)
         self.add_action(edit_menu, "Clone selection by offset…", "", self.clone_selection)
+        self.add_action(edit_menu, "Clone selection, ignore source air…", "",
+                        lambda: self.clone_selection(skip_air=True))
+        self.add_action(edit_menu, "Repeat clone, ignore source air…", "",
+                        lambda: self.repeat_clone_selection(skip_air=True))
         # QAction.triggered(bool) must not be treated as the optional
         # repeat-count or orientation argument supplied by the tool dock.
         self.add_action(edit_menu, "Repeat clone / tile selection…", "",
@@ -1981,13 +1985,16 @@ class MainWindow(QMainWindow):
             return None
         return tuple(spin.value() for spin in controls)
 
-    def clone_selection(self):
-        offset = self._selection_offset("Clone selection by offset…")
+    def clone_selection(self, *, skip_air=False):
+        title = ("Clone selection without source air…" if skip_air
+                 else "Clone selection by offset…")
+        offset = self._selection_offset(title)
         if offset is None:
             return
-        self._perform(lambda: self.session.clone_box(self._box(), offset))
+        self._perform(lambda: self.session.clone_box(
+            self._box(), offset, skip_air=skip_air))
 
-    def repeat_clone_selection(self, repetitions=None):
+    def repeat_clone_selection(self, repetitions=None, *, skip_air=False):
         """CloneTool-style repetition from the menu or the persistent dock."""
         offset = self._selection_offset("Repeat clone / tile selection…")
         if offset is None:
@@ -2006,7 +2013,7 @@ class MainWindow(QMainWindow):
             if not ok:
                 return
         self._perform(lambda: self.session.clone_box_repeated(
-            self._box(), offset, repetitions))
+            self._box(), offset, repetitions, skip_air=skip_air))
 
     def clone_selection_transformed(self, operation=None, repetitions=None):
         """Clone an oriented native selection using verified vanilla/old IDs."""

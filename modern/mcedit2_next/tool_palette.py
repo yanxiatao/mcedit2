@@ -161,6 +161,15 @@ class ToolPaletteDock(QDockWidget):
         self.repeat_count.setRange(1, 128)
         self.repeat_count.setValue(2)
         clone_form.addRow("Number of copies", self.repeat_count)
+        self.skip_source_air = QCheckBox(
+            "Ignore source air (offset / repeated clone only)", clone_group)
+        self.skip_source_air.setObjectName("tool_palette_clone_skip_source_air")
+        self.skip_source_air.setToolTip(
+            "Skip exact vanilla air/cave_air/void_air source states. "
+            "Never edit blocks underneath skipped cells. All source BE "
+            "positions are still checked; does not apply to 3D preview "
+            "or rotated/scaled clone modes.")
+        clone_form.addRow(self.skip_source_air)
         self.clone_orientation = QComboBox(clone_group)
         self.clone_orientation.setObjectName("tool_palette_clone_orientation")
         for label, operation in (
@@ -530,8 +539,13 @@ class ToolPaletteDock(QDockWidget):
                      self.editor.view.center_z),
                     self.sphere_radius.value(), self.editor._block(),
                     self.sphere_hollow.isChecked()))
+            elif action == "clone_selection":
+                self.editor.clone_selection(
+                    skip_air=self.skip_source_air.isChecked())
             elif action == "repeat_clone_selection":
-                self.editor.repeat_clone_selection(self.repeat_count.value())
+                self.editor.repeat_clone_selection(
+                    self.repeat_count.value(),
+                    skip_air=self.skip_source_air.isChecked())
             elif action == "clone_selection_transformed":
                 self.editor.clone_selection_transformed(
                     self.clone_orientation.currentData(), self.repeat_count.value())

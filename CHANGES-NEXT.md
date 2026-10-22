@@ -661,3 +661,19 @@ available and is not automatically replaced.
 - Added source-only regression cases for vertical involution, modern
   and legacy metadata, read-only ghost fidelity, native save/reopen,
   unsafe refusal and BE protection. Full testing deferred.
+
+## 0.3.0a56 — Ignore source air in native offset/repeat Clone Tool
+
+- Opt-in direct offset and repeated clone mask skips exactly original
+  vanilla air/cave_air/void_air, **preserving existing target blocks**
+  rather than stamping air. Unknown modded air-like states are not
+  guessed or discarded.
+- Source Block Entities still refuse the entire operation (even if
+  the source state looks like air). BE protection/native target checks
+  run on actual write targets; skipped targets remain untouched.
+- Overlaps use the unchanged original snapshot and one Undo/Redo
+  baseline per unique written block. Qt6 adds explicit menu choices
+  and a tool-dock checkbox for these two simple clone modes.
+- Added source regression cases for modern Java Anvil/legacy MCRegion,
+  exact unknown NBT preservation, refusal/rollback, overlap, and
+  original backups. Full test execution deferred.

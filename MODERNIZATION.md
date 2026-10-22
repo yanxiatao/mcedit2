@@ -2158,3 +2158,55 @@ linked Block Entity NBT. Tests above are committed as **source-only**
 and have not been run against the full Qt/Mesa/Minecraft-version
 matrix or packaged for Windows. The existing Draft PR and branch are
 retained; `master` is untouched.
+
+## 0.3.0a56 — Native source-air-transparent Clone Tool stamps
+
+Added a **non-destructive ignore-source-air mode** for original-format
+block-only offset and repeated Clone Tool copies, preserving existing
+destination terrain under skipped air cells.
+
+- `clone_mask.is_vanilla_source_air` recognizes ONLY the three exact
+  property-free vanilla Java BlockStates `minecraft:air`,
+  `minecraft:cave_air`, and `minecraft:void_air`. Legacy numeric
+  ID 0, metadata 0 is already normalized to `minecraft:air` by the
+  native old-Anvil/MCRegion backend. Unknown modded `air`-named
+  blocks, invalid legacy metadata and fake vanilla air with extra
+  properties are never silently skipped.
+- `EditSession.clone_box(..., skip_air=True)` and
+  `clone_box_repeated(..., skip_air=True)` freeze the ORIGINAL
+  selection snapshot and filter only exact recognized air positions
+  out of the target write set. Repeated stamps never cascade writes
+  through the source; overlapping non-air stamps preserve
+  last-stamp-wins and unique before/after Undo records.
+- Every original SOURCE coordinate is checked for any original Block
+  Entity **even if the block appears to be air**; potentially unsafe
+  source content is never quietly ignored. Only destinations that
+  would ACTUALLY be written require target BE/section/ID preflight:
+  a protected target underneath an omitted source-air cell is
+  intentionally left untouched. All other original world NBT and
+  modded BE bytes remain unchanged.
+- Existing native size caps, coordinate guards, target section/ID
+  validation and single-action Undo/Redo still apply. No new
+  sections or chunk files are synthesized.
+- Qt6 **Clone selection, ignore source air…** and **Repeat clone,
+  ignore source air…** menu entries, plus a persistent Tool Palette
+  checkbox for ordinary offset and repeat cloning, expose the
+  masking mode without changing default clone behavior.
+- `tests/test_clone_air_mask.py` adds source-only cases for
+  exact vanilla versus modded air identity, masked target retention,
+  original-snapshot overlap, no duplicate Undo baselines, source
+  and written-target BE protection, skipped-target BE preservation,
+  late invalid destination refusal, invalid option types, modern
+  Anvil opaque NBT/backup/reopen and old MCRegion numeric
+  metadata/unknown NBT retention.
+
+**Scope boundary:** Air transparency is currently available for
+*direct unrotated offset and repeated stamps only*. The existing
+3D Clone Tool wireframe/ghost preview and oriented/scaled/reduced
+clones do NOT yet apply this optional source-air mask. The dock
+labels this distinction explicitly. This does not provide safe
+Block Entity/entity transfer, custom mod identity handling,
+model-exact preview, or crash-atomic multi-region persistence.
+Regression specifications have been committed as source only;
+full Qt/Mesa/real-world version tests and Windows packaging
+remain deferred.

@@ -10,7 +10,7 @@ still exist. This is an engineering checklist rather than a release promise.
 | Desktop editor and menus | Qt6 MainWindow, tool palette, World Info / Players / Chunk / Maps docks, history, minimap, queued imports and searchable Block Picker | Guarded world/player scalar and existing ItemStack edits; native Java filled-map pixel canvas and limited map metadata fields with independent gzip backup/restore; still lacks arbitrary item creation, modded slot editors, accurate modern map colors and original widget parity |
 | 2D and 3D map views | 2D slice; OpenGL 3.3 Section streaming; Java blockstate variant/multipart JSON elements and rotated noncubic meshes while retaining greedy opaque cubes | Per-face translucent sorting, biome-aware fluid tint, animated texture playback, complex mod renderers, entity models, lighting and LOD (level-aware water/lava meshes are approximate) |
 | Camera, picking and selection | Orbit, zoom, 3D ray selection, coordinate jump | Full MCEdit2 camera/navigation/selection widgets |
-| Clone/move, copy, fill, replace, paint and undo | Native offset/repeat/rotate/mirror/scale, including guarded **up/down Y mirroring** for verified vanilla/legacy shapes, rotate-then-scale (1–8x XYZ), integer reduction, rigid-group 3D drag, grid snap, bounded original BlockState ghost/wireframes; BE/section preflight, single-step Undo/Redo and original region backups | Multi-element/custom/fluid model preview parity, fractional rotation/scaling, modded transforms, linked BE/entity movements and persistent/branching history |
+| Clone/move, copy, fill, replace, paint and undo | Native offset/repeat with optional exact vanilla-air source masking, rotate/mirror/scale including guarded Y mirroring and rotate-then-scale, integer reduction, rigid-group 3D drag/grid snap, bounded BlockState ghosts; protected-BE/native-section preflight, grouped Undo/Redo and original region backups | Source-air masking on transformed/scaled 3D previews, complex/fluid ghost parity, fractional transforms, modded rotation graphs, linked BE/entity movement and persistent history |
 | Java 1.13+ Anvil | Native paletted Sections and guarded region rewrites | Newer codecs, full chunk heightmap/light/biome maintenance and real-world version matrix |
 | Java 1.2–1.12 Anvil (.mca) | Native numeric IDs and metadata in original 16³ Sections | Mod-specific block geometry, lighting/heightmap updates, real-world game fixtures |
 | Java Beta 1.3–1.1 MCRegion (.mcr) | Native XZY 128-height chunks, ID/metadata editing, backup and reopening | Old-style lighting/heightmap recalculation, real-world game fixtures | 
@@ -2148,3 +2148,55 @@ linked Block Entity NBT. Tests above are committed as **source-only**
 and have not been run against the full Qt/Mesa/Minecraft-version
 matrix or packaged for Windows. The existing Draft PR and branch are
 retained; `master` is untouched.
+
+## 0.3.0a56 — Native source-air-transparent Clone Tool stamps
+
+Added a **non-destructive ignore-source-air mode** for original-format
+block-only offset and repeated Clone Tool copies, preserving existing
+destination terrain under skipped air cells.
+
+- `clone_mask.is_vanilla_source_air` recognizes ONLY the three exact
+  property-free vanilla Java BlockStates `minecraft:air`,
+  `minecraft:cave_air`, and `minecraft:void_air`. Legacy numeric
+  ID 0, metadata 0 is already normalized to `minecraft:air` by the
+  native old-Anvil/MCRegion backend. Unknown modded `air`-named
+  blocks, invalid legacy metadata and fake vanilla air with extra
+  properties are never silently skipped.
+- `EditSession.clone_box(..., skip_air=True)` and
+  `clone_box_repeated(..., skip_air=True)` freeze the ORIGINAL
+  selection snapshot and filter only exact recognized air positions
+  out of the target write set. Repeated stamps never cascade writes
+  through the source; overlapping non-air stamps preserve
+  last-stamp-wins and unique before/after Undo records.
+- Every original SOURCE coordinate is checked for any original Block
+  Entity **even if the block appears to be air**; potentially unsafe
+  source content is never quietly ignored. Only destinations that
+  would ACTUALLY be written require target BE/section/ID preflight:
+  a protected target underneath an omitted source-air cell is
+  intentionally left untouched. All other original world NBT and
+  modded BE bytes remain unchanged.
+- Existing native size caps, coordinate guards, target section/ID
+  validation and single-action Undo/Redo still apply. No new
+  sections or chunk files are synthesized.
+- Qt6 **Clone selection, ignore source air…** and **Repeat clone,
+  ignore source air…** menu entries, plus a persistent Tool Palette
+  checkbox for ordinary offset and repeat cloning, expose the
+  masking mode without changing default clone behavior.
+- `tests/test_clone_air_mask.py` adds source-only cases for
+  exact vanilla versus modded air identity, masked target retention,
+  original-snapshot overlap, no duplicate Undo baselines, source
+  and written-target BE protection, skipped-target BE preservation,
+  late invalid destination refusal, invalid option types, modern
+  Anvil opaque NBT/backup/reopen and old MCRegion numeric
+  metadata/unknown NBT retention.
+
+**Scope boundary:** Air transparency is currently available for
+*direct unrotated offset and repeated stamps only*. The existing
+3D Clone Tool wireframe/ghost preview and oriented/scaled/reduced
+clones do NOT yet apply this optional source-air mask. The dock
+labels this distinction explicitly. This does not provide safe
+Block Entity/entity transfer, custom mod identity handling,
+model-exact preview, or crash-atomic multi-region persistence.
+Regression specifications have been committed as source only;
+full Qt/Mesa/real-world version tests and Windows packaging
+remain deferred.
