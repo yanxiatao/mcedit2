@@ -829,3 +829,20 @@ available and is not automatically replaced.
 - Added native disk-backed and offscreen Qt regression **source**.
   Full runtime validation, including modded machine/network semantics,
   remains deferred.
+
+## 0.3.0a66 — Read-only 3D original/staged Java BE wireframes
+
+- Introduced original Java BE metadata scanner with strict X/Z
+  chunk identity, raw BE record identity and staged edit/deletion
+  statuses, bounded to 5×5 chunks, ±32 Y and 256 boxes.
+- Streaming Qt6 OpenGL renders cyan original, gold staged, red
+  pending-delete BE wireframes through its existing selection line
+  renderer, without decoding NBT during paintGL or rebuilding
+  terrain meshes on camera orbit.
+- View menu toggles the overlay; diagnostics dialog lists partial
+  / unreadable chunks, exact status counts, navigable BE positions
+  and a copyable report. Scan is cache-keyed by source session,
+  camera chunk and Y, refreshed after native edits.
+- Added disk-backed native and offscreen Qt **test source**.
+  Full real-world GL/runtime matrix and broad MCEdit2 feature
+  parity remain outstanding.

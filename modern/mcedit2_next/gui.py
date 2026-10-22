@@ -224,6 +224,7 @@ class MainWindow(QMainWindow):
         self.plugins.discover()
         self.slice_view = SliceView()
         self.volume_view = None  # Created on demand for environments without GL 3.3.
+        self._be_markers_enabled = False  # Read-only 3D diagnostics option.
         self._clone_preview = None  # (session, original Box, immutable geometry)
         self._clone_preview_source_states = None  # Optional original snapshot.
         self._clone_preview_visual_note = "Wireframe only."
@@ -336,6 +337,15 @@ class MainWindow(QMainWindow):
         self.view_menu.addAction(self.biome_overlay_action)
         self.add_action(self.view_menu, "Biome overlay legend / diagnostics…", "",
                         self.show_biome_overlay_report)
+        self.be_markers_action = QAction(
+            "Show original / staged Block Entity markers in 3D", self)
+        self.be_markers_action.setObjectName("toggle_native_be_markers_3d")
+        self.be_markers_action.setCheckable(True)
+        self.be_markers_action.toggled.connect(self.toggle_be_markers)
+        self.view_menu.addAction(self.be_markers_action)
+        self.add_action(
+            self.view_menu, "Refresh 3D Block Entity markers / diagnostics…", "",
+            self.show_be_markers_report)
         self.add_action(
             self.view_menu, "3D translucent opacity…", "",
             self.change_translucent_opacity)
@@ -556,6 +566,7 @@ class MainWindow(QMainWindow):
             try:
                 from .viewport3d_stream import StreamingVoxel3DView as Voxel3DView
                 self.volume_view = Voxel3DView()
+                self.volume_view.show_be_markers = self._be_markers_enabled
                 self.volume_view.set_translucent_opacity(
                     self.translucent_opacity)
                 self.volume_view.radius = self.render_radius.value()
@@ -586,6 +597,8 @@ class MainWindow(QMainWindow):
         old.hide()
         new_view.show()
         self.view = new_view
+        if index == 1 and self._be_markers_enabled:
+            new_view.refresh_be_markers(force=True)
         new_view.update()
         self.tool_palette.refresh_selection(sync_corners=True)
         if index == 1:
@@ -595,6 +608,93 @@ class MainWindow(QMainWindow):
             )
         else:
             self.statusBar().showMessage("2D slice view")
+
+    def toggle_be_markers(self, enabled):
+        """Enable bounded read-only native BE boxes in the 3D viewport."""
+        self._be_markers_enabled = bool(enabled)
+        if self.volume_view is not None:
+            self.volume_view.show_be_markers = bool(enabled)
+            self.volume_view.refresh_be_markers(force=True)
+            self.volume_view.invalidate()
+        self.statusBar().showMessage(
+            "3D original/staged BE diagnostic markers "
+            + ("enabled; switch to 3D and view the diagnostics report"
+               if enabled else "disabled"))
+
+    def show_be_markers_report(self):
+        """Refresh snapshot explicitly and display all partial-scan warnings."""
+        if not self._be_markers_enabled:
+            QMessageBox.information(
+                self, "3D BE markers",
+                "Enable View > Show original / staged Block Entity markers in 3D.")
+            return
+        if self.volume_view is None or self.session is None:
+            QMessageBox.information(
+                self, "3D BE markers",
+                "Open a native Java world and switch to 3D OpenGL first.")
+            return
+        picture = self.volume_view.refresh_be_markers(force=True)
+        if picture is None:
+            report = ("Native BE marker scan unavailable: "
+                      + (self.volume_view.be_marker_error or "no original world"))
+        else:
+            report = picture.report()
+        from PySide6.QtWidgets import QPlainTextEdit, QListWidget
+        dialog = QDialog(self)
+        dialog.resize(760, 620)
+        dialog.setWindowTitle("Native Block Entity 3D marker diagnostics — read only")
+        layout = QVBoxLayout(dialog)
+        caption = QLabel(
+            "3D cyan wireframe = original BE; gold = staged BE added/modified; "
+            "red = staged deletion. Bounded to 5×5 nearby chunks and ±32 Y. "
+            "An unreadable or absent source chunk is NOT evidence of no BE. "
+            "No data or Minecraft world files are modified.", dialog)
+        caption.setWordWrap(True)
+        layout.addWidget(caption)
+        hits = QListWidget(dialog)
+        hits.setObjectName("native_be_marker_results_3d")
+        for marker in picture.markers if picture is not None else ():
+            item_text = (f"{marker.point} [{marker.status}] "
+                         f"{marker.identifier}")
+            hits.addItem(item_text)
+            hits.item(hits.count() - 1).setData(
+                Qt.ItemDataRole.UserRole, marker.point)
+        layout.addWidget(hits)
+        text = QPlainTextEdit(dialog)
+        text.setReadOnly(True)
+        text.setObjectName("native_be_marker_diagnostics_3d")
+        text.setPlainText(report)
+        layout.addWidget(text)
+        controls = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, dialog)
+        goto = controls.addButton(
+            "Go to selected BE", QDialogButtonBox.ButtonRole.ActionRole)
+        goto.setEnabled(bool(picture is not None and picture.markers))
+
+        def navigate_to_be():
+            item = hits.currentItem()
+            if item is None:
+                return
+            point = item.data(Qt.ItemDataRole.UserRole)
+            x, y, z = point
+            # Update displayed Y first: the standard Y spinbox handler
+            # clears the previous selection. Navigation never edits the world.
+            self.y_spin.setValue(y)
+            for view in (self.slice_view, self.volume_view):
+                if view is not None:
+                    view.center_x, view.center_z = x, z
+            self.select_coordinates((x, y, z), (x, y, z))
+            if self.volume_view is not None:
+                self.volume_view.refresh_be_markers(force=True)
+            dialog.accept()
+        goto.clicked.connect(navigate_to_be)
+        hits.itemDoubleClicked.connect(lambda item: navigate_to_be())
+        button = controls.addButton(
+            "Copy report", QDialogButtonBox.ButtonRole.ActionRole)
+        button.clicked.connect(
+            lambda: QApplication.clipboard().setText(text.toPlainText()))
+        controls.rejected.connect(dialog.accept)
+        layout.addWidget(controls)
+        dialog.exec()
 
     def toggle_biome_overlay(self, enabled):
         if enabled and (self.world is None or self.world.legacy
@@ -1086,6 +1186,8 @@ class MainWindow(QMainWindow):
         finally:
             if self.volume_view is not None:
                 self.volume_view.invalidate_world_edits()
+                if self._be_markers_enabled:
+                    self.volume_view.refresh_be_markers(force=True)
             self.view.update()
 
     def manage_plugins(self):
@@ -1538,8 +1640,11 @@ class MainWindow(QMainWindow):
         try:
             result = callback()
             self.slice_view.invalidate_biome_overlay()
-            if self.volume_view is not None and self.session.dirty:
-                self.volume_view.invalidate_world_edits()
+            if self.volume_view is not None:
+                if self.session.dirty:
+                    self.volume_view.invalidate_world_edits()
+                if self._be_markers_enabled:
+                    self.volume_view.refresh_be_markers(force=True)
             self.view.update()
             if result is not None:
                 self.statusBar().showMessage("Result: {}".format(result))

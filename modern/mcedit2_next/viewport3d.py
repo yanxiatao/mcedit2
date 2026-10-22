@@ -114,6 +114,10 @@ class Voxel3DView(QOpenGLWidget):
         self._gizmo_drag = None
         self._gl_error = None
         self._skipped = 0
+        self.show_be_markers = False
+        self.be_marker_snapshot = None
+        self.be_marker_error = None
+        self._be_marker_key = None
         self.clone_preview_boxes = ()  # Read-only original coordinate boxes.
         self.clone_preview_voxels = {}  # Bounded read-only native snapshot.
         self._ghost_vertex_count = 0
@@ -207,6 +211,34 @@ class Voxel3DView(QOpenGLWidget):
         self._clone_ghost_cache = None
         self.invalidate()
 
+    def refresh_be_markers(self, *, force=False):
+        """Refresh bounded native BE diagnostics only on camera-chunk changes.
+
+        Never inspect NBT during a paintGL wireframe draw. Streaming view may
+        call this in its existing timer, while editor actions can force an
+        explicit refresh after staged edits/save/undo.
+        """
+        if not self.show_be_markers or self.session is None:
+            self.be_marker_snapshot = None
+            self.be_marker_error = None
+            self._be_marker_key = None
+            return None
+        key = (id(self.session), self.center_x >> 4,
+               self.center_z >> 4, self.y)
+        if force or key != self._be_marker_key:
+            from .be_markers import scan_be_markers
+            self.be_marker_snapshot = None
+            self.be_marker_error = None
+            try:
+                self.be_marker_snapshot = scan_be_markers(
+                    self.session.world,
+                    (self.center_x, self.y, self.center_z))
+            except (ValueError, OSError, EOFError) as exc:
+                self.be_marker_error = str(exc)
+            self._be_marker_key = key
+            self.invalidate()
+        return self.be_marker_snapshot
+
     def _selection_lines(self, target):
         """Show ordinary selection and any read-only target clone bounds."""
         ghost = ghost_wireframe_vertices(self.clone_preview_boxes, target)
@@ -264,6 +296,10 @@ class Voxel3DView(QOpenGLWidget):
                             point[2] - target[2],
                             *color, .5 / 32, .5 / 32))
         result.extend(ghost)
+        if self.show_be_markers and self.be_marker_snapshot is not None:
+            from .be_markers import be_marker_line_vertices
+            result.extend(be_marker_line_vertices(
+                self.be_marker_snapshot.markers, target))
         return result
 
     def _begin_clone_preview_drag(self, position, modifiers):

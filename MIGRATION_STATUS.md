@@ -2647,3 +2647,61 @@ Bedrock and comprehensive real-world Minecraft version testing.
 The test sources are committed; runtime test execution is **not
 confirmed**. Draft PR #1 stays on `python3-modern-editor`, with no
 changes to `master`.
+
+## 0.3.0a66 — Native 3D original/staged Block Entity location markers
+
+The streaming OpenGL editor now supports a new **read-only,
+opt-in Block Entity 3D wireframe overlay** built on its existing
+selection/clone-box wireframe GL pipeline. Unlike entity/BE move or
+clone tools, these markers NEVER modify, serialize, normalize or
+rewrite chunk NBT. The original Block Entity coordinates and ID
+come straight from the existing native Java Anvil/MCRegion
+chunk reader; unknown modded NBT fields remain opaque.
+
+- New `be_markers.py` performs bounded original and in-memory staged
+  BE scans in a **5×5 chunk area centered on the camera**, vertical
+  **Y ±32**, with **at most 256 drawn markers**. It reads one
+  original NBT Compound per chunk, checks original chunk xPos/zPos
+  identity, BE record ID and coordinate types, rejects duplicated or
+  off-chunk BE coordinates and overlays `_be_edits` without altering
+  the source bytes. The report retains full status counts even if
+  drawing is capped.
+- Cyan boxes denote original BEs, gold boxes denote staged
+  created/modified BEs and red boxes denote staged deletions.
+  A wireframe is slightly larger than a voxel, so an opaque cube
+  does not fully obscure its location. Staged deletion markers
+  represent original coordinates rather than restored BE records.
+  Missing/malformed chunks are **explicitly listed as unreadable**,
+  never interpreted as verified empty. All reported IDs are
+  original strings rather than normalized Minecraft registry mappings.
+- The Qt6 View menu now offers **Show original/staged Block Entity
+  markers in 3D**, plus a **Refresh 3D Block Entity markers /
+  diagnostics** dialog. The dialog includes exact result coordinates,
+  copyable raw diagnostics and clickable/double-clickable entries
+  that navigate to the corresponding original XYZ block using
+  the existing safe selection handling; navigation is read-only.
+- Marker scan results are cache-keyed to **world session,
+  camera chunk X/Z and exact displayed Y**. Streaming's existing
+  45-ms timer only checks whether that key changed, rather than
+  parsing NBT per frame or invalidating entire terrain meshes.
+  Explicit edit / Undo / Redo / Save routes refresh the snapshot
+  after native staging; the regular brush-commit path also refreshes.
+  The GL code reuses existing streaming selection-buffer vertices
+  and avoids any new GPU texture/Section cache work.
+- New `tests/test_be_markers.py` synthetic source checks original
+  modded BE identity, staged add/modify/remove statuses, vertical
+  cropping, invalid staged coordinate identity, missing-chunk
+  diagnostics, 8-float wireframe geometry and strict query bounds.
+  New `tests/test_be_markers_qt.py` offscreen Qt source verifies
+  action toggles do not create GL contexts/write worlds, dispatches
+  explicit refresh to an existing 3D view and requires an active
+  world/view to show diagnostics.
+
+**Current limits:** This is a nearby-area visualization, NOT a
+complete whole-map BE search, a data-fixer, an accurate machine
+model renderer or a native Block Entity/standalone entity edit.
+It does not rewrite UUIDs, links, inventories, lighting or
+heightmaps. Full real modded-world, Qt/OpenGL hardware/Windows
+testing is NOT complete; new test files are provided as
+**source only**. Keep Draft PR #1 on `python3-modern-editor`;
+`master` untouched.

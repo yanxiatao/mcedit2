@@ -255,6 +255,10 @@ class StreamingVoxel3DView(Voxel3DView):
         reader = self._stream
         if reader is None or self._program is None or not self.isVisible():
             return
+        # Bounded BE scan is cache-keyed by camera chunk/Y section. It is
+        # NEVER performed inside paintGL or for every timer frame.
+        if self.show_be_markers:
+            self.refresh_be_markers()
         sig = (self.center_x >> 4, self.center_z >> 4,
                self.y >> 4, self.radius,
                self.vertical_sections, self.memory_sections)
@@ -526,7 +530,9 @@ class StreamingVoxel3DView(Voxel3DView):
                 glDepthMask(GL_TRUE)
                 glDisable(GL_BLEND)
                 glUniform1f(opacity_loc, 1.0)
-        if self.selection or self.clone_preview_boxes:
+        if (self.selection or self.clone_preview_boxes
+                or (self.show_be_markers and
+                    self.be_marker_snapshot is not None)):
             vertices = self._selection_lines(target)
             # Both selection handles and clone ghost boxes use the same
             # read-only lines; no terrain mesh regeneration is required.
