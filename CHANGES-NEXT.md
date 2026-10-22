@@ -862,3 +862,22 @@ available and is not automatically replaced.
 - Fixed 3D BE wireframes disappearing when there was no selection.
 - Added native disk-backed and offscreen Qt regression **source**;
   broad real-world Windows/OpenGL runtime validation is pending.
+
+## 0.3.0a68 — Cancellable indexed generated-world original BE search
+
+- Uses original region-header `RegionIndex` to enumerate generated
+  chunks across the active dimension; no empty chunk generation
+  or world writes. One native read-only world instance per Qt worker.
+- Integrates exact-ID or `*` BE search and a frozen snapshot of
+  unsaved BE edits with progress after each eight chunks and
+  cancel-at-chunk-boundary semantics. Up to 200,000 generated chunks,
+  8,192 regions and 256 listed results (complete count maintained).
+- Reports missing/corrupt region headers, invalid NBT chunks,
+  orphaned staged edits, truncation and cancellation explicitly;
+  partial results never imply all unlisted BEs are absent.
+- Adds Qt6 Edit-menu / Tool Palette workflow, cancelable progress
+  and read-only navigable results. Save/region restore are blocked
+  while the worker scans; app exit first cancels running workers.
+- Adds disk-backed native and offscreen Qt **regression source**.
+  Full OS/Minecraft runtime testing and greater world-scale search
+  coverage remain pending.

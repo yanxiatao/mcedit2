@@ -225,6 +225,8 @@ class MainWindow(QMainWindow):
         self.slice_view = SliceView()
         self.volume_view = None  # Created on demand for environments without GL 3.3.
         self._be_markers_enabled = False  # Read-only 3D diagnostics option.
+        self._be_world_worker = None
+        self._be_world_progress_dialog = None
         self._clone_preview = None  # (session, original Box, immutable geometry)
         self._clone_preview_source_states = None  # Optional original snapshot.
         self._clone_preview_visual_note = "Wireframe only."
@@ -395,6 +397,8 @@ class MainWindow(QMainWindow):
                         self.find_native_biomes)
         self.add_action(edit_menu, "Find original Block Entities by ID…", "",
                         self.find_original_block_entities)
+        self.add_action(edit_menu, "Find Block Entities in ALL generated chunks…", "",
+                        self.find_world_block_entities)
         self.add_action(edit_menu, "Copy selection", "Ctrl+C", self.copy)
         self.add_action(edit_menu, "Copy with BE NBT (experimental)…", "", self.copy_with_be)
         self.add_action(edit_menu, "Paste with BE NBT (experimental)…", "", self.paste_with_be)
@@ -2236,6 +2240,191 @@ class MainWindow(QMainWindow):
         layout.addWidget(controls)
         viewer.exec()
 
+    def find_world_block_entities(self):
+        """Background search of all existing region-header-indexed chunks."""
+        if self.world is None or self.session is None:
+            QMessageBox.information(
+                self, "World-wide Block Entity search",
+                "Open an original Java world first.")
+            return
+        if (self._be_world_worker is not None and
+                self._be_world_worker.isRunning()):
+            QMessageBox.information(
+                self, "World-wide BE search", "A search is already running.")
+            return
+        from .be_world_search import MAX_WORLD_BE_CHUNKS, MAX_WORLD_BE_REGIONS
+        from .be_search_thread import BEWorldSearchWorker
+        from PySide6.QtWidgets import QProgressDialog, QPlainTextEdit, QListWidget
+
+        setup = QDialog(self)
+        setup.setWindowTitle("Search generated Java world for Block Entities")
+        form = QFormLayout(setup)
+        id_field = QLineEdit("*", setup)
+        id_field.setObjectName("find_generated_world_be_id")
+        id_field.setToolTip(
+            "Exact original namespaced BE ID or * for all. "
+            "No registry mapping or fuzzy matching.")
+        form.addRow("Exact original BE ID (* = all)", id_field)
+        staged_field = QCheckBox(
+            "Include snapshot of unsaved Block Entity edits", setup)
+        staged_field.setChecked(True)
+        staged_field.setObjectName("find_generated_world_be_staged")
+        form.addRow(staged_field)
+        hint = QLabel(
+            "Read-only scan of ALL generated chunks of the current dimension "
+            "using the existing region-header index. "
+            f"Safety caps: {MAX_WORLD_BE_CHUNKS:,} chunks, "
+            f"{MAX_WORLD_BE_REGIONS:,} region files, 256 listed results. "
+            "An invalid header/chunk or cancellation makes coverage INCOMPLETE. "
+            "The search reads a snapshot of original NBT and staged changes "
+            "at launch; it does not save or modify the map.", setup)
+        hint.setWordWrap(True)
+        form.addRow(hint)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel, setup)
+        buttons.accepted.connect(setup.accept)
+        buttons.rejected.connect(setup.reject)
+        form.addRow(buttons)
+        if setup.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        identifier = id_field.text().strip()
+        from .palette import IDENT
+        if (identifier != "*" and (
+                not IDENT.fullmatch(identifier) or
+                len(identifier.encode("utf-8")) > 512)):
+            QMessageBox.warning(
+                self, "Original BE search refused",
+                "Enter an exact namespaced original ID or *. "
+                "Maximum encoded length: 512 bytes.")
+            return
+        source = self.world
+        staged = dict(source._be_edits) if staged_field.isChecked() else {}
+        worker = BEWorldSearchWorker(
+            str(source.path), source.dimension, identifier, staged,
+            include_staged=staged_field.isChecked(), parent=self)
+        progress = QProgressDialog(
+            "Indexing original generated region headers (read-only)…",
+            "Cancel scan", 0, 0, self)
+        progress.setObjectName("generated_be_search_progress")
+        progress.setWindowTitle("Scanning generated-world Block Entities")
+        progress.setMinimumDuration(0)
+        progress.setAutoReset(False)
+        progress.setAutoClose(False)
+        progress.setWindowModality(Qt.WindowModality.NonModal)
+        self._be_world_worker = worker
+        self._be_world_progress_dialog = progress
+        progress.canceled.connect(worker.cancel)
+
+        def on_progress(scanned, total):
+            if self._be_world_worker is not worker:
+                return
+            if total:
+                progress.setMaximum(total)
+                progress.setValue(min(scanned, total))
+                progress.setLabelText(
+                    f"Scanned {scanned:,}/{total:,} indexed generated "
+                    "chunks. All reads are read-only.")
+            else:
+                progress.setLabelText("No generated chunks indexed.")
+            self.statusBar().showMessage(
+                f"World BE scan: {scanned:,}/{total:,} generated chunks")
+
+        def on_completed(result):
+            progress.close()
+            if self.world is not source:
+                QMessageBox.warning(
+                    self, "World-wide BE search",
+                    "The world/dimension changed during background search. "
+                    "Discarded the old search snapshot.")
+                return
+            viewer = QDialog(self)
+            viewer.resize(800, 650)
+            viewer.setWindowTitle(
+                f"Generated-world BE search — {result.matching_records:,} matches"
+                + (" (INCOMPLETE)" if not result.complete else ""))
+            layout = QVBoxLayout(viewer)
+            desc = QLabel(
+                f"Indexed {result.indexed_chunks:,} generated chunks; "
+                f"decoded {result.decoded_chunks:,}; "
+                f"{result.matching_records:,} matches; "
+                f"{len(result.matches)} listed. "
+                + ("INCOMPLETE: cancellation, invalid regions or chunk errors. "
+                   "Nonmatches do not establish absence."
+                   if not result.complete else
+                   "Complete within this dimension's indexed chunks."),
+                viewer)
+            desc.setWordWrap(True)
+            layout.addWidget(desc)
+            hits = QListWidget(viewer)
+            hits.setObjectName("generated_be_search_results")
+            for match in result.matches:
+                hits.addItem(
+                    f"{match.point} [{match.status}] {match.identifier}")
+                hits.item(hits.count()-1).setData(
+                    Qt.ItemDataRole.UserRole, match.point)
+            layout.addWidget(hits)
+            report = QPlainTextEdit(viewer)
+            report.setObjectName("generated_be_search_report")
+            report.setReadOnly(True)
+            report.setPlainText(result.report())
+            layout.addWidget(report)
+            controls = QDialogButtonBox(
+                QDialogButtonBox.StandardButton.Close, viewer)
+            goto = controls.addButton(
+                "Go to selected BE", QDialogButtonBox.ButtonRole.ActionRole)
+            goto.setEnabled(bool(result.matches))
+
+            def navigate():
+                item = hits.currentItem()
+                if item is None:
+                    return
+                if self.world is not source:
+                    QMessageBox.warning(
+                        viewer, "BE navigation refused",
+                        "Source world changed; rerun the original BE search.")
+                    return
+                try:
+                    self._go_to_block_entity(
+                        item.data(Qt.ItemDataRole.UserRole))
+                except Exception as exc:
+                    QMessageBox.warning(
+                        viewer, "BE navigation refused", str(exc))
+                    return
+                viewer.accept()
+
+            goto.clicked.connect(navigate)
+            hits.itemDoubleClicked.connect(lambda item: navigate())
+            copy = controls.addButton(
+                "Copy full diagnostics", QDialogButtonBox.ButtonRole.ActionRole)
+            copy.clicked.connect(lambda: QApplication.clipboard().setText(
+                report.toPlainText()))
+            controls.rejected.connect(viewer.accept)
+            layout.addWidget(controls)
+            viewer.exec()
+
+        def on_failed(error):
+            progress.close()
+            QMessageBox.warning(
+                self, "Generated-world BE search refused",
+                f"Read-only original NBT search failed: {error}")
+
+        def finish():
+            progress.close()
+            if self._be_world_worker is worker:
+                self._be_world_worker = None
+                self._be_world_progress_dialog = None
+            worker.deleteLater()
+            progress.deleteLater()
+
+        worker.progressChanged.connect(on_progress)
+        worker.completed.connect(on_completed)
+        worker.failed.connect(on_failed)
+        worker.finished.connect(finish)
+        progress.show()
+        worker.start()
+
     def _go_to_biome_quart(self, point):
         """Navigate to, but never modify, the matched native 4x4x4 cell."""
         from .biome_edit import quart_origin
@@ -3493,6 +3682,14 @@ class MainWindow(QMainWindow):
         self._perform(lambda: self.session.redo())
 
     def save_world(self):
+        if (self._be_world_worker is not None and
+                self._be_world_worker.isRunning()):
+            QMessageBox.warning(
+                self, "Native Save postponed",
+                "The read-only world-wide BE search is still inspecting "
+                "original region files. Cancel/finish the search before "
+                "saving so its reported NBT snapshot cannot mix with a Save.")
+            return
         if not self.session:
             return
         warning = (
@@ -3546,6 +3743,13 @@ class MainWindow(QMainWindow):
             self._perform(self.session.save)
 
     def restore_world_backup(self):
+        if (self._be_world_worker is not None and
+                self._be_world_worker.isRunning()):
+            QMessageBox.warning(
+                self, "Native region restore postponed",
+                "Finish/cancel the original BE search before restoring "
+                "region backups; the scan must not overlap native disk writes.")
+            return
         if self.world is None or self.session is None:
             QMessageBox.information(self, "Restore backup", "Open a world first.")
             return
@@ -3593,6 +3797,15 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Region restore refused", str(exc))
 
     def closeEvent(self, event):
+        # Do not destroy a parented QThread while it is still decoding NBT.
+        # Cancellation is cooperative; close again after the worker exits.
+        worker = self._be_world_worker
+        if worker is not None and worker.isRunning():
+            worker.cancel()
+            self.statusBar().showMessage(
+                "Cancelling read-only BE search; close after scan stops.")
+            event.ignore()
+            return
         if self._stroke_tx is not None:
             self.end_stroke()
         if self.session and self.session.dirty:

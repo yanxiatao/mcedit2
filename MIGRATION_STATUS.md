@@ -2765,3 +2765,69 @@ This is a read-only finder with **source-level test specifications,
 not claimed executed tests**. Original Draft PR #1 and its
 `python3-modern-editor` branch remain unchanged in scope,
 and `master` was not modified.
+
+## 0.3.0a68 — Indexed generated-world Block Entity finder with cancel/progress
+
+Expanded the bounded a67 XYZ original BE search into a **full
+generated-world** search of the *current native Java dimension*.
+This is an explicitly requested, read-only operation; it does
+not materialize ungenerated chunks, alter modded NBT, normalize
+registries, repair UUIDs, or modify original region files.
+
+- New `be_world_search.py` reuses `worldstream.RegionIndex` to
+  enumerate **only generated chunk coordinates** from original
+  .mca/.mcr 8-KiB region headers. It reuses the strict
+  a67 `find_block_entities` validator one generated chunk at a
+  time rather than introducing a second incompatible NBT parser.
+  Limits are **200,000 generated chunks / 8,192 region files / 256
+  listed matches** (still counting all valid decoded matches).
+  Excessively broad worlds fail closed with an explicit error,
+  rather than silently returning a partial index as complete.
+- Supports an exact namespaced native BE ID or `*` wildcard,
+  original-only or a **copied staged BE snapshot** captured at the
+  beginning of the search, and reports `original`, `created`,
+  `modified`, `deleted` statuses without rewriting BE data.
+  The scope is one active native dimension (not all dimensions).
+- Per-chunk results are atomic: an invalid chunk, off-chunk BE,
+  duplicate BE position, mismatched original xPos/zPos, or malformed
+  staged payload contributes **no partial hits**. The result
+  independently reports chunk-index count, examined chunks,
+  successful reads, invalid region-header slots/files, failed
+  chunks, and staged positions missing from the generated chunk
+  index. Any such gap or cancellation is marked **INCOMPLETE**.
+  The full invalid-header count is retained with limited report
+  details. Search never treats an unindexed region as verified empty.
+- `be_search_thread.py` provides a **separate QThread** that creates
+  and owns an independent read-only `NativeAnvilWorld`; it does not
+  iterate the UI's mutable native region caches. The main Qt thread
+  captures original BE staging data at launch. The worker emits
+  progress after each 8 decoded/attempted chunks, checks its
+  thread-safe cancellation Event **between chunks**, and emits a
+  partial result on cancel.
+- Qt6 Edit menu and persistent Tool Palette expose **Find Block
+  Entities in ALL generated chunks**. A nonmodal progress dialog
+  includes cancel; the final result view lists native IDs/statuses,
+  has a copyable coverage/error report, and navigates to exact
+  coordinates in the original selected world (world identity
+  rechecked before navigation). The user can continue interacting
+  with other Qt panels while the indexed scan runs.
+- A running scan **blocks Save and native backup restore** so this
+  editor cannot mix original chunk reads with an in-progress disk
+  write. Closing the editor requests cancellation and refuses
+  destruction of a running QThread; finish/cancel before exiting.
+  Opening another world invalidates the search's navigation
+  identity, so stale results are discarded.
+- `tests/test_be_world_search.py` adds synthetic disk-backed
+  far-apart multi-region coverage, cancellation, empty-world
+  cancellation, staged snapshot isolation, invalid region header,
+  orphaned BE stage, result truncation, oversized requests,
+  and malformed chunk rejection. `tests/test_be_world_search_qt.py`
+  adds offscreen QThread progress, pre-cancel, isolated reader and
+  safe close source. All are **source tests, not claimed run**.
+
+**Limits still outstanding:** full GUI/3D parity with original
+MCEdit2, genuine Java/Bedrock version/mapping coverage, gameplay
+modded BE semantic UUID/link repair, entity+tick transfers,
+gigantic-world search pagination beyond 200k generated chunks,
+and real OpenGL / OS test matrix. Remains in original Draft PR #1
+on `python3-modern-editor`, with `master` untouched.
