@@ -3028,3 +3028,51 @@ every Section palette combination, modded machine graph semantics,
 multi-BE move/clone, in-game verification and multi-dimension saves
 remain unverified. Existing Draft PR #1 and feature branch are
 retained; `master` unchanged.
+
+## 0.3.0a72 — Actual multi-region native write/Undo/Redo and BE preservation regression
+
+Extended a71's one-cell smoke into a bounded **real multi-region
+editing test** using the original user-provided private Java world
+ZIPs. Testing is performed **only on disposable extracted copies**;
+the original ZIPs are SHA-256 checked before/after and not uploaded
+or committed to GitHub.
+
+On local real-world runs (Java 1.12.2 and Java 1.21.1):
+- **1.12.2 / DataVersion 1343:** 9 affected generated chunks across
+  2 original .mca regions, 9 edited batches, 26 affected block
+  coordinates, 21 original BE NBT compounds individually compared
+  byte-for-byte and preserved after Save/reopen.
+- **1.21.1 / DataVersion 3955:** 9 affected generated chunks across
+  4 original .mca regions, 9 edited batches, 26 affected block
+  coordinates, **303 original BE NBT compounds** individually
+  compared byte-for-byte and preserved after Save/reopen.
+- For both worlds, the test selects existing BE-rich chunks
+  across distinct regions, uses the normal EditSession Fill and
+  Line API (including a **true adjacent chunk boundary**),
+  replays all Undo/Redo operations, confirms no disk writes
+  before Save, verifies the native backup matches every
+  original affected region file, and checks the edited cells
+  after a fresh native reopen. All non-Section original chunk
+  NBT is compared byte-for-byte in every modified chunk.
+  Original raw NBT for every **unedited generated chunk** in
+  affected .mca region files is checked as unchanged. The
+  restored backup bytes and original block states are checked
+  after reopening a fresh backend.
+- Added repeatable `scripts/verify_native_batch_roundtrip.py`
+  with strict edit limits (at most 12 selected original BE
+  chunks, eight changed region files, 96 unique cells);
+  aborts rather than generating missing world chunks. New
+  `tests/test_native_batch_roundtrip.py` provides synthetic
+  GitHub Actions regression coverage with deliberately
+  protected BE positions and cross-region generated chunks.
+
+**Known limits:** This is still bounded Fill/Line of safe writable
+original states, not arbitrary block-entity relocation, DataFixer,
+full world rollback after every crash, giant multi-chunk editing,
+or Minecraft game runtime/mod behavior. It exercises old numeric
+and modern named BlockState formats on these two real private
+worlds but does not establish all-version/machine semantics.
+The 3D editor and entity transaction matrix remain incomplete.
+
+Development remains in original Draft PR #1 branch
+`python3-modern-editor`; `master` untouched.

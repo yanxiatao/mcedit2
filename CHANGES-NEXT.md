@@ -950,3 +950,19 @@ available and is not automatically replaced.
   synthetic CI smoke and zero-byte placeholder regressions.
   Game loading, all mod interactions and exhaustive edit matrix
   remain unverified.
+
+## 0.3.0a72 — Real native multi-region editing preservation matrix
+
+- Extended private 1.12.2 and 1.21.1 native world copy testing
+  from one cell to nine edited generated chunks / 26 affected
+  coordinates per world, including an actual cross-chunk Line.
+- Confirmed byte-for-byte preservation of **21 original BEs in
+  1.12.2 and 303 in 1.21.1** across affected chunks, plus
+  all non-Section original NBT, all unedited generated chunks
+  in modified regions, and native exact region backups.
+- Tested grouped Fill and Line Undo/Redo, staging without
+  disk writes, native Save, fresh reopen, and full region-byte
+  recovery from original backups, all on temporary copies.
+- Committed reusable bounded private-ZIP multi-region runner
+  and synthetic multi-region / BE-collision regressions to
+  the existing Draft PR. Never commit real user world bytes.
