@@ -227,6 +227,8 @@ class MainWindow(QMainWindow):
         self._be_markers_enabled = False  # Read-only 3D diagnostics option.
         self._be_world_worker = None
         self._be_world_progress_dialog = None
+        self._entity_world_worker = None
+        self._entity_world_progress_dialog = None
         self._clone_preview = None  # (session, original Box, immutable geometry)
         self._clone_preview_source_states = None  # Optional original snapshot.
         self._clone_preview_visual_note = "Wireframe only."
@@ -399,6 +401,8 @@ class MainWindow(QMainWindow):
                         self.find_original_block_entities)
         self.add_action(edit_menu, "Find Block Entities in ALL generated chunks…", "",
                         self.find_world_block_entities)
+        self.add_action(edit_menu, "Find entities across ALL generated regions…", "",
+                        self.find_world_entities)
         self.add_action(edit_menu, "Copy selection", "Ctrl+C", self.copy)
         self.add_action(edit_menu, "Copy with BE NBT (experimental)…", "", self.copy_with_be)
         self.add_action(edit_menu, "Paste with BE NBT (experimental)…", "", self.paste_with_be)
@@ -2425,6 +2429,203 @@ class MainWindow(QMainWindow):
         progress.show()
         worker.start()
 
+    def find_world_entities(self):
+        """Search old chunk Entities and modern split entities/*.mca safely."""
+        if self.world is None or self.session is None:
+            QMessageBox.information(
+                self, "Generated-world entity search",
+                "Open a native Java world first.")
+            return
+        worker = self._entity_world_worker
+        if worker is not None and worker.isRunning():
+            QMessageBox.information(
+                self, "Generated-world entity search",
+                "An original entity search is already in progress.")
+            return
+        from .entity_world_search import MAX_ENTITY_CHUNKS, MAX_ENTITY_REGIONS
+        from .entity_search_thread import EntityWorldSearchWorker
+        from .palette import IDENT
+        from PySide6.QtWidgets import QListWidget, QPlainTextEdit, QProgressDialog
+        import math
+
+        setup = QDialog(self)
+        setup.setWindowTitle("Find original entities in generated Java regions")
+        form = QFormLayout(setup)
+        query = QLineEdit("*", setup)
+        query.setObjectName("find_world_entity_id")
+        query.setToolTip(
+            "Exact namespaced entity ID or '*' (all IDs); no ID normalization.")
+        form.addRow("Original entity ID (* = all)", query)
+        include_staged = QCheckBox(
+            "Include snapshot of unsaved moves, edits, clones and deletions",
+            setup)
+        include_staged.setChecked(True)
+        include_staged.setObjectName("find_world_entity_include_staged")
+        form.addRow(include_staged)
+        label = QLabel(
+            "Read-only search of original chunk Entities and independent "
+            "entities/*.mca region files in the CURRENT dimension. "
+            f"At most {MAX_ENTITY_CHUNKS:,} indexed storage chunks and "
+            f"{MAX_ENTITY_REGIONS:,} region files, with 256 listed results. "
+            "A cancelled/corrupt source makes coverage INCOMPLETE. "
+            "No NBT migration, rewrite or unloaded-chunk creation.", setup)
+        label.setWordWrap(True)
+        form.addRow(label)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel, setup)
+        buttons.accepted.connect(setup.accept)
+        buttons.rejected.connect(setup.reject)
+        form.addRow(buttons)
+        if setup.exec() != QDialog.DialogCode.Accepted:
+            return
+        name = query.text().strip()
+        if (name != "*" and (
+                not IDENT.fullmatch(name)
+                or len(name.encode("utf-8")) > 512)):
+            QMessageBox.warning(
+                self, "Entity search refused",
+                "Use an exact original namespaced entity ID or '*'.")
+            return
+
+        source = self.world
+        snapshot = {
+            "edits": dict(source._entity_edits),
+            "deletions": set(source._entity_deletions),
+            "additions": dict(source._entity_additions),
+            "transfers": dict(source._entity_transfers),
+        } if include_staged.isChecked() else {
+            "edits": {}, "deletions": set(),
+            "additions": {}, "transfers": {},
+        }
+        thread = EntityWorldSearchWorker(
+            source.path, source.dimension, name, snapshot,
+            include_staged=include_staged.isChecked(), parent=self)
+        progress = QProgressDialog(
+            "Reading generated Java region headers…", "Cancel entity search",
+            0, 0, self)
+        progress.setObjectName("generated_entity_search_progress")
+        progress.setWindowTitle("Original generated-world Entity search")
+        progress.setMinimumDuration(0)
+        progress.setWindowModality(Qt.WindowModality.NonModal)
+        progress.setAutoReset(False)
+        progress.setAutoClose(False)
+        progress.canceled.connect(thread.cancel)
+        self._entity_world_worker = thread
+        self._entity_world_progress_dialog = progress
+
+        def changed(done, total):
+            if self._entity_world_worker is not thread:
+                return
+            if total:
+                progress.setMaximum(total)
+                progress.setValue(min(done, total))
+            progress.setLabelText(
+                f"Read {done:,}/{total:,} generated entity storage chunks "
+                "(old chunk and separate entities regions).")
+            self.statusBar().showMessage(
+                f"Original entity search: {done:,}/{total:,}")
+
+        def completed(result):
+            progress.close()
+            if self.world is not source:
+                QMessageBox.warning(
+                    self, "Original entity search",
+                    "Source world/dimension has changed; discarded old results.")
+                return
+            viewer = QDialog(self)
+            viewer.resize(830, 660)
+            viewer.setWindowTitle(
+                f"Original entity search — {result.matching_entities:,} records"
+                + (" (INCOMPLETE)" if not result.complete else ""))
+            layout = QVBoxLayout(viewer)
+            caption = QLabel(
+                f"Matched {result.matching_entities:,} original/staged records "
+                f"across {result.decoded_chunks:,}/{result.indexed_chunks:,} "
+                "indexed storage chunks; "
+                f"listed {len(result.matches)}. "
+                + ("INCOMPLETE: canceled/invalid source or staged record; "
+                   "unseen results may still exist."
+                   if not result.complete else
+                   "Complete within the indexed generated storage scope."),
+                viewer)
+            caption.setWordWrap(True)
+            layout.addWidget(caption)
+            hits = QListWidget(viewer)
+            hits.setObjectName("generated_entity_search_results")
+            for record in result.matches:
+                hits.addItem(
+                    f"{record.position} [{record.status}] {record.identifier}"
+                    f" — {record.source} chunk={record.chunk}, "
+                    f"original entry={record.original_index}")
+                hits.item(hits.count() - 1).setData(
+                    Qt.ItemDataRole.UserRole, record.position)
+            layout.addWidget(hits)
+            report = QPlainTextEdit(viewer)
+            report.setObjectName("generated_entity_search_report")
+            report.setReadOnly(True)
+            report.setPlainText(result.report())
+            layout.addWidget(report)
+            controls = QDialogButtonBox(
+                QDialogButtonBox.StandardButton.Close, viewer)
+            go = controls.addButton(
+                "Go to selected entity XYZ", QDialogButtonBox.ButtonRole.ActionRole)
+
+            def navigate():
+                hit = hits.currentItem()
+                if hit is None:
+                    return
+                if self.world is not source:
+                    QMessageBox.warning(
+                        viewer, "Entity navigation refused",
+                        "Source world/dimension changed after search.")
+                    return
+                position = hit.data(Qt.ItemDataRole.UserRole)
+                if position is None:
+                    QMessageBox.information(
+                        viewer, "Entity position unavailable",
+                        "This native original Entity has no verified finite Pos "
+                        "triplet; coordinates cannot be inferred.")
+                    return
+                point = tuple(math.floor(value) for value in position)
+                try:
+                    self._go_to_block_entity(point)
+                except Exception as exc:
+                    QMessageBox.warning(
+                        viewer, "Entity navigation refused", str(exc))
+                    return
+                viewer.accept()
+            go.clicked.connect(navigate)
+            hits.itemDoubleClicked.connect(lambda _item: navigate())
+            copy = controls.addButton(
+                "Copy full report", QDialogButtonBox.ButtonRole.ActionRole)
+            copy.clicked.connect(
+                lambda: QApplication.clipboard().setText(report.toPlainText()))
+            controls.rejected.connect(viewer.accept)
+            layout.addWidget(controls)
+            viewer.exec()
+
+        def failed(message):
+            progress.close()
+            QMessageBox.warning(
+                self, "Original generated-world entity search refused",
+                str(message))
+
+        def finished():
+            progress.close()
+            if self._entity_world_worker is thread:
+                self._entity_world_worker = None
+                self._entity_world_progress_dialog = None
+            thread.deleteLater()
+            progress.deleteLater()
+
+        thread.progressChanged.connect(changed)
+        thread.completed.connect(completed)
+        thread.failed.connect(failed)
+        thread.finished.connect(finished)
+        progress.show()
+        thread.start()
+
     def _go_to_biome_quart(self, point):
         """Navigate to, but never modify, the matched native 4x4x4 cell."""
         from .biome_edit import quart_origin
@@ -3682,13 +3883,13 @@ class MainWindow(QMainWindow):
         self._perform(lambda: self.session.redo())
 
     def save_world(self):
-        if (self._be_world_worker is not None and
-                self._be_world_worker.isRunning()):
+        if any(w is not None and w.isRunning() for w in
+               (self._be_world_worker, self._entity_world_worker)):
             QMessageBox.warning(
                 self, "Native Save postponed",
-                "The read-only world-wide BE search is still inspecting "
-                "original region files. Cancel/finish the search before "
-                "saving so its reported NBT snapshot cannot mix with a Save.")
+                "A read-only generated-world BE or Entity search is still "
+                "reading original region files. Finish/cancel the scans "
+                "before saving to keep NBT snapshots consistent.")
             return
         if not self.session:
             return
@@ -3743,12 +3944,12 @@ class MainWindow(QMainWindow):
             self._perform(self.session.save)
 
     def restore_world_backup(self):
-        if (self._be_world_worker is not None and
-                self._be_world_worker.isRunning()):
+        if any(w is not None and w.isRunning() for w in
+               (self._be_world_worker, self._entity_world_worker)):
             QMessageBox.warning(
                 self, "Native region restore postponed",
-                "Finish/cancel the original BE search before restoring "
-                "region backups; the scan must not overlap native disk writes.")
+                "Finish/cancel the original BE/Entity search before "
+                "restoring backups; no scan may overlap disk writes.")
             return
         if self.world is None or self.session is None:
             QMessageBox.information(self, "Restore backup", "Open a world first.")
@@ -3799,11 +4000,14 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         # Do not destroy a parented QThread while it is still decoding NBT.
         # Cancellation is cooperative; close again after the worker exits.
-        worker = self._be_world_worker
-        if worker is not None and worker.isRunning():
-            worker.cancel()
+        running = tuple(w for w in
+                        (self._be_world_worker, self._entity_world_worker)
+                        if w is not None and w.isRunning())
+        if running:
+            for worker in running:
+                worker.cancel()
             self.statusBar().showMessage(
-                "Cancelling read-only BE search; close after scan stops.")
+                "Cancelling read-only BE/Entity searches; close after scans stop.")
             event.ignore()
             return
         if self._stroke_tx is not None:

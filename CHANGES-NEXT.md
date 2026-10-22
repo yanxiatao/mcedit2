@@ -881,3 +881,21 @@ available and is not automatically replaced.
 - Adds disk-backed native and offscreen Qt **regression source**.
   Full OS/Minecraft runtime testing and greater world-scale search
   coverage remain pending.
+
+## 0.3.0a69 — Original Entity find across legacy and split regions
+
+- Index **both** original old Java entity lists in terrain
+  chunks and modern standalone `entities/*.mca` region files.
+  Reuse original header indexing and opaque NBT entity decoder
+  with strict available chunk identity/ID validation.
+- Exact native entity ID or wildcard search, staged deletion,
+  modification, creation and cross-chunk transfer status
+  snapshot, capped generated-world scan with complete/
+  incomplete coverage diagnostics and limited hit list.
+- New independent read-only Qt6 worker, progress/cancel,
+  navigable coordinate matches, copyable reports and source
+  labels. Save/restore/close safety now covers Entity and
+  Block Entity background scans.
+- Added native disk-backed and offscreen Qt regression
+  **test sources**; runtime verification of large real
+  modded worlds and Windows/OpenGL remains outstanding.

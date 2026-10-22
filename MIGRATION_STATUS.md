@@ -2831,3 +2831,67 @@ modded BE semantic UUID/link repair, entity+tick transfers,
 gigantic-world search pagination beyond 200k generated chunks,
 and real OpenGL / OS test matrix. Remains in original Draft PR #1
 on `python3-modern-editor`, with `master` untouched.
+
+## 0.3.0a69 — Read-only generated-world Entity search (inline + split regions)
+
+Added native Java **Find entities across ALL generated regions** in
+the Qt6 Edit menu and Tool Palette. The implementation separately
+indexes the old/original entity lists within generated terrain chunks
+and the newer independent `entities/*.mca` files. Both storage
+types retain their **distinct source identity**; no data is copied
+from one to the other, no hidden chunk is generated and unknown
+entity NBT bytes are not rewritten or normalized.
+
+- New `entity_world_search.py` reuses the existing 8KiB-header
+  `worldstream.RegionIndex` on both storage directory families,
+  and `entity_index.read_entities` for original ID/Pos/opaque
+  payloads. Original terrain xPos/zPos and available independent
+  entity-region Position arrays are checked against indexed
+  coordinates. Malformed, missing-ID or duplicated-invalid native
+  records cannot produce a falsely complete negative search.
+- Search exact original `namespace:entity` or `*`, across the
+  currently opened dimension (not all dimensions); at most
+  **200,000 indexed storage chunks**, **8,192 region files** and
+  **256 listed results**. All successfully decoded matching
+  records are counted, and partial coverage is explicit for
+  unreadable original chunks, malformed index entries, staging
+  orphan references, or cancellation.
+- Optional **copy-on-start staged Entity snapshot** accounts for
+  original, modified, created, deleted, transferred-out, and
+  transferred-in records with their original storage source and
+  list index. Transferred-out/in rows are *records about the
+  staged movement*, not a claim that two live entities exist.
+  No registry remapping, fake UUID creation or NBT rewrite
+  occurs in the search. Results with missing, nonfinite or
+  out-of-bounds Pos remain listed but cannot be navigated
+  because a location must not be fabricated.
+- New `entity_search_thread.py` creates an independent read-only
+  `NativeAnvilWorld` on a QThread. The GUI supplies deep copies
+  of the four staged Entity collection containers (payloads are
+  immutable bytes). Search progress is delivered via Qt signals
+  every eight storage chunks, with cooperative cancellation
+  between chunks. A canceled result is always **INCOMPLETE**.
+- Qt6 Edit menu / Tool Palette provide background search,
+  nonmodal progress/cancel, exact-ID settings, copyable
+  diagnostics, original source labels and navigation to
+  the integer block containing a verified finite `Pos`.
+  The original world/dimension must still match before
+  navigation. Native Save, restore and window close now guard
+  **both** Entity and Block Entity scan workers; closing a
+  running worker requests cancellation first.
+- Added `tests/test_entity_world_search.py` (disk-backed
+  synthetic old/modern entity sources, exact-ID filtering,
+  staged add/edit/delete/transfer, cancel, corrupt split
+  files, orphan transfers, coordinate identity mismatch,
+  missing native entity IDs and limits) and
+  `tests/test_entity_world_search_qt.py` (offscreen
+  native Qt worker, progress, precancel and close guard).
+  These are **committed test sources, not runtime-confirmed
+  passing tests**.
+
+**Outstanding:** full GUI parity with old MCEdit2, native
+entity painting/selection directly in 3D, version-by-version
+Minecraft+mod validation, modded entity link and UUID semantics,
+Bedrock support, and safe huge-world unlimited indexing. All
+work remains in existing Draft PR #1 `python3-modern-editor`
+and does not modify `master`.
