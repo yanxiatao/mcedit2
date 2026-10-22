@@ -152,6 +152,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(self.tr_ui("MCEdit2 Next — Python 3 / Qt6 experimental editor"))
         self.world = None
         self.session = None
+        self._sampled_native_biome = None  # (exact NativeAnvilWorld object, ID)
         self.plugins = PluginManager([Path.home() / '.mcedit2-next' / 'plugins',
                                       Path(__file__).parent / 'builtin_plugins'])
         self.plugins.discover()
@@ -298,6 +299,10 @@ class MainWindow(QMainWindow):
         self.add_action(file_menu, "Clear resource archives", "", self.clear_resource_archives)
         self.add_action(edit_menu, "Undo", "Ctrl+Z", self.undo)
         self.add_action(edit_menu, "Redo", "Ctrl+Y", self.redo)
+        self.add_action(edit_menu, "Sample original biome at view center", "",
+                        self.sample_native_biome)
+        self.add_action(edit_menu, "Paint sampled biome to selection (quart cells)…", "",
+                        self.paint_sampled_biome)
         self.add_action(edit_menu, "Copy selection", "Ctrl+C", self.copy)
         self.add_action(edit_menu, "Copy with BE NBT (experimental)…", "", self.copy_with_be)
         self.add_action(edit_menu, "Paste with BE NBT (experimental)…", "", self.paste_with_be)
@@ -754,6 +759,7 @@ class MainWindow(QMainWindow):
         self.world.close()
         self.world = candidate
         self.session = EditSession(candidate)
+        self._sampled_native_biome = None
         self.update_native_editor()
         self.view.session = self.session
         self.slice_view.session = self.session
@@ -1497,6 +1503,7 @@ class MainWindow(QMainWindow):
             self.world.close()
         self.world = candidate
         self.session = EditSession(candidate)
+        self._sampled_native_biome = None
         # A selection from an earlier world must never carry into a newly
         # opened map: its coordinates are not valid for this world.
         for widget in (self.slice_view, self.volume_view):
@@ -1694,6 +1701,69 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Experimental WORLD_SURFACE approved for chunk {cx},{cz}. "
             "Save requires a separate confirmation; cancel via File menu.")
+
+    def sample_native_biome(self):
+        """Copy an EXISTING 1.18+ original registry name at view center."""
+        if self.world is None or self.session is None:
+            QMessageBox.information(self, "Sample biome", "Open a Java world first.")
+            return
+        position = (self.view.center_x, self.y_spin.value(), self.view.center_z)
+        try:
+            from .biome_edit import quart_origin, read_original_biome
+            origin = quart_origin(position)
+            raw = self.world._chunk(origin[0] >> 4, origin[2] >> 4)
+            name = read_original_biome(
+                raw, origin, expected_version=self.world.version)
+        except Exception as exc:
+            QMessageBox.warning(self, "Biome sampling refused", str(exc))
+            return
+        self._sampled_native_biome = (self.world, name)
+        self.statusBar().showMessage(
+            f"Sampled original biome {name} at {origin}; select a destination.")
+
+    def paint_sampled_biome(self):
+        """Paint only 4x4x4 original quart cells, never terrain blocks."""
+        if self.session is None or self.world is None:
+            QMessageBox.information(self, "Paint biomes", "Open a Java world first.")
+            return
+        sampled = self._sampled_native_biome
+        if sampled is None or sampled[0] is not self.world:
+            QMessageBox.information(
+                self, "Paint biomes",
+                "First choose Edit > Sample original biome at view center.")
+            return
+        if self.view.selection is None:
+            QMessageBox.information(
+                self, "Paint biomes", "Select a bounded 3D target region first.")
+            return
+        box = self._box()
+        from .biome_edit import MAX_BIOME_CELLS
+        quart = [
+            ((box.maximum[i] >> 2) - (box.minimum[i] >> 2) + 1)
+            for i in range(3)]
+        count = quart[0] * quart[1] * quart[2]
+        if count > MAX_BIOME_CELLS:
+            QMessageBox.warning(
+                self, "Biome selection too large",
+                f"Selection intersects {count} quart cells; limit "
+                f"is {MAX_BIOME_CELLS} per operation.")
+            return
+        name = sampled[1]
+        warning = (
+            f"Paint {count} complete 4×4×4 quart biome cell(s) to {name}?\n\n"
+            "The 3D selection rounds OUTWARD to complete biome cells "
+            "(possibly beyond its exact block bounds). "
+            "This changes ONLY existing Java 1.18+ biome palette data, "
+            "not blocks, lighting, heightmaps or Block Entity NBT. "
+            "Unknown modded biome registry validity cannot be guaranteed. "
+            "Undo before or after Save is supported; native Save backs "
+            "up the original region files. Use an offline disposable copy.")
+        result = QMessageBox.question(
+            self, "Confirm original-format biome painting", warning,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if result == QMessageBox.StandardButton.Yes:
+            self._perform(lambda: self.session.paint_biome_box(box, name))
 
     def inspect_original_biomes(self):
         """Inspect stored Java biome palette/IDs at the displayed slice Y."""
@@ -2721,6 +2791,13 @@ class MainWindow(QMainWindow):
                     "the save. Cancel approvals in File menu to return to "
                     "preservation-only saving."
                 ).replace("\\n", "\n")
+        if self.world is not None and getattr(self.world, "_biome_edits", None):
+            warning += (
+                f"\\n\\nPending original biome quart edits: "
+                f"{len(self.world._biome_edits)}. Other biome cells and "
+                "unrelated NBT are preserved, but Minecraft or mods may "
+                "rebuild biome-dependent gameplay metadata on load."
+            ).replace("\\n", "\n")
         warning += "\n\nContinue saving the offline test copy?"
         reply = QMessageBox.question(
             self, "Experimental save — derived-data risk", warning,

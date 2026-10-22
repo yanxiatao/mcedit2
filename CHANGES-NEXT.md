@@ -728,3 +728,19 @@ available and is not automatically replaced.
   a region or normalizes original modded BE/unknown chunk NBT.
   Synthetic decoder/backend regression source added, not a substitute
   for full Minecraft-version/Qt/Mesa/Windows testing.
+
+## 0.3.0a60 — Original Java 1.18+ biome quart painting
+
+- Add a strict native Java 4×4×4 biome quart writer that changes only the
+  selected section's original palette/long-array entries; unknown NBT,
+  Blocks/BlockStates, modded BE contents and unrelated metadata stay intact.
+- Add Qt6 Edit menu and persistent Tool Palette actions to sample an
+  *existing* original biome ID and paint a 3D selection, with explicit
+  quart-boundary expansion and disposable-copy warning.
+- Preflight at most 128 selected quart cells before staging; preserve
+  original chunk/version identity and reject missing target Sections or
+  malformed native packing. Batch atomic Undo/Redo, including post-save,
+  with existing full-region backups and no added format conversion.
+- Add source-only native save/reopen, modded NBT, malformed-data,
+  mixed block/biome and cross-chunk rejection specifications. Full runtime
+  CI/Minecraft/Qt/Windows validation is still deferred.

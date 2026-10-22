@@ -220,6 +220,8 @@ class NativeAnvilWorld:
         self._locked_handle = None
         self._session_lock = self._lock_bytes()
         self._edits: dict[tuple[int, int, int], BlockState] = {}
+        # Original Java 1.18+ native biome edits keyed by 4x4x4 quart origin.
+        self._biome_edits: dict[tuple[int, int, int], str] = {}
         self._be_edits: dict[tuple[int, int, int], bytes | None] = {}
         self._entity_edits: dict[tuple[str, int, int, int], bytes] = {}
         # Original list-member indices, never shifted by staged deletions.
@@ -301,6 +303,56 @@ class NativeAnvilWorld:
         if (snapshot.chunk_x, snapshot.chunk_z) != (cx, cz):
             raise ValueError("Original biome chunk coordinates do not match region")
         return snapshot
+
+    def get_biome(self, point):
+        """Read original Java 1.18+ biome or its in-memory quart edit."""
+        from .biome_edit import quart_origin, read_original_biome
+        point = quart_origin(point)
+        raw = self._chunk(point[0] >> 4, point[2] >> 4)
+        original = read_original_biome(raw, point, expected_version=self.version)
+        return self._biome_edits.get(point, original)
+
+    def _prepare_biome_writes(self, updates):
+        """Build and validate an atomic candidate for all selected quart cells."""
+        from .biome_edit import (
+            MAX_BIOME_CELLS, patch_original_biomes, quart_origin,
+            read_original_biome,
+        )
+        if len(updates) > MAX_BIOME_CELLS:
+            raise ValueError("Biome painting is limited to 128 quart cells")
+        candidate = dict(self._biome_edits)
+        touched = set()
+        for point, name in updates:
+            key = quart_origin(point)
+            chunk = (key[0] >> 4, key[2] >> 4)
+            raw = self._chunk(*chunk)
+            original = read_original_biome(
+                raw, key, expected_version=self.version)
+            if name == original:
+                candidate.pop(key, None)
+            else:
+                candidate[key] = name
+            touched.add(chunk)
+        # Final candidate is preflighted per chunk, not intermediate states.
+        # A failed section/ID/packing check changes no staged state.
+        for cx, cz in touched:
+            edits = {pos: state for pos, state in candidate.items()
+                     if (pos[0] >> 4, pos[2] >> 4) == (cx, cz)}
+            patch_original_biomes(
+                self._chunk(cx, cz), edits, expected_version=self.version)
+        return candidate
+
+    def validate_biome_writes(self, updates):
+        """Check a full quart paint without mutating the session or disk."""
+        self._prepare_biome_writes(updates)
+
+    def set_biomes_batch(self, updates):
+        """Stage a whole prevalidated biome transaction at once."""
+        self._biome_edits = self._prepare_biome_writes(updates)
+
+    def set_biome(self, point, biome):
+        """Compatibility entry point for one undoable original quart change."""
+        self.set_biomes_batch([(point, biome)])
 
     def preview_world_surface(self, cx: int, cz: int, *,
                               min_y: int, height: int):
@@ -1013,7 +1065,7 @@ class NativeAnvilWorld:
                         fcntl.lockf(handle.fileno(), fcntl.LOCK_UN)
 
     def save(self) -> None:
-        if (not self._edits and not self._be_edits
+        if (not self._edits and not self._biome_edits and not self._be_edits
                 and not self._entity_edits and not self._entity_deletions
                 and not self._entity_additions and not self._entity_transfers):
             self._surface_approvals.clear()
@@ -1022,7 +1074,7 @@ class NativeAnvilWorld:
             self._save_with_lock()
 
     def _save_with_lock(self) -> None:
-        if (not self._edits and not self._be_edits
+        if (not self._edits and not self._biome_edits and not self._be_edits
                 and not self._entity_edits and not self._entity_deletions
                 and not self._entity_additions and not self._entity_transfers):
             return
@@ -1040,6 +1092,12 @@ class NativeAnvilWorld:
         for (x, y, z), value in self._edits.items():
             cx, cz = x >> 4, z >> 4
             edits_by_region[self._region_path(cx, cz)][(cx, cz)][(x, y, z)] = value
+
+        biome_by_chunk = defaultdict(dict)
+        for (x, y, z), name in self._biome_edits.items():
+            cx, cz = x >> 4, z >> 4
+            edits_by_region[self._region_path(cx, cz)].setdefault((cx, cz), {})
+            biome_by_chunk[(cx, cz)][(x, y, z)] = name
 
         for (x, y, z), value in self._be_edits.items():
             cx, cz = x >> 4, z >> 4
@@ -1155,6 +1213,13 @@ class NativeAnvilWorld:
                             chunk, updates, self.version,
                             allowed_be_positions=frozenset(additions))
                         patched = patch_block_entities(patched, additions)
+                if source == "chunk":
+                    quart_updates = biome_by_chunk.get((cx, cz), {})
+                    if quart_updates:
+                        from .biome_edit import patch_original_biomes
+                        patched = patch_original_biomes(
+                            patched, quart_updates,
+                            expected_version=self.version)
                 patched = patch_entity_positions(
                     patched, entity_by_chunk.get((source, cx, cz), {}),
                     allow_rotation=True, allow_scalar=True,
@@ -1223,6 +1288,7 @@ class NativeAnvilWorld:
             raise
         self.last_backup = backup_dir
         self._edits.clear()
+        self._biome_edits.clear()
         self._be_edits.clear()
         self._entity_edits.clear()
         self._entity_deletions.clear()
@@ -1256,7 +1322,7 @@ class NativeAnvilWorld:
         restoration. Operations spanning multiple regions have a best-effort
         rollback on normal I/O errors, but are not crash-atomic.
         """
-        if (self._edits or self._be_edits or self._entity_edits
+        if (self._edits or self._biome_edits or self._be_edits or self._entity_edits
                 or self._entity_deletions or self._entity_additions
                 or self._entity_transfers or self._surface_approvals):
             raise RegionError(
@@ -1325,6 +1391,7 @@ class NativeAnvilWorld:
 
     def close(self):
         self._edits.clear()
+        self._biome_edits.clear()
         self._be_edits.clear()
         self._entity_edits.clear()
         self._entity_deletions.clear()

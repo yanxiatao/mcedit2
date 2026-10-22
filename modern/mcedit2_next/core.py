@@ -91,6 +91,14 @@ class EntityAddition:
 
 
 @dataclass(frozen=True)
+class BiomeCellEdit:
+    """One original Java 4x4x4 biome quart edit, with undoable names."""
+    point: Position
+    before: str
+    after: str
+
+
+@dataclass(frozen=True)
 class EntityTransfer:
     """Move an existing original UUID between two existing Java chunks."""
     source: str
@@ -175,7 +183,22 @@ class EditSession:
             raise ValueError(f"Operation would affect {size:,} blocks; limit is {self.max_blocks:,}")
 
     def _apply(self, changes: list[Change | EntityMove], reverse: bool):
+        # All native biome edits in a paint are one atomic staging operation;
+        # don't re-pack increasingly large palettes 128 times or leave a
+        # partial transaction if a later cell cannot be represented.
+        if changes and all(isinstance(c, BiomeCellEdit) for c in changes):
+            batch = getattr(self.world, "set_biomes_batch", None)
+            if not callable(batch):
+                raise ValueError("Native backend lacks atomic biome staging")
+            batch([(c.point, c.before if reverse else c.after)
+                   for c in changes])
+            return
+
         def apply_one(change, undo):
+            if isinstance(change, BiomeCellEdit):
+                self.world.set_biome(
+                    change.point, change.before if undo else change.after)
+                return
             if isinstance(change, EntityTransfer):
                 moved = change.before if undo else change.after
                 self.world.set_entity_transferred(
@@ -257,6 +280,42 @@ class EditSession:
                 if isinstance(after, CellSnapshot):
                     continue  # Explicit BE-aware transaction has its own checks.
                 preflight(*point, after)
+        self._apply(prepared, reverse=False)
+        self.undo_stack.append(prepared)
+        self.undo_stack = self.undo_stack[-100:]
+        self.redo_stack.clear()
+        self.dirty = True
+        return len(prepared)
+
+    def paint_biome_box(self, box: Box, biome: str) -> int:
+        """Paint intersecting existing 4x4x4 biome cells in one Undo step.
+
+        Selection is rounded OUTWARD to complete quart cells. The backend
+        validates every original target chunk/section and the final name
+        before any mutation; this never changes terrain block NBT.
+        """
+        from .biome_edit import MAX_BIOME_CELLS
+        if not isinstance(box, Box):
+            raise ValueError("Select a valid XYZ box for biome painting")
+        ranges = [range(box.minimum[i] >> 2, (box.maximum[i] >> 2) + 1)
+                  for i in range(3)]
+        count = len(ranges[0]) * len(ranges[1]) * len(ranges[2])
+        if count == 0 or count > MAX_BIOME_CELLS:
+            raise ValueError("Biome selection must cover 1..128 quart cells")
+        prepared = []
+        for qx in ranges[0]:
+            for qy in ranges[1]:
+                for qz in ranges[2]:
+                    point = (qx * 4, qy * 4, qz * 4)
+                    before = self.world.get_biome(point)
+                    if before != biome:
+                        prepared.append(BiomeCellEdit(point, before, biome))
+        if not prepared:
+            return 0
+        preflight = getattr(self.world, "validate_biome_writes", None)
+        if not callable(preflight):
+            raise ValueError("Biome editing requires a native validating backend")
+        preflight([(edit.point, edit.after) for edit in prepared])
         self._apply(prepared, reverse=False)
         self.undo_stack.append(prepared)
         self.undo_stack = self.undo_stack[-100:]

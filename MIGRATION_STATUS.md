@@ -2344,3 +2344,50 @@ painting and real Minecraft-version game-world verification. The new source
 tests are committed as specifications; complete runtime, Qt, Windows and
 game-version CI execution remains deferred. Work is confined to the existing
 Draft PR #1 and original branch, without touching `master`.
+
+## 0.3.0a60 — Native Java quart-biome painting (guarded, experimental)
+
+This increment extends the a59 **read-only** original biome inspector with
+deliberately bounded **Java 1.18+ native 4×4×4 biome editing**, retaining the
+original no-Amulet region writer and full-region backups. Older 2D/1024-int
+numerical biome formats remain read-only to avoid speculative registry ID
+migration. This is not a cross-version biome converter.
+
+- `biome_edit.py` reads original section `biomes.palette`/`data` from
+  existing chunk NBT, rejects missing/duplicate sections, unknown/ambiguous
+  schemas, malformed names, invalid indices/padding and DataVersion mismatches.
+  For a changed 4×4×4 quart cell, it re-encodes only the affected biome
+  palette and packed long array; all unrelated section tags, lighting,
+  heightmaps, block states, BE inventories and original modded NBT survive
+  byte-for-byte. A new exact name can be appended to the existing palette
+  only while within the native 64-entry bound.
+- Qt6 Edit menu and Tool Palette expose **Sample original biome at view
+  center** and **Paint sampled biome to selection**. Sampling reads an
+  actual original registry name from this same world/dimension (including
+  modded IDs). Switching worlds/dimensions invalidates the sample. Painting
+  expands each partially selected biome cube to the *whole* 4×4×4 original
+  cell and makes that expansion explicit in its confirmation dialog.
+- Each operation is limited to **128 quart cells**; all affected source
+  sections, target chunks, exact native IDs and packing are preflighted
+  before mutating any staged state. Atomic **in-memory batch** staging and
+  one grouped **Undo/Redo**, including after Save, avoid partial quart edits.
+  At Save the common original-region transaction independently revalidates
+  from on-disk originals, backs up every affected original region and retains
+  its ordinary rollback rules (not crash-atomic across separate files).
+  Pending biome edits also prevent unsafe native backup restoration.
+- `tests/test_biome_edit.py` specifies original/negative quart geometry,
+  append-and-repack vs unchanged palette, strict validation, all-or-nothing
+  cross-chunk failure, bound protection, Undo/Redo, save/reopen/backups,
+  preservation of unrelated modded BE bytes and coexistence with normal
+  block edits.
+
+**Limitations:** Only original Java 1.18+ existing chunk biome sections;
+no old numeric biome-ID writes, custom biome registry validation, automatic
+datapack reconciliation, entity or BE semantic migrations, missing chunk
+creation, smooth biome painting, visual biome overlays or tested cross-game
+compatibility guarantee. The GUI only paints sampled names that actually
+occur in this same world; the backend accepts exact explicitly specified
+namespace strings but cannot prove they are registered for the destination.
+The new regression cases were committed as source only; full Qt/Windows/
+game-version testing remains deferred. This is still Draft PR #1 on
+`python3-modern-editor`; `master` remains unchanged.
