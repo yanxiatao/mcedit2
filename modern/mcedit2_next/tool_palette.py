@@ -34,6 +34,7 @@ class ToolPaletteDock(QDockWidget):
         ("Rotate then scale selected volume…", "clone_selection_oriented_scaled"),
         ("Downscale selected volume by XYZ divisors…", "clone_selection_reduced"),
         ("Move selected volume…", "move_selection"),
+        ("Move selected volume WITH original BE NBT (expert)…", "move_selection_with_be"),
         ("Rotate selection clockwise 90°", "rotate_clockwise"),
         ("Rotate selection 180°", "rotate_half_turn"),
         ("Rotate selection clockwise 270°", "rotate_clockwise_270"),

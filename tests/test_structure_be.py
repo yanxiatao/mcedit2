@@ -106,6 +106,22 @@ class OriginalBETransferTests(unittest.TestCase):
             self.assertEqual(disk.read_bytes(), before)
             world.close()
 
+    def test_marked_transfer_without_be_rejected_by_ordinary_importer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            world, disk = create_world(directory)
+            transfer = capture_be_transfer(
+                world, Box.from_corners((1, -62, 1), (1, -62, 1)))
+            self.assertEqual(transfer.block_entities, ())
+            encoded = encode_be_transfer(transfer)
+            self.assertEqual(decode_be_transfer(encoded), transfer)
+            # Even an all-blocks-only marked file is NOT an ordinary
+            # vanilla template. The original source record matters.
+            with self.assertRaisesRegex(StructureError, "explicit BE"):
+                decode_structure(encoded)
+            self.assertEqual(world._edits, {})
+            self.assertEqual(world._be_edits, {})
+            world.close()
+
     def test_ordinary_structure_export_keeps_existing_be_guard(self):
         with tempfile.TemporaryDirectory() as directory:
             world, disk = create_world(directory)

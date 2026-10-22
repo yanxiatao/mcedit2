@@ -886,6 +886,92 @@ class EditSession:
         affected.update(zip(targets, states))
         return self._commit(list(affected.items()))
 
+    def move_box_with_nbt(self, box: Box, offset: Position) -> int:
+        """Move original BE-bearing blocks in ONE guarded undoable transaction.
+
+        Source cells are snapshotted first, even for overlapping translations.
+        Only root BE x/y/z are relocated; every opaque mod field is retained.
+        Preexisting BEs outside the source are never overwritten. This does
+        not transfer standalone entities, ticks or cross-machine references.
+        """
+        from .be_nbt import relocate_payload
+        from .palette import BlockState
+
+        if (not isinstance(box, Box) or
+                any(type(v) is not int for v in box.minimum + box.maximum)
+                or any(box.minimum[i] > box.maximum[i] for i in range(3))):
+            raise ValueError("BE-aware move requires a valid bounded 3D Box")
+        if (getattr(self.world, "legacy", True) or
+                getattr(self.world, "is_mcregion", True)):
+            raise ValueError("BE-aware move requires named Java Anvil")
+        offset = self._offset3(offset)
+        if not any(offset):
+            return 0
+        self._check_size(box.volume)
+        get_cell = getattr(self.world, "get_cell", None)
+        checker = getattr(self.world, "has_block_entity", None)
+        section = getattr(self.world, "_section", None)
+        make_block = getattr(self.world, "make_block", None)
+        if not all(callable(x) for x in (get_cell, checker, section, make_block)):
+            raise ValueError("Native BE-safe backend required")
+        source = tuple(box.points())
+        sources = set(source)
+        destinations = tuple(
+            tuple(point[i] + offset[i] for i in range(3))
+            for point in source)
+        affected = set(source)
+        affected.update(destinations)
+        self._check_size(len(affected))
+        for point in affected:
+            if not (-30_000_000 <= point[0] <= 30_000_000
+                    and -2048 <= point[1] < 4096
+                    and -30_000_000 <= point[2] <= 30_000_000):
+                raise ValueError("BE-aware move exceeds native world coordinate limits")
+
+        # Preflight every touched source/target before any staged mutations.
+        # This also refuses absent original chunks/sections instead of
+        # generating world data or using get_block()'s air fallback.
+        originals = {}
+        for point in sorted(affected):
+            section(point[0] >> 4, point[2] >> 4, point[1] >> 4)
+            snap = get_cell(*point)
+            if not isinstance(snap, CellSnapshot) or not isinstance(snap.block, BlockState):
+                raise ValueError(f"Incomplete native BE cell at {point}")
+            originals[point] = snap
+            if point not in sources and checker(*point):
+                raise ValueError(
+                    f"External destination BE at {point} must not be overwritten")
+
+        air = make_block("minecraft:air")
+        if air != make_block(str(air)):
+            raise ValueError("Cannot verify native air BlockState")
+        targets = {point: CellSnapshot(air, None) for point in source}
+        for source_point, destination in zip(source, destinations):
+            cell = originals[source_point]
+            state = make_block(str(cell.block))
+            if state != cell.block:
+                raise ValueError("Native block state roundtrip changed identity")
+            payload = cell.block_entity
+            if payload is not None:
+                # validate_payload is called by relocate_payload, with
+                # strict original source coordinate and BE identity checks.
+                payload = relocate_payload(payload, source_point, destination)
+            targets[destination] = CellSnapshot(state, payload)
+        # Empty-source and source/destination overlaps are resolved using
+        # the frozen originals; no cascading mutations can occur.
+        changes = [
+            (point, originals[point], targets[point])
+            for point in sorted(targets) if originals[point] != targets[point]
+        ]
+        if not changes:
+            return 0
+        self._apply(changes, reverse=False)
+        self.undo_stack.append(changes)
+        self.undo_stack = self.undo_stack[-100:]
+        self.redo_stack.clear()
+        self.dirty = True
+        return len(changes)
+
     def transform_selection(self, box: Box, operation: str, air: Any) -> int:
         """Rotate or reflect a block-only selection in its original format.
 

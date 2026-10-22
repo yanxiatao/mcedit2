@@ -2536,3 +2536,60 @@ Bedrock support, unrestricted entity structures and original GUI feature
 parity. This is an explicitly opt-in experimental operation; runtime
 Qt/Windows/Minecraft-version full testing is deferred. Keep Draft PR #1
 on `python3-modern-editor`; no new PR and no `master` changes.
+
+## 0.3.0a64 — BE-preserving native selection Move Tool, plus strict marked-file guard
+
+Added a separate, **explicit BE-aware Move selection by XYZ offset**
+alongside the older **block-only Move selection** (which still rejects
+any Block Entity). Implemented `EditSession.move_box_with_nbt` and
+Qt6 Edit-menu / Tool Palette expert entries. Source snapshots and
+destination preflight are bounded by the existing editor's
+32,768-block operation budget. This moves *blocks and their embedded
+Block Entity payloads only*: standalone entities, scheduled ticks,
+multiblock/network relationships and other dimension data are NOT
+transferred.
+
+- Source and destination *including overlapping regions* are
+  snapshotted/validated **before** any staging. The move uses frozen
+  originals, clears source-only cells to native air and stages
+  destination snapshots with unchanged native BlockStates.
+  Original BE opaque payloads are not normalized or converted; only
+  strict root TAG_Int x/y/z are relocated to each new destination.
+- Refuses invalid selection geometry/offset or out-of-bounds world
+  points, missing original chunks/Sections, unsupported old numeric
+  backends, unknown/malformed BE identities, or a target BE **outside
+  the original source selection**. A BE already *inside* the
+  overlapping source is allowed to move, preventing mistaken
+  rejection of legitimate overlap cases. Ordinary occupied
+  destination **blocks** outside the source are replaced as in the
+  original MCEdit move tool, with explicit GUI warning.
+- One complete native stage = one Undo/Redo item; exceptions trigger
+  the existing reverse-staging rollback. Saving continues to require
+  explicit confirmation and uses the existing full original-region
+  transactional backups. Moving a modded machine retains, but does
+  NOT repair, unknown links/UUIDs/inventories/capabilities or
+  ownership. Must only be used on disposable OFFLINE copies.
+- Also **fixed a63 file-type isolation**: ordinary `decode_structure`
+  now explicitly refuses *every* marked BE-transfer template,
+  **even if it contains zero BE records**. The expert BE-transfer
+  decoder removes its marker internally before invoking the normal
+  conservative block-format parser. Default vanilla/Sponge/classic
+  block-only import behavior is otherwise unchanged.
+- New `tests/test_move_be.py` synthetic disk-backed regression
+  source covers two adjacent modded BE payloads, one-cell overlap,
+  frozen-source move, copy of root coordinates only, independent
+  block/BE state, staged vs disk, Save/backup/Undo/Save/reopen,
+  external BE protection, absent target chunk/section and
+  invalid/legacy geometry. New `tests/test_move_be_qt.py`
+  offscreen Qt source covers explicit confirmation, selection
+  navigation and no disk changes before Save.
+  `tests/test_structure_be.py` also exercises the zero-BE marker
+  import guard.
+
+**Still pending:** real Java modpack compatibility testing, 3D BE
+wireframe selection feedback, fully general modded BE identity/link
+reparenting, native entity movement with selection, old numeric
+schematic BE transfer, complete MCEdit2 GUI parity and comprehensive
+Windows/Qt/Minecraft-version testing. Tests are source specifications,
+not claimed to have passed a real-world test matrix. Existing Draft
+PR #1, `python3-modern-editor`, `master` unchanged.

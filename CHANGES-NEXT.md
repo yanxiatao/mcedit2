@@ -796,3 +796,20 @@ available and is not automatically replaced.
 - Synthetic regressions added as **source** for BE byte preservation,
   disk roundtrip, save/reopen, Undo and atomic refusal on missing
   target data. Full real-world/Qt/Windows runtime testing deferred.
+
+## 0.3.0a64 — Original BE-aware Move Tool + BE transfer format isolation
+
+- New opt-in **Move selection WITH original BE NBT (expert)** action
+  in Qt6 Edit menu/Tool Palette. Entire 3D source and target are
+  preflighted, including an overlapping translation and original
+  BE/Section identities. No existing BE outside the source can be
+  overwritten. Source-only cells clear to air, target receives
+  original blocks and byte-preserved opaque BE data with only root
+  x/y/z adjusted. One Undo/Redo action; Save still uses original
+  region backup and risk confirmation.
+- Corrected general `.nbt` structure import: it now refuses marked
+  original-BE transfer files even when there are no BE records,
+  preventing accidental use of the wrong import workflow.
+- Added native two-BE overlap/failure/Save+Undo regression sources,
+  plus Qt6 confirmation/navigation source and marked-file guard.
+  Real-world runtime test matrix still deferred.

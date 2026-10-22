@@ -88,6 +88,13 @@ def encode_structure(structure: Structure) -> bytes:
 
 def decode_structure(raw: bytes) -> Structure:
     root = nbt.parse(raw)
+    # Dedicated original-BE export files must NEVER pass through the
+    # ordinary block-only structure importer, even when they happen to
+    # contain no BE records. Their source provenance/semantics require
+    # the separately confirmed expert transfer path.
+    if root.child("MCEdit2Transfer") is not None:
+        raise StructureError(
+            "Marked original-BE transfer: use the explicit BE import tool")
     size = _triplet(root.require("size", 9), "size")
     _area(size)
     entities = root.child("entities")

@@ -405,6 +405,8 @@ class MainWindow(QMainWindow):
         self.add_action(edit_menu, "Downscale clone by integer XYZ divisors…", "",
                         lambda: self.clone_selection_reduced())
         self.add_action(edit_menu, "Move selection by offset…", "", self.move_selection)
+        self.add_action(edit_menu, "Move selection WITH original BE NBT (expert)…", "",
+                        self.move_selection_with_be)
         self.add_action(edit_menu, "Rotate selection clockwise 90°", "",
                         lambda: self.transform_selection("clockwise"))
         self.add_action(edit_menu, "Rotate selection counterclockwise 90°", "",
@@ -2450,10 +2452,13 @@ class MainWindow(QMainWindow):
             self._stroke_tx = None
             QMessageBox.critical(self, 'Brush operation failed', str(exc))
 
-    def _selection_offset(self, title):
+    def _selection_offset(self, title, *, with_be=False):
         if self.session is None or self.view.selection is None:
             QMessageBox.information(
-                self, title, "Select a region first; BE/entities are excluded.")
+                self, title,
+                ("Select an original Java 3D region first. "
+                 + ("Standalone entities are not moved."
+                    if with_be else "BE/entities are excluded.")))
             return None
         dialog = QDialog(self)
         dialog.setWindowTitle(self.tr_ui(title))
@@ -2826,6 +2831,55 @@ class MainWindow(QMainWindow):
             tuple(field.value() for field in fields),
             copies.value(), skip_air=mask_air.isChecked(),
             only_replace_air=target_air.isChecked()))
+
+    def move_selection_with_be(self):
+        """Expert native move; guard all target BEs before any staging."""
+        if self.session is None or self.world is None or self.view.selection is None:
+            QMessageBox.information(
+                self, "Move selection with BE NBT",
+                "Open a native Java Anvil world and select a 3D region.")
+            return
+        if self.world.legacy or self.world.is_mcregion:
+            QMessageBox.warning(
+                self, "BE move unavailable",
+                "Original BE move requires named Java Anvil, not numeric IDs.")
+            return
+        offset = self._selection_offset(
+            "Move selection WITH original BE NBT…", with_be=True)
+        if offset is None or not any(offset):
+            return
+        box = self._box()
+        target_min = tuple(box.minimum[i] + offset[i] for i in range(3))
+        target_max = tuple(box.maximum[i] + offset[i] for i in range(3))
+        warning = (
+            f"EXPERIMENTAL original-BE move: {box.minimum} → {box.maximum} "
+            f"to {target_min} → {target_max}. "
+            "The source volume is cleared to native air; destination blocks "
+            "outside the source are overwritten. Existing destination Block "
+            "Entities OUTSIDE the selected source are protected and abort "
+            "the whole operation. Overlapping moves are supported. "
+            "Only BE root x/y/z coordinates are adjusted; opaque modded NBT "
+            "is kept byte-for-byte, including UUIDs, inventories, energy, "
+            "ownership and machine references. Those internal references "
+            "are NOT fixed and standalone entities/ticks are NOT moved. "
+            "The move is one Undo step, while Save requires its own "
+            "confirmation and native region backup. "
+            "Use only a disposable OFFLINE test world. Continue?")
+        reply = QMessageBox.warning(
+            self, "Confirm lossless original BE move — EXPERT", warning,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        def apply():
+            count = self.session.move_box_with_nbt(box, offset)
+            if count:
+                # Update selection only AFTER the complete native transaction.
+                self.select_coordinates(target_min, target_max)
+            return count
+
+        self._perform(apply)
 
     def move_selection(self):
         offset = self._selection_offset("Move selection by offset…")
