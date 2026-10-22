@@ -762,3 +762,18 @@ available and is not automatically replaced.
 - New native geometry/metadata and offscreen Qt controller
   regression **source** covers caching, staged-state visuals,
   unreadable data and no world writes. Full runtime testing deferred.
+
+## 0.3.0a62 — Exact native Java 3D biome find
+
+- Added conservative exact-ID biome search over selected 3D positions
+  at original Java 1.18+ 4×4×4 quart resolution, limited to 32 chunks /
+  8192 cells / 256 displayed matches, with exact full hit counts.
+  No selection means search the current chunk/current Y only.
+- Search handles modded biome names without guessing mappings, optionally
+  includes staged unsaved edits, marks missing/corrupt chunks or sections
+  explicitly and distinguishes partial scans from complete negative finds.
+- Qt6 Edit menu/Tool Palette opens a result dialog with copyable
+  diagnostics and navigable matches. Go To switches to the 2D slice
+  and selects the exact quart cell; no biome NBT or blocks are written.
+- Added native regression and offscreen Qt test **source**; full runtime
+  test matrix remains deferred.

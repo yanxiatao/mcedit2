@@ -42,6 +42,7 @@ class ToolPaletteDock(QDockWidget):
         ("Mirror selection Up / Down (guarded)", "mirror_y"),
         ("Sample original biome at view center", "sample_native_biome"),
         ("Paint sampled biome into quart-aligned selection…", "paint_sampled_biome"),
+        ("Find exact native biome in selection…", "find_native_biomes"),
         ("Replace native blocks", "filtered_replace_dialog"),
         ("Find original blocks…", "find_blocks_in_selection"),
         ("Count original blocks…", "show_selection_statistics"),

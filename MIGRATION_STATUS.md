@@ -2433,3 +2433,51 @@ content is not modified by this visualization. Tests added as source only;
 full Qt/Mesa/Windows and real Minecraft-version runtime runs are deferred.
 Development remains confined to existing Draft PR #1 and
 `python3-modern-editor` — no new PR, branch or `master` write.
+
+## 0.3.0a62 — Bounded 3D original Java biome find and navigation (read-only)
+
+Adds **exact namespaced biome ID search** in original Java 1.18+ Anvil
+worlds. The existing 2D biome overlay, quart writer and original raw
+NBT/Block Entity preservation remain unchanged.
+
+- New `biome_search.py` scans only **existing** Java section biome
+  palettes at native **4×4×4 quart resolution** across a user-selected
+  *three-dimensional* selection. If nothing is selected, the UI restricts
+  search to the current chunk at the current Y rather than scanning the
+  world. Each original chunk and section is decoded once per scan.
+  The absolute limits are **32 horizontal chunks**, **8192 quart cells**
+  and **256 displayed hit coordinates** per query. A capped hit list
+  retains the exact *total match count* for successfully decoded cells.
+  Inputs and version are validated before any chunk read.
+- Matching is **exact** against the original namespaced registry ID;
+  modded IDs are supported verbatim with no guessed mappings, names
+  autocomplete, wildcard expansion, DataFixer or registry interpretation.
+  The dialog offers `include staged biome edits`: when checked,
+  unsaved in-memory names replace original names for comparison while
+  the search remains completely read-only.
+- Missing original chunks, missing requested Y sections, mixed/invalid
+  chunk schemas, malformed packed quart palettes and mismatched
+  chunk coordinates/versions are reported per chunk/section. Decoded
+  sections still contribute results; the final report explicitly marks
+  incomplete searches instead of treating a failed read as a proven
+  negative. The feature never generates missing terrain or sections.
+- The Qt6 Edit menu and persistent Tool Palette expose
+  **Find exact native biome in selection**. A results dialog displays
+  match totals, partial-read diagnostics, a copyable report and at most
+  256 navigable quart origins. Double-click/Go to result switches to the
+  2D slice, pans to the hit, sets view Y and selects exactly its 4×4×4
+  biome cell, without changing blocks, biome data, entities or undo
+  history. Navigation refuses stale world/dimension results.
+- Added native synthetic regression **source** `tests/test_biome_search.py`
+  for quart X/Y/Z ordering, vertical slices, modded IDs, staged vs
+  original search, Undo, cross-chunk completeness, missing source data,
+  exact hit counting when truncated and invalid/oversized bounds.
+  Added `tests/test_biome_search_qt.py` offscreen Qt source for
+  navigation geometry, invalid locations and legacy refusal.
+
+**Still not supported:** old numeric biome ID search, Bedrock worlds,
+biome registry/data-pack validation, unbounded entire-world indexing,
+3D volume overlay or general modded block-entity relationship repair.
+Tests are committed as source, not reported as passing a full
+Windows/Qt/Minecraft version matrix. Stay on Draft PR #1,
+`python3-modern-editor`; `master` unchanged.

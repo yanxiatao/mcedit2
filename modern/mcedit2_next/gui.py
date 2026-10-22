@@ -377,6 +377,8 @@ class MainWindow(QMainWindow):
                         self.sample_native_biome)
         self.add_action(edit_menu, "Paint sampled biome to selection (quart cells)…", "",
                         self.paint_sampled_biome)
+        self.add_action(edit_menu, "Find exact native biome in selection…", "",
+                        self.find_native_biomes)
         self.add_action(edit_menu, "Copy selection", "Ctrl+C", self.copy)
         self.add_action(edit_menu, "Copy with BE NBT (experimental)…", "", self.copy_with_be)
         self.add_action(edit_menu, "Paste with BE NBT (experimental)…", "", self.paste_with_be)
@@ -1901,6 +1903,150 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.No)
         if result == QMessageBox.StandardButton.Yes:
             self._perform(lambda: self.session.paint_biome_box(box, name))
+
+    def _go_to_biome_quart(self, point):
+        """Navigate to, but never modify, the matched native 4x4x4 cell."""
+        from .biome_edit import quart_origin
+        origin = quart_origin(tuple(point))
+        if origin != tuple(point):
+            raise ValueError("Biome find returned an unaligned quart location")
+        # Navigation is 2D. Set Y first because set_y clears active selection.
+        if self.view_mode.currentIndex() != 0:
+            self.view_mode.setCurrentIndex(0)
+        self.y_spin.setValue(origin[1] + 1)
+        for view in (self.slice_view, self.volume_view):
+            if view is not None:
+                view.center_x = origin[0] + 1
+                view.center_z = origin[2] + 1
+        # Selecting precisely the returned quart cell makes the navigation
+        # result useful for follow-up guarded biome editing and inspection.
+        target = (origin[0] + 3, origin[1] + 3, origin[2] + 3)
+        self.select_coordinates(origin, target)
+        self.slice_view.invalidate_biome_overlay()
+        self.slice_view.update()
+        self.statusBar().showMessage(
+            f"Located native 4×4×4 biome quart cell at {origin} (read only)")
+
+    def find_native_biomes(self):
+        """Search exact original/modded biome IDs in a bounded 3D selection."""
+        if self.world is None or self.session is None:
+            QMessageBox.information(
+                self, "Find native biome", "Open a Java world first.")
+            return
+        if self.world.legacy or self.world.is_mcregion or self.world.version < 2865:
+            QMessageBox.information(
+                self, "Find native biome",
+                "Exact native biome find requires original Java 1.18+ Anvil.")
+            return
+        # No selection means one existing chunk at the current viewing Y,
+        # never an unbounded world scan or generation of distant chunks.
+        if self.view.selection is None:
+            cx, cz = self.view.center_x >> 4, self.view.center_z >> 4
+            y = self.y_spin.value()
+            box = Box((cx * 16, y, cz * 16),
+                      (cx * 16 + 15, y, cz * 16 + 15))
+            scope = f"Current chunk ({cx}, {cz}) at Y={y}"
+        else:
+            box = self._box()
+            scope = f"Selected 3D region {box.minimum} to {box.maximum}"
+        sample = self._sampled_native_biome
+        default_id = (sample[1] if sample is not None
+                      and sample[0] is self.world else "minecraft:plains")
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Find native Java 1.18+ biome")
+        form = QFormLayout(dialog)
+        name_field = QLineEdit(default_id, dialog)
+        name_field.setObjectName("find_native_biome_name")
+        name_field.setToolTip(
+            "Exact namespaced ID; no wildcard, ID mapping or DataFixer")
+        form.addRow("Exact biome ID", name_field)
+        use_staged = QCheckBox("Include staged unsaved biome edits", dialog)
+        use_staged.setChecked(True)
+        form.addRow(use_staged)
+        scope_info = QLabel(
+            scope + ". Search caps: 32 chunks / 8192 quart cells.", dialog)
+        scope_info.setWordWrap(True)
+        form.addRow(scope_info)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel, dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        from .biome_search import find_biomes
+        try:
+            result = find_biomes(
+                self.world, box.minimum, box.maximum,
+                name_field.text().strip(),
+                include_staged=use_staged.isChecked())
+        except Exception as exc:
+            QMessageBox.warning(self, "Native biome find refused", str(exc))
+            return
+        from PySide6.QtWidgets import QListWidget, QPlainTextEdit
+        viewer = QDialog(self)
+        viewer.resize(780, 580)
+        viewer.setWindowTitle(
+            f"Native biome find — {result.matching_cells} matches"
+            + (" (PARTIAL)" if not result.complete else ""))
+        layout = QVBoxLayout(viewer)
+        summary = QLabel(
+            f"Exact matches: {result.matching_cells:,}; listed: "
+            f"{len(result.matches)}; scanned: {result.scanned_cells:,}/"
+            f"{result.search_cells:,} native quart cells. "
+            + ("INCOMPLETE: unreadable source chunks/sections; "
+               "do not infer absent biomes."
+               if not result.complete else "Complete within specified scope."),
+            viewer)
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+        hit_list = QListWidget(viewer)
+        hit_list.setObjectName("native_biome_search_results")
+        for match in result.matches:
+            x, y, z = match.point
+            hit_list.addItem(
+                f"X={x}, Y={y}, Z={z}    "
+                + ("[STAGED]" if match.staged else "[ORIGINAL]"))
+            hit_list.item(hit_list.count() - 1).setData(
+                Qt.ItemDataRole.UserRole, match.point)
+        layout.addWidget(hit_list)
+        diagnostics = QPlainTextEdit(viewer)
+        diagnostics.setReadOnly(True)
+        diagnostics.setObjectName("native_biome_search_report")
+        diagnostics.setPlainText(result.report())
+        layout.addWidget(diagnostics)
+        actions = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Close, viewer)
+        goto_button = actions.addButton(
+            "Go to selected quart cell",
+            QDialogButtonBox.ButtonRole.ActionRole)
+        goto_button.setEnabled(bool(result.matches))
+        def navigate():
+            item = hit_list.currentItem()
+            if item is None:
+                return
+            if self.world is not world_at_search:
+                QMessageBox.warning(
+                    viewer, "Biome navigation",
+                    "World/dimension changed; search result no longer valid.")
+                return
+            try:
+                self._go_to_biome_quart(item.data(Qt.ItemDataRole.UserRole))
+            except Exception as exc:
+                QMessageBox.warning(viewer, "Biome navigation refused", str(exc))
+                return
+            viewer.accept()
+        world_at_search = self.world
+        goto_button.clicked.connect(navigate)
+        hit_list.itemDoubleClicked.connect(lambda item: navigate())
+        copy_button = actions.addButton(
+            "Copy report", QDialogButtonBox.ButtonRole.ActionRole)
+        copy_button.clicked.connect(
+            lambda: QApplication.clipboard().setText(diagnostics.toPlainText()))
+        actions.rejected.connect(viewer.accept)
+        layout.addWidget(actions)
+        viewer.exec()
 
     def inspect_original_biomes(self):
         """Inspect stored Java biome palette/IDs at the displayed slice Y."""
