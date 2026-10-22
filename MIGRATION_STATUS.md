@@ -2481,3 +2481,58 @@ biome registry/data-pack validation, unbounded entire-world indexing,
 Tests are committed as source, not reported as passing a full
 Windows/Qt/Minecraft version matrix. Stay on Draft PR #1,
 `python3-modern-editor`; `master` unchanged.
+
+## 0.3.0a63 — Explicit original Java Block Entity structure transfer (experimental)
+
+Closes a substantial GUI parity gap: previously the generic `.nbt` /
+`.schem` / `.schematic` structure exporters correctly **refused** any
+selection with Block Entity NBT. Instead of weakening their lossless
+protection or silently stripping modded machines, this increment adds
+a **separate, clearly marked MCEdit2 original-BE transfer workflow**
+(`structure_be.py`). Vanilla/Sponge/classic block-only import/export
+defaults and their BE refusal behavior remain unchanged.
+
+- Qt6 File menu provides **Export selection with original BE NBT**
+  and **Import original BE transfer**; both are explicit expert actions
+  with irreversible modded machine/UUID ownership reference warnings.
+  Export produces a gzip Java-structure-shaped `.nbt` with an
+  `MCEdit2Transfer` marker and the exact source absolute origin.
+  This app-specific transfer file is **NOT promised** to work as a
+  generic Minecraft vanilla template and should not be used as one.
+  Only the dedicated importer accepts its exact marker; generic
+  structure NBT containing BE still refuses through its old path.
+- Source block states use the existing bounded `structure_io` codec.
+  Original BE Compounds are attached to each corresponding block under
+  `nbt` with **raw opaque original bytes**, not deserialized and
+  reconstructed field-by-field. Preserves unknown/modded inventories,
+  energy, capability tags, owners, UUIDs and custom fields unchanged.
+  Strict limits: **32,768 blocks**, **512 BE records**, **8 MiB total
+  BE payload**, plus existing NBT/compressed file size caps.
+  The writer verifies a full decode/encode roundtrip before atomically
+  replacing the export file.
+- Dedicated importer requires an **exact target DataVersion**, native
+  named Anvil and existing target chunks/sections, rechecks all target
+  positions and validates the original source coordinate-bound BE
+  payload. Only the BE Compound's **three root TAG_Int x/y/z tags**
+  are relocated, retaining every other byte. Any preexisting target BE
+  aborts import. Entire target selection is preflighted before staging;
+  successful transfers are a **single undoable transaction** backed by
+  the existing original-Region save/backup/revalidation/rollback path.
+- **Critical semantic limit:** Modded links, block/network references,
+  owner/identity/UUID fields, inventories, and multiblock machine
+  semantics are *not remapped or validated*. Copying unique modded
+  machines may duplicate content or break links. Use disposable
+  offline worlds only. There is no silent cross-version DataFixer.
+- New `tests/test_structure_be.py` source regressions specify byte-exact
+  BE transfer and opaque content preservation, marked-format refusal
+  for generic import, gzip file roundtrip, existing target BE rejection,
+  exact DataVersion validation, missing target section/chunk rejection,
+  a mixed target-cross-chunk atomic refusal, original region backups,
+  post-save Undo and save/reopen preservation of original BE coordinates.
+
+**Remaining:** vanilla/Sponge/native external BE import compatibility,
+general BE link/UUID rewriting, comprehensive real modded-machine tests,
+Bedrock support, unrestricted entity structures and original GUI feature
+parity. This is an explicitly opt-in experimental operation; runtime
+Qt/Windows/Minecraft-version full testing is deferred. Keep Draft PR #1
+on `python3-modern-editor`; no new PR and no `master` changes.

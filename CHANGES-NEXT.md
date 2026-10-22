@@ -777,3 +777,22 @@ available and is not automatically replaced.
   and selects the exact quart cell; no biome NBT or blocks are written.
 - Added native regression and offscreen Qt test **source**; full runtime
   test matrix remains deferred.
+
+## 0.3.0a63 — Lossless marked Java BE structure export/import
+
+- New app-specific marked `.nbt` original Block Entity structure
+  transfer alongside the existing fail-closed block-only import/export.
+  Direct export embeds original opaque BE Compound bytes under the
+  corresponding source block and validates exact byte roundtrip.
+- Separate Qt6 File-menu actions explicitly confirm risks; import
+  requires exact source/target DataVersion, valid original coordinates,
+  preexisting destination chunks/sections and no destination BE.
+  Only NBT root x/y/z are adjusted; unknown modded fields are untouched.
+  Maximum 512 BE records and 8 MiB of raw payload per transfer.
+- Import is one preflighted undoable original-native write transaction,
+  saved with existing complete original-region backups. No registry
+  remapping, external mod machine link repair, UUID remapping or
+  cross-version conversion is claimed.
+- Synthetic regressions added as **source** for BE byte preservation,
+  disk roundtrip, save/reopen, Undo and atomic refusal on missing
+  target data. Full real-world/Qt/Windows runtime testing deferred.

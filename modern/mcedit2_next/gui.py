@@ -348,9 +348,13 @@ class MainWindow(QMainWindow):
                 lambda checked=False, code=language: self.set_language(code))
         self.add_action(file_menu, "Open world…", "Ctrl+O", self.open_world)
         self.add_action(file_menu, "Import structure (.nbt / .schem / .schematic)…", "", self.import_structure)
+        self.add_action(file_menu, "Import original BE transfer (.nbt; expert)…", "",
+                        self.import_be_transfer)
         self.add_action(file_menu, "Queue structures for later placement…", "",
                         self.show_pending_imports)
         self.add_action(file_menu, "Export selected structure (.nbt / .schem / .schematic)…", "", self.export_structure)
+        self.add_action(file_menu, "Export selection with original BE NBT (.nbt; expert)…", "",
+                        self.export_be_transfer)
         self.add_action(file_menu, "Save…", "Ctrl+S", self.save_world)
         self.add_action(file_menu, "Inspect pending lighting / heightmap impact (read-only)…", "",
                         self.inspect_derived_impact)
@@ -1618,6 +1622,84 @@ class MainWindow(QMainWindow):
                 f"Exported {len(structure.blocks)} block states, without BE/entities")
         except Exception as exc:
             QMessageBox.critical(self, "Export failed", str(exc))
+
+    def export_be_transfer(self):
+        """Explicit original-format structure export including opaque BE NBT."""
+        if self.session is None or self.world is None or self.view.selection is None:
+            QMessageBox.information(
+                self, "Original BE structure transfer",
+                "Open a Java world and select a bounded 3D region first.")
+            return
+        warning = (
+            "EXPERIMENTAL original BE export. This creates a marked "
+            "MCEdit2-specific .nbt structure containing ORIGINAL absolute "
+            "source x/y/z and all unknown/modded BE NBT bytes. "
+            "This is not a generic vanilla structure file or automatic "
+            "machine/UUID transfer format. It is intended for explicit "
+            "same-DataVersion editor imports on disposable OFFLINE worlds. "
+            "Do not share as an ordinary vanilla structure template. "
+            "Continue?")
+        answer = QMessageBox.warning(
+            self, "Export original Block Entity NBT", warning,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Export original BE transfer",
+            "original-be-transfer.nbt", "MCEdit2 original BE transfer (*.nbt)")
+        if not filename:
+            return
+        try:
+            from .structure_be import capture_be_transfer, save_be_transfer
+            transfer = capture_be_transfer(
+                self.world, self._box(), self.session.max_blocks)
+            save_be_transfer(filename, transfer)
+            self.statusBar().showMessage(
+                f"Exported original BE transfer: {transfer.summary()}. "
+                "No world NBT modified.")
+        except Exception as exc:
+            QMessageBox.critical(self, "Original BE export refused", str(exc))
+
+    def import_be_transfer(self):
+        """Import only own marked BE transfer, never an arbitrary BE structure."""
+        if self.session is None or self.world is None:
+            QMessageBox.information(
+                self, "Original BE transfer", "Open a Java world first.")
+            return
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Import marked MCEdit2 original BE transfer", "",
+            "MCEdit2 original BE transfer (*.nbt)")
+        if not filename:
+            return
+        try:
+            from .structure_be import load_be_transfer, place_be_transfer
+            transfer = load_be_transfer(filename)
+            origin = (self._box().minimum if self.view.selection else
+                      (self.view.center_x, self.y_spin.value(),
+                       self.view.center_z))
+            warning = (
+                f"EXPERIMENTAL transfer of {transfer.summary()}. "
+                f"Target origin: {origin}. The editor will change ONLY "
+                "BE root x/y/z coordinates. It will NOT rewrite modded "
+                "machine links, owners, energy networks, inventories, "
+                "UUIDs or other internal/absolute references. This can "
+                "duplicate unique controllers/items and produce broken "
+                "machines. Existing destination BE records can NEVER "
+                "be overwritten; every target Section must already "
+                "exist and DataVersion MUST exactly match. "
+                "An ordinary native Save still requires a separate "
+                "confirmation and backs up region files. "
+                "Operate only on a disposable OFFLINE copy. Import?")
+            answer = QMessageBox.warning(
+                self, "Explicit original BE import — high risk", warning,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer == QMessageBox.StandardButton.Yes:
+                self._perform(
+                    lambda: place_be_transfer(self.session, transfer, origin))
+        except Exception as exc:
+            QMessageBox.critical(self, "Original BE import refused", str(exc))
 
     def open_world(self):
         folder = QFileDialog.getExistingDirectory(self, "Choose a world folder")
