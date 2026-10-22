@@ -1173,7 +1173,9 @@ class MainWindow(QMainWindow):
         """Replace the bounded wireframe and optional full-cube ghost."""
         from .clone_ghost_voxels import MAX_GHOST_VOXELS
         blocks = {}
-        note = "Wireframe only."
+        note = ("Destination-air-only mask: wireframe only; occupancy "
+                "is checked on Apply, not inferred by this preview."
+                if plan.only_replace_air else "Wireframe only.")
         if originals is not None and plan.planned_cells <= MAX_GHOST_VOXELS:
             try:
                 blocks = self._project_clone_preview_voxels(
@@ -1274,7 +1276,8 @@ class MainWindow(QMainWindow):
 
     def show_clone_wireframe_preview(self, mode, offset, repetitions,
                                      *, orientation=None, scale=(1, 1, 1),
-                                     placement=(0, 0, 0), skip_air=False):
+                                     placement=(0, 0, 0), skip_air=False,
+                                     only_replace_air=False):
         """Compute a bounded, read-only geometry preview in the 3D viewport."""
         if self.session is None or self.view.selection is None:
             raise ValueError("Open an offline world and select a 3D region first")
@@ -1284,7 +1287,7 @@ class MainWindow(QMainWindow):
             original_box, mode, offset, repetitions,
             orientation=orientation, scale=scale,
             max_blocks=self.session.max_blocks, placement=placement,
-            skip_air=skip_air)
+            skip_air=skip_air, only_replace_air=only_replace_air)
         # View switching may fail without a supported OpenGL context.
         # Never keep a half-created preview in that case.
         if self.view_mode.currentIndex() != 1:
@@ -1298,7 +1301,7 @@ class MainWindow(QMainWindow):
         )
         originals = None
         reason = None
-        if plan.planned_cells <= MAX_GHOST_VOXELS:
+        if not plan.only_replace_air and plan.planned_cells <= MAX_GHOST_VOXELS:
             try:
                 originals = snapshot_clone_states(
                     self.session, original_box)
@@ -1338,28 +1341,34 @@ class MainWindow(QMainWindow):
                 effective = tuple(
                     plan.offset[i] + plan.placement[i] for i in range(3))
                 count = session.clone_box(
-                    original, effective, skip_air=plan.skip_air)
+                    original, effective, skip_air=plan.skip_air,
+                    only_replace_air=plan.only_replace_air)
             elif plan.mode == "repeat":
                 count = session.clone_box_repeated(
                     original, plan.offset, plan.repetitions,
-                    placement=plan.placement, skip_air=plan.skip_air)
+                    placement=plan.placement, skip_air=plan.skip_air,
+                    only_replace_air=plan.only_replace_air)
             elif plan.mode == "transformed":
                 count = session.clone_box_transformed(
                     original, plan.offset, plan.orientation, plan.repetitions,
-                    placement=plan.placement, skip_air=plan.skip_air)
+                    placement=plan.placement, skip_air=plan.skip_air,
+                    only_replace_air=plan.only_replace_air)
             elif plan.mode == "oriented_scaled":
                 count = session.clone_box_oriented_scaled(
                     original, plan.offset, plan.orientation,
                     plan.scale, plan.repetitions, placement=plan.placement,
-                    skip_air=plan.skip_air)
+                    skip_air=plan.skip_air,
+                    only_replace_air=plan.only_replace_air)
             elif plan.mode == "scaled":
                 count = session.clone_box_scaled(
                     original, plan.offset, plan.scale, plan.repetitions,
-                    placement=plan.placement, skip_air=plan.skip_air)
+                    placement=plan.placement, skip_air=plan.skip_air,
+                    only_replace_air=plan.only_replace_air)
             elif plan.mode == "reduced":
                 count = session.clone_box_reduced(
                     original, plan.offset, plan.scale, plan.repetitions,
-                    placement=plan.placement, skip_air=plan.skip_air)
+                    placement=plan.placement, skip_air=plan.skip_air,
+                    only_replace_air=plan.only_replace_air)
             else:
                 raise ValueError("Unsupported clone preview mode")
             # Only remove the preview AFTER the EditSession successfully
@@ -1989,16 +1998,18 @@ class MainWindow(QMainWindow):
             return None
         return tuple(spin.value() for spin in controls)
 
-    def clone_selection(self, *, skip_air=False):
+    def clone_selection(self, *, skip_air=False, only_replace_air=False):
         title = ("Clone selection without source air…" if skip_air
                  else "Clone selection by offset…")
         offset = self._selection_offset(title)
         if offset is None:
             return
         self._perform(lambda: self.session.clone_box(
-            self._box(), offset, skip_air=skip_air))
+            self._box(), offset, skip_air=skip_air,
+            only_replace_air=only_replace_air))
 
-    def repeat_clone_selection(self, repetitions=None, *, skip_air=False):
+    def repeat_clone_selection(self, repetitions=None, *, skip_air=False,
+                               only_replace_air=False):
         """CloneTool-style repetition from the menu or the persistent dock."""
         offset = self._selection_offset("Repeat clone / tile selection…")
         if offset is None:
@@ -2017,10 +2028,12 @@ class MainWindow(QMainWindow):
             if not ok:
                 return
         self._perform(lambda: self.session.clone_box_repeated(
-            self._box(), offset, repetitions, skip_air=skip_air))
+            self._box(), offset, repetitions, skip_air=skip_air,
+            only_replace_air=only_replace_air))
 
     def clone_selection_transformed(self, operation=None, repetitions=None,
-                                    *, skip_air=False):
+                                    *, skip_air=False,
+                                    only_replace_air=False):
         """Clone an oriented native selection using verified vanilla/old IDs."""
         offset = self._selection_offset("Clone rotated / mirrored selection…")
         if offset is None:
@@ -2056,10 +2069,12 @@ class MainWindow(QMainWindow):
                 return
         self._perform(lambda: self.session.clone_box_transformed(
             self._box(), offset, operation, repetitions,
-            skip_air=skip_air))
+            skip_air=skip_air,
+            only_replace_air=only_replace_air))
 
     def clone_selection_scaled(self, scale=None, repetitions=None,
-                               *, skip_air=False):
+                               *, skip_air=False,
+                               only_replace_air=False):
         """Bounded original-state scaled clone, including geometry preview.
 
         The dialog previews destination coordinates and operation size only;
@@ -2094,6 +2109,10 @@ class MainWindow(QMainWindow):
         mask_air.setObjectName("clone_scale_skip_air")
         mask_air.setChecked(skip_air)
         form.addRow(mask_air)
+        target_air = QCheckBox("Paste only into exact vanilla destination air", dialog)
+        target_air.setObjectName("clone_scale_only_target_air")
+        target_air.setChecked(only_replace_air)
+        form.addRow(target_air)
         preview = QLabel(dialog)
         preview.setObjectName("clone_scale_geometry_preview")
         preview.setWordWrap(True)
@@ -2140,9 +2159,11 @@ class MainWindow(QMainWindow):
         factors = tuple(control.value() for control in controls)
         self._perform(lambda: self.session.clone_box_scaled(
             self._box(), offset, factors, copies.value(),
-            skip_air=mask_air.isChecked()))
+            skip_air=mask_air.isChecked(),
+            only_replace_air=target_air.isChecked()))
 
-    def clone_selection_oriented_scaled(self, *, skip_air=False):
+    def clone_selection_oriented_scaled(self, *, skip_air=False,
+                                        only_replace_air=False):
         """Compose verified horizontal orientation and integer XYZ expansion.
 
         The geometry preview is read-only and cannot certify target
@@ -2189,6 +2210,10 @@ class MainWindow(QMainWindow):
         mask_air.setObjectName("clone_oriented_scaled_skip_air")
         mask_air.setChecked(skip_air)
         form.addRow(mask_air)
+        target_air = QCheckBox("Paste only into exact vanilla destination air", dialog)
+        target_air.setObjectName("clone_oriented_scaled_only_target_air")
+        target_air.setChecked(only_replace_air)
+        form.addRow(target_air)
         preview = QLabel(dialog)
         preview.setWordWrap(True)
         preview.setObjectName("clone_oriented_scaled_plan")
@@ -2236,10 +2261,12 @@ class MainWindow(QMainWindow):
         op = orientation.currentData()
         self._perform(lambda: self.session.clone_box_oriented_scaled(
             self._box(), offset, op, factors, copies.value(),
-            skip_air=mask_air.isChecked()))
+            skip_air=mask_air.isChecked(),
+            only_replace_air=target_air.isChecked()))
 
     def clone_selection_reduced(self, divisors=None, repetitions=None,
-                                *, skip_air=False):
+                                *, skip_air=False,
+                                only_replace_air=False):
         """Nearest-neighbour integer downscale from original native states."""
         if self.session is None or self.view.selection is None:
             QMessageBox.information(
@@ -2271,6 +2298,10 @@ class MainWindow(QMainWindow):
         mask_air.setObjectName("clone_reduce_skip_air")
         mask_air.setChecked(skip_air)
         form.addRow(mask_air)
+        target_air = QCheckBox("Paste only into exact vanilla destination air", dialog)
+        target_air.setObjectName("clone_reduce_only_target_air")
+        target_air.setChecked(only_replace_air)
+        form.addRow(target_air)
         preview = QLabel(dialog)
         preview.setObjectName("clone_reduce_geometry_preview")
         preview.setWordWrap(True)
@@ -2316,7 +2347,8 @@ class MainWindow(QMainWindow):
         self._perform(lambda: self.session.clone_box_reduced(
             self._box(), offset,
             tuple(field.value() for field in fields),
-            copies.value(), skip_air=mask_air.isChecked()))
+            copies.value(), skip_air=mask_air.isChecked(),
+            only_replace_air=target_air.isChecked()))
 
     def move_selection(self):
         offset = self._selection_offset("Move selection by offset…")

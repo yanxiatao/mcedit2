@@ -697,3 +697,20 @@ available and is not automatically replaced.
   original BE/unknown NBT retention, preview fidelity, rejection,
   grouped Undo/Redo and native save/reopen. Full runtime tests remain
   deferred.
+
+## 0.3.0a58 — Destination-air-only Clone Tool writes
+
+- Added an independent **paste into target air only** mask to
+  unrotated, repeated, rotated/mirrored, scaled, reduced and
+  rotated-scaled native Clone Tool operations; source-air masking
+  continues to work alongside it.
+- Frozen original target states determine writable cells, even
+  when source and destination or repeated stamps overlap. Masked
+  occupied target cells and their original BE/unknown NBT are never
+  edited. All retained write targets still get BE/section/ID
+  preflight, with a single grouped Undo/Redo record.
+- Qt6 Tool Palette and clone dialogs expose the option. 3D plans
+  retain the flag; Apply revalidates, but masked previews are only
+  wireframe outlines, not speculative occupancy-aware voxel ghosts.
+- Added native exact-air/BE/overlap/Anvil byte-preservation and
+  regression test source. Full CI and real-world builds deferred.

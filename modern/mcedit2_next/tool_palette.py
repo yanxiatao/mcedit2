@@ -170,6 +170,16 @@ class ToolPaletteDock(QDockWidget):
             "positions are still checked; applies to rotated, scaled, "
             "reduced and 3D preview/apply modes.")
         clone_form.addRow(self.skip_source_air)
+        self.only_replace_air = QCheckBox(
+            "Paste only into exact vanilla destination air (all clones)", clone_group)
+        self.only_replace_air.setObjectName("tool_palette_clone_only_replace_air")
+        self.only_replace_air.setToolTip(
+            "Preserve every occupied destination block. Only air, cave_air "
+            "or void_air with no BlockState properties accepts source blocks. "
+            "The destination test uses the native world state BEFORE edits. "
+            "Source Block Entities remain protected. Preview is wireframe-only "
+            "because target occupancy can change before Apply.")
+        clone_form.addRow(self.only_replace_air)
         self.clone_orientation = QComboBox(clone_group)
         self.clone_orientation.setObjectName("tool_palette_clone_orientation")
         for label, operation in (
@@ -290,6 +300,8 @@ class ToolPaletteDock(QDockWidget):
                 widget.valueChanged.connect(
                     lambda _value: self.clear_clone_preview())
         self.skip_source_air.toggled.connect(
+            lambda _checked: self.clear_clone_preview())
+        self.only_replace_air.toggled.connect(
             lambda _checked: self.clear_clone_preview())
 
         transform_group = QGroupBox("Selection bounds · no block edits", root)
@@ -489,7 +501,9 @@ class ToolPaletteDock(QDockWidget):
             f"{plan.planned_cells:,} planned cells. "
             f"First copy: {plan.boxes[0][0]} → {plan.boxes[0][1]}. "
             f"Step: {plan.offset}. Group position: {plan.placement}. "
-            "Cyan = earlier copies, green = last. "
+            + ("Only original target air will be written; wireframe only. "
+               if plan.only_replace_air else "")
+            + "Cyan = earlier copies, green = last. "
             "All previews are read-only; Apply performs native preflight. "
             + self.editor._clone_preview_visual_note)
 
@@ -499,7 +513,8 @@ class ToolPaletteDock(QDockWidget):
                 self._clone_preview_parameters())
             plan = self.editor.show_clone_wireframe_preview(
                 mode, offset, copies, orientation=orientation, scale=scale,
-                placement=placement, skip_air=self.skip_source_air.isChecked())
+                placement=placement, skip_air=self.skip_source_air.isChecked(),
+                only_replace_air=self.only_replace_air.isChecked())
             if plan is None:
                 return
             self.set_clone_preview_summary(plan)
@@ -543,30 +558,36 @@ class ToolPaletteDock(QDockWidget):
                     self.sphere_hollow.isChecked()))
             elif action == "clone_selection":
                 self.editor.clone_selection(
-                    skip_air=self.skip_source_air.isChecked())
+                    skip_air=self.skip_source_air.isChecked(),
+                    only_replace_air=self.only_replace_air.isChecked())
             elif action == "repeat_clone_selection":
                 self.editor.repeat_clone_selection(
                     self.repeat_count.value(),
-                    skip_air=self.skip_source_air.isChecked())
+                    skip_air=self.skip_source_air.isChecked(),
+                    only_replace_air=self.only_replace_air.isChecked())
             elif action == "clone_selection_transformed":
                 self.editor.clone_selection_transformed(
                     self.clone_orientation.currentData(), self.repeat_count.value(),
-                    skip_air=self.skip_source_air.isChecked())
+                    skip_air=self.skip_source_air.isChecked(),
+                    only_replace_air=self.only_replace_air.isChecked())
             elif action == "clone_selection_scaled":
                 factors = tuple(self.scale_factors[axis].value()
                                 for axis in ("x", "y", "z"))
                 self.editor.clone_selection_scaled(
                     factors, self.repeat_count.value(),
-                    skip_air=self.skip_source_air.isChecked())
+                    skip_air=self.skip_source_air.isChecked(),
+                    only_replace_air=self.only_replace_air.isChecked())
             elif action == "clone_selection_reduced":
                 divisors = tuple(self.reduce_divisors[axis].value()
                                  for axis in ("x", "y", "z"))
                 self.editor.clone_selection_reduced(
                     divisors, self.repeat_count.value(),
-                    skip_air=self.skip_source_air.isChecked())
+                    skip_air=self.skip_source_air.isChecked(),
+                    only_replace_air=self.only_replace_air.isChecked())
             elif action == "clone_selection_oriented_scaled":
                 self.editor.clone_selection_oriented_scaled(
-                    skip_air=self.skip_source_air.isChecked())
+                    skip_air=self.skip_source_air.isChecked(),
+                    only_replace_air=self.only_replace_air.isChecked())
             elif action == "rotate_clockwise":
                 self.editor.transform_selection("clockwise")
             elif action == "rotate_half_turn":

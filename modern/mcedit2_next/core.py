@@ -489,8 +489,29 @@ class EditSession:
                         f"Block entity at {point}; clone/move are block-only. "
                         "Use an explicit BE-aware tool after checking mod links.")
 
+    def _guard_clone_destinations(self, targets, *, only_replace_air: bool):
+        """Select native target cells BEFORE writing and protect actual writes.
+
+        Later copy stamps do not make an occupied destination eligible: the
+        mask sees the frozen destination state after all stamps are planned
+        and before the first original world mutation. Skipped coordinates
+        remain entirely untouched, including their opaque Block Entity NBT.
+        """
+        if type(only_replace_air) is not bool:
+            raise ValueError("Clone destination-air mask must be Boolean")
+        from .clone_mask import is_vanilla_source_air
+        entries = targets.items() if isinstance(targets, dict) else targets
+        selected = [
+            (point, state) for point, state in entries
+            if not only_replace_air
+            or is_vanilla_source_air(self.world.get_block(*point))
+        ]
+        self._ensure_block_only(point for point, _ in selected)
+        return selected
+
     def clone_box(self, box: Box, offset: Position, *,
-                  skip_air: bool = False) -> int:
+                  skip_air: bool = False,
+                  only_replace_air: bool = False) -> int:
         """Clone a selection by a fixed offset without changing blockstates.
 
         The source is fully captured before any modification, including for
@@ -514,13 +535,14 @@ class EditSession:
         ]
         # Only actual writes require destination BE checks. A protected BE
         # underneath a skipped air source position is left unchanged.
-        self._ensure_block_only(point for point, _ in targets)
-        return self._commit(targets)
+        return self._commit(self._guard_clone_destinations(
+            targets, only_replace_air=only_replace_air))
 
     def clone_box_repeated(self, box: Box, offset: Position,
                            repetitions: int, *,
                            placement: Position = (0, 0, 0),
-                           skip_air: bool = False) -> int:
+                           skip_air: bool = False,
+                           only_replace_air: bool = False) -> int:
         """Tile an original block-only snapshot at consecutive step offsets.
 
         Corresponds to MCEdit2 CloneTool's repeat/tiling workflow. Each
@@ -563,13 +585,14 @@ class EditSession:
                 # Keys are unique; later stamps take precedence. A target
                 # may overlap the source, but the snapshot cannot cascade.
                 destinations[(x + ox, y + oy, z + oz)] = state
-        self._ensure_block_only(destinations)
-        return self._commit(list(destinations.items()))
+        return self._commit(self._guard_clone_destinations(
+            destinations, only_replace_air=only_replace_air))
 
     def clone_box_transformed(self, box: Box, offset: Position,
                               operation: str, repetitions: int = 1, *,
                               placement: Position = (0, 0, 0),
-                              skip_air: bool = False) -> int:
+                              skip_air: bool = False,
+                              only_replace_air: bool = False) -> int:
         """Clone rotated/mirrored native block states without changing source.
 
         The transform is evaluated against ONE snapshot of the original
@@ -621,16 +644,17 @@ class EditSession:
                 destinations[position] = state
         # Refuse any original protected BE in source or any target,
         # even when the changed state otherwise equals the original.
-        self._ensure_block_only(destinations)
         # _commit preflights all changed target coordinates before staging,
         # and keeps one before/after entry for every unique target point.
-        return self._commit(list(destinations.items()))
+        return self._commit(self._guard_clone_destinations(
+            destinations, only_replace_air=only_replace_air))
 
     def clone_box_scaled(self, box: Box, offset: Position,
                          scale: tuple[int, int, int],
                          repetitions: int = 1, *,
                          placement: Position = (0, 0, 0),
-                         skip_air: bool = False) -> int:
+                         skip_air: bool = False,
+                         only_replace_air: bool = False) -> int:
         """Nearest-neighbour integer-scale clone from one original snapshot.
 
         This is a conservative block-only operation: no BE/entity payloads
@@ -674,16 +698,17 @@ class EditSession:
                             # Later stamps win on overlap. Duplicate target
                             # coordinates cannot corrupt the Undo baseline.
                             targets[(tx + ax, ty + ay, tz + az)] = native
-        self._ensure_block_only(targets)
         # _commit validates every changed native target before staging
         # and stores a single before/after pair for each unique coordinate.
-        return self._commit(list(targets.items()))
+        return self._commit(self._guard_clone_destinations(
+            targets, only_replace_air=only_replace_air))
 
     def clone_box_oriented_scaled(self, box: Box, offset: Position,
                                   operation: str, scale: tuple[int, int, int],
                                   repetitions: int = 1, *,
                                   placement: Position = (0, 0, 0),
-                                  skip_air: bool = False) -> int:
+                                  skip_air: bool = False,
+                                  only_replace_air: bool = False) -> int:
         """Right-angle rotate/mirror FIRST, then scale native block states.
 
         Each source cell is decoded and transformed once before stamping.
@@ -732,14 +757,15 @@ class EditSession:
                         for iz in range(sz):
                             # Last stamp wins; one unique undo baseline.
                             targets[(x + ix, y + iy, z + iz)] = state
-        self._ensure_block_only(targets)
-        return self._commit(list(targets.items()))
+        return self._commit(self._guard_clone_destinations(
+            targets, only_replace_air=only_replace_air))
 
     def clone_box_reduced(self, box: Box, offset: Position,
                           divisors: tuple[int, int, int],
                           repetitions: int = 1, *,
                           placement: Position = (0, 0, 0),
-                          skip_air: bool = False) -> int:
+                          skip_air: bool = False,
+                          only_replace_air: bool = False) -> int:
         """Clone a BE-free original selection with XYZ integer downsampling.
 
         Each output cell takes the ORIGINAL state at the low corner of
@@ -778,8 +804,8 @@ class EditSession:
             for rel, native in sampled:
                 target = tuple(origin[i] + rel[i] for i in range(3))
                 targets[target] = native
-        self._ensure_block_only(targets)
-        return self._commit(list(targets.items()))
+        return self._commit(self._guard_clone_destinations(
+            targets, only_replace_air=only_replace_air))
 
     def move_box(self, box: Box, offset: Position, air: Any) -> int:
         """Shift a selection without converting its block states or metadata.

@@ -10,7 +10,7 @@ still exist. This is an engineering checklist rather than a release promise.
 | Desktop editor and menus | Qt6 MainWindow, tool palette, World Info / Players / Chunk / Maps docks, history, minimap, queued imports and searchable Block Picker | Guarded world/player scalar and existing ItemStack edits; native Java filled-map pixel canvas and limited map metadata fields with independent gzip backup/restore; still lacks arbitrary item creation, modded slot editors, accurate modern map colors and original widget parity |
 | 2D and 3D map views | 2D slice; OpenGL 3.3 Section streaming; Java blockstate variant/multipart JSON elements and rotated noncubic meshes while retaining greedy opaque cubes | Per-face translucent sorting, biome-aware fluid tint, animated texture playback, complex mod renderers, entity models, lighting and LOD (level-aware water/lava meshes are approximate) |
 | Camera, picking and selection | Orbit, zoom, 3D ray selection, coordinate jump | Full MCEdit2 camera/navigation/selection widgets |
-| Clone/move, copy, fill, replace, paint and undo | Native offset/repeat/rotate/mirror/scale/rotate-then-scale/reduction with optional exact vanilla-air source masking, rigid-group 3D preview/drag/grid snap with matching transparent BlockState ghosts; protected-BE/native-section preflight, grouped Undo/Redo and original region backups | Complex/fluid ghost model parity, fractional transforms, modded orientation graphs, linked BE/entity movement and persistent history |
+| Clone/move, copy, fill, replace, paint and undo | Native offset/repeat/rotate/mirror/scale/rotate-then-scale/reduction, independent exact-vanilla source-air and destination-air-only masks, rigid-group 3D wireframe/drag/grid snap, source ghosts when compatible; native BE/section preflight, grouped Undo/Redo and original region backups | True occupancy-aware masked 3D voxel preview, complex/fluid model parity, fractional transforms, modded orientation graphs, linked BE/entity moves and persistent history |
 | Java 1.13+ Anvil | Native paletted Sections and guarded region rewrites | Newer codecs, full chunk heightmap/light/biome maintenance and real-world version matrix |
 | Java 1.2–1.12 Anvil (.mca) | Native numeric IDs and metadata in original 16³ Sections | Mod-specific block geometry, lighting/heightmap updates, real-world game fixtures |
 | Java Beta 1.3–1.1 MCRegion (.mcr) | Native XZY 128-height chunks, ID/metadata editing, backup and reopening | Old-style lighting/heightmap recalculation, real-world game fixtures | 
@@ -2253,3 +2253,61 @@ modded multi-element models and fluid faces, crash-atomic cross-region
 persistence. Existing historical a56 documentation describes that
 version's limitation and is superseded by this section. Full CI,
 game-version/Mesa/Qt/Windows packaging tests were not run.
+
+## 0.3.0a58 — Clone Tool destination-only-air placement
+
+Implemented conservative **paste only into destination air** masking for
+the full native block-only Clone Tool path. This is independent of the
+existing **skip original source air** option, so users can combine both.
+
+- `EditSession._guard_clone_destinations` runs *after* each clone mode has
+  snapshotted its entire original source and resolved all stamp overlap,
+  but *before* staging any world mutation. The check reads the current
+  ORIGINAL target BlockState, and keeps a write only when its identity is
+  exactly property-free vanilla `minecraft:air`, `minecraft:cave_air`,
+  or `minecraft:void_air`. Existing named blocks, opaque modded
+  blocks, damaged legacy numeric states, and unknown air-like IDs are
+  not guessed to be empty. True legacy numeric ID 0 with data 0 is
+  already decoded by the native backend as ordinary vanilla air.
+- Six existing native block-only operations accept
+  `only_replace_air=True`: simple clone, repeated tiled clone,
+  rotated/mirrored clone, XYZ integer-scale clone,
+  rotate-then-scale clone and integer-reduction clone. For repeating
+  overlapping stamps, the **last planned stamp wins**, but target
+  eligibility is computed from the pre-write world, never from
+  changes made by another stamp. Staged writes remain deduplicated
+  by location so grouped Undo/Redo restores exact original targets.
+- Original source BE positions are still **all** checked, including
+  ignored source-air positions. A skipped occupied destination is not
+  written and its full original BE NBT is left untouched; every actual
+  native target to be written is still checked against BE conflicts,
+  supported section/ID rules and full session bounds *before* any
+  stage. A fully occupied destination makes a clean zero-change
+  operation, without dirtying the session or creating an Undo entry.
+- The Qt6 Tool Palette adds a persistent **Paste only into exact
+  vanilla destination air** checkbox for all six clone functions,
+  including the 3D preview/apply route. Changing the checkbox
+  invalidates stale previews. Scaled, reduced and rotated+scaled
+  dialogs expose the same option alongside source-air masking.
+- `CloneGhost.only_replace_air` saves the mode in the read-only 3D
+  plan; Apply re-runs native tests using the plan's saved flag.
+  **Destination-masked previews are wireframe-only** because source
+  voxel ghosts cannot prove native destination occupancy and could
+  misleadingly depict writes into filled cells. The selection
+  preview is never an authorization to overwrite blocked positions.
+- Added `tests/test_clone_target_air.py` source regression cases
+  specifying exact vanilla air identity rules, occupied original
+  target/BEs remaining unchanged, source BE rejection, frozen
+  destination occupancy during overlapping repeated stamps,
+  independent source/destination masks, invalid target section
+  preflight/atomicity, all six mode dispatch, preview flag
+  validation, original Anvil modded BE/unknown tag preservation,
+  save/reopen and Undo/Redo after Save.
+
+**Not yet supported:** collision-aware per-voxel 3D native target
+preview, migration of modded BE/Entity reference graphs, full
+legacy original CloneTool rendering/tool parity, arbitrary modded
+air definitions, full version-specific chunk semantics. New tests
+remain source-only and have not been run as complete Qt/Mesa/world
+CI or Windows packaging checks. Work remains only in the existing
+Draft PR #1 / `python3-modern-editor`; `master` is untouched.

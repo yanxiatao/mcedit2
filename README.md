@@ -10,8 +10,13 @@
 > original-format editing, CloneTool-style original-state repeat/tiling,
 > with opt-in **ignore source air** across offset, repeated, rotated,
 > mirrored, scaled, rotate-then-scale and reduced copies; the 3D ghost
-> preview uses the same original-air mask and leaves existing target
-> blocks untouched. Every source Block Entity remains protected,
+> preview uses the same original-air mask and leaves target cells
+> beneath skipped source air unchanged. A separate opt-in **paste only
+> into exact destination air** mode is now available for all six
+> block-only clone paths, retaining occupied native blocks and BE NBT.
+> In this mode the 3D preview uses wireframes only; Apply checks the
+> original destination occupancy and all accepted write targets again.
+> Every source Block Entity remains protected,
 > strict 90°/180°/270° horizontal rotation or X/Z-mirrored copies,
 > plus guarded **Up/Down (Y) mirror** for verified vanilla stairs,
 > slabs, trapdoors and limited original numeric metadata (all unsupported
@@ -73,7 +78,7 @@
 > remains opt-in (Java 1.13+ only).
 > Metadata, ItemStack and map edits commit directly to their original
 > files, separate from region Undo/Redo; nondestructive native entity
-> edits use the region EditSession Undo/Redo. Version 0.3.0a57 has
+> edits use the region EditSession Undo/Redo. Version 0.3.0a58 has
 > not passed the full CI/game-world validation matrix; Windows packaging remains disabled.
 > It is **not yet fully equivalent to the original MCEdit2 editor**. Do not edit live or valuable maps. See the [migration checklist](MIGRATION_STATUS.md) for a feature-by-feature audit. For the
 > compatibility limits, developer instructions and plugin API, see
