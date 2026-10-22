@@ -36,13 +36,16 @@ class CloneGhost:
     planned_cells: int
     boxes: tuple[BoxEdges, ...]
     placement: tuple[int, int, int] = (0, 0, 0)
+    skip_air: bool = False
 
 
 def plan_clone_ghost(box, mode: str, offset, repetitions: int,
                      *, orientation: str | None = None,
                      scale=(1, 1, 1), max_blocks: int = 32768,
-                     placement=(0, 0, 0)) -> CloneGhost:
+                     placement=(0, 0, 0), skip_air: bool = False) -> CloneGhost:
     """Plan all target boxes before reading world state or modifying data."""
+    if type(skip_air) is not bool:
+        raise ValueError("Clone preview source-air mask must be Boolean")
     if mode not in ("offset", "repeat", "transformed", "scaled", "reduced", "oriented_scaled"):
         raise ValueError("Unknown Clone Tool preview mode")
     if (not isinstance(offset, (list, tuple)) or len(offset) != 3 or
@@ -112,7 +115,7 @@ def plan_clone_ghost(box, mode: str, offset, repetitions: int,
     return CloneGhost(
         tuple(box.minimum), tuple(box.maximum), mode, offset,
         repetitions, orientation, tuple(scale), footprint,
-        planned, tuple(boxes), placement)
+        planned, tuple(boxes), placement, skip_air)
 
 
 def first_clone_handle_center(boxes):

@@ -568,7 +568,8 @@ class EditSession:
 
     def clone_box_transformed(self, box: Box, offset: Position,
                               operation: str, repetitions: int = 1, *,
-                              placement: Position = (0, 0, 0)) -> int:
+                              placement: Position = (0, 0, 0),
+                              skip_air: bool = False) -> int:
         """Clone rotated/mirrored native block states without changing source.
 
         The transform is evaluated against ONE snapshot of the original
@@ -579,6 +580,8 @@ class EditSession:
         from .transforms import (
             MOVES, transform_position, transform_state, transformed_size,
         )
+        if type(skip_air) is not bool:
+            raise ValueError("Transformed clone source-air mask must be Boolean")
         dx, dy, dz = self._offset3(offset)
         px, py, pz = self._offset3(placement)
         if operation not in MOVES:
@@ -592,12 +595,15 @@ class EditSession:
         source = tuple(box.points())
         self._ensure_block_only(source)
         legacy = bool(getattr(self.world, "legacy", False))
+        from .clone_mask import is_vanilla_source_air
         transformed = []
         for point in source:
+            original = self.world.get_block(*point)
+            if skip_air and is_vanilla_source_air(original):
+                continue
             relative = tuple(point[axis] - box.minimum[axis] for axis in range(3))
             relative_dst = transform_position(relative, box.size, operation)
-            state = transform_state(
-                self.world.get_block(*point), operation, legacy=legacy)
+            state = transform_state(original, operation, legacy=legacy)
             transformed.append((relative_dst, state))
         size = transformed_size(box.size, operation)
         if any(n <= 0 for n in size):
@@ -623,7 +629,8 @@ class EditSession:
     def clone_box_scaled(self, box: Box, offset: Position,
                          scale: tuple[int, int, int],
                          repetitions: int = 1, *,
-                         placement: Position = (0, 0, 0)) -> int:
+                         placement: Position = (0, 0, 0),
+                         skip_air: bool = False) -> int:
         """Nearest-neighbour integer-scale clone from one original snapshot.
 
         This is a conservative block-only operation: no BE/entity payloads
@@ -636,6 +643,9 @@ class EditSession:
         target are preflighted before any mutation; Undo is one grouped
         operation with each destination recorded exactly once.
         """
+        if type(skip_air) is not bool:
+            raise ValueError("Scaled clone source-air mask must be Boolean")
+        from .clone_mask import is_vanilla_source_air
         from .clone_scaling import plan_scaled_clone
         plan = plan_scaled_clone(
             box, offset, scale, repetitions, self.max_blocks,
@@ -653,6 +663,8 @@ class EditSession:
             base_y = box.minimum[1] + py + stamp * dy
             base_z = box.minimum[2] + pz + stamp * dz
             for (x, y, z), native in zip(source, originals):
+                if skip_air and is_vanilla_source_air(native):
+                    continue
                 tx = base_x + (x - box.minimum[0]) * sx
                 ty = base_y + (y - box.minimum[1]) * sy
                 tz = base_z + (z - box.minimum[2]) * sz
@@ -670,7 +682,8 @@ class EditSession:
     def clone_box_oriented_scaled(self, box: Box, offset: Position,
                                   operation: str, scale: tuple[int, int, int],
                                   repetitions: int = 1, *,
-                                  placement: Position = (0, 0, 0)) -> int:
+                                  placement: Position = (0, 0, 0),
+                                  skip_air: bool = False) -> int:
         """Right-angle rotate/mirror FIRST, then scale native block states.
 
         Each source cell is decoded and transformed once before stamping.
@@ -678,6 +691,9 @@ class EditSession:
         The source remains unchanged except for intentional overlap by
         destinations. No BE or entity payload is copied/transformed.
         """
+        if type(skip_air) is not bool:
+            raise ValueError("Oriented scaled source-air mask must be Boolean")
+        from .clone_mask import is_vanilla_source_air
         from .clone_scaling import plan_oriented_scaled_clone
         from .transforms import transform_position, transform_state
         plan = plan_oriented_scaled_clone(
@@ -688,10 +704,12 @@ class EditSession:
         legacy = bool(getattr(self.world, "legacy", False))
         samples = []
         for point in original_points:
+            original = self.world.get_block(*point)
+            if skip_air and is_vanilla_source_air(original):
+                continue
             rel = tuple(point[i] - box.minimum[i] for i in range(3))
             rotated = transform_position(rel, box.size, operation)
-            state = transform_state(
-                self.world.get_block(*point), operation, legacy=legacy)
+            state = transform_state(original, operation, legacy=legacy)
             samples.append((rotated, state))
         sx, sy, sz = plan.scale
         dx, dy, dz = plan.step
@@ -720,7 +738,8 @@ class EditSession:
     def clone_box_reduced(self, box: Box, offset: Position,
                           divisors: tuple[int, int, int],
                           repetitions: int = 1, *,
-                          placement: Position = (0, 0, 0)) -> int:
+                          placement: Position = (0, 0, 0),
+                          skip_air: bool = False) -> int:
         """Clone a BE-free original selection with XYZ integer downsampling.
 
         Each output cell takes the ORIGINAL state at the low corner of
@@ -728,6 +747,9 @@ class EditSession:
         Scan ALL source cells for protected BEs (not only sampled cells).
         Every destination is preflighted before staging one Undo record.
         """
+        if type(skip_air) is not bool:
+            raise ValueError("Reduced clone source-air mask must be Boolean")
+        from .clone_mask import is_vanilla_source_air
         from .clone_scaling import plan_reduced_clone
         plan = plan_reduced_clone(
             box, offset, divisors, repetitions, self.max_blocks,
@@ -740,9 +762,11 @@ class EditSession:
             rx, ry, rz = (x - box.minimum[0], y - box.minimum[1],
                           z - box.minimum[2])
             if rx % dx == 0 and ry % dy == 0 and rz % dz == 0:
-                sampled.append(((rx // dx, ry // dy, rz // dz),
-                                self.world.get_block(x, y, z)))
-        if len(sampled) != (
+                native = self.world.get_block(x, y, z)
+                if skip_air and is_vanilla_source_air(native):
+                    continue
+                sampled.append(((rx // dx, ry // dy, rz // dz), native))
+        if not skip_air and len(sampled) != (
                 plan.output_size[0] * plan.output_size[1] *
                 plan.output_size[2]):
             raise ValueError("Reduced source snapshot is incomplete")

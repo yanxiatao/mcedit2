@@ -162,13 +162,13 @@ class ToolPaletteDock(QDockWidget):
         self.repeat_count.setValue(2)
         clone_form.addRow("Number of copies", self.repeat_count)
         self.skip_source_air = QCheckBox(
-            "Ignore source air (offset / repeated clone only)", clone_group)
+            "Ignore exact vanilla source air (all block-only clones)", clone_group)
         self.skip_source_air.setObjectName("tool_palette_clone_skip_source_air")
         self.skip_source_air.setToolTip(
             "Skip exact vanilla air/cave_air/void_air source states. "
             "Never edit blocks underneath skipped cells. All source BE "
-            "positions are still checked; does not apply to 3D preview "
-            "or rotated/scaled clone modes.")
+            "positions are still checked; applies to rotated, scaled, "
+            "reduced and 3D preview/apply modes.")
         clone_form.addRow(self.skip_source_air)
         self.clone_orientation = QComboBox(clone_group)
         self.clone_orientation.setObjectName("tool_palette_clone_orientation")
@@ -289,6 +289,8 @@ class ToolPaletteDock(QDockWidget):
             else:
                 widget.valueChanged.connect(
                     lambda _value: self.clear_clone_preview())
+        self.skip_source_air.toggled.connect(
+            lambda _checked: self.clear_clone_preview())
 
         transform_group = QGroupBox("Selection bounds · no block edits", root)
         transform_form = QFormLayout(transform_group)
@@ -497,7 +499,7 @@ class ToolPaletteDock(QDockWidget):
                 self._clone_preview_parameters())
             plan = self.editor.show_clone_wireframe_preview(
                 mode, offset, copies, orientation=orientation, scale=scale,
-                placement=placement)
+                placement=placement, skip_air=self.skip_source_air.isChecked())
             if plan is None:
                 return
             self.set_clone_preview_summary(plan)
@@ -548,17 +550,23 @@ class ToolPaletteDock(QDockWidget):
                     skip_air=self.skip_source_air.isChecked())
             elif action == "clone_selection_transformed":
                 self.editor.clone_selection_transformed(
-                    self.clone_orientation.currentData(), self.repeat_count.value())
+                    self.clone_orientation.currentData(), self.repeat_count.value(),
+                    skip_air=self.skip_source_air.isChecked())
             elif action == "clone_selection_scaled":
                 factors = tuple(self.scale_factors[axis].value()
                                 for axis in ("x", "y", "z"))
                 self.editor.clone_selection_scaled(
-                    factors, self.repeat_count.value())
+                    factors, self.repeat_count.value(),
+                    skip_air=self.skip_source_air.isChecked())
             elif action == "clone_selection_reduced":
                 divisors = tuple(self.reduce_divisors[axis].value()
                                  for axis in ("x", "y", "z"))
                 self.editor.clone_selection_reduced(
-                    divisors, self.repeat_count.value())
+                    divisors, self.repeat_count.value(),
+                    skip_air=self.skip_source_air.isChecked())
+            elif action == "clone_selection_oriented_scaled":
+                self.editor.clone_selection_oriented_scaled(
+                    skip_air=self.skip_source_air.isChecked())
             elif action == "rotate_clockwise":
                 self.editor.transform_selection("clockwise")
             elif action == "rotate_half_turn":

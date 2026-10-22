@@ -9,6 +9,7 @@ from __future__ import annotations
 from .clone_preview import CloneGhost
 from .viewport3d_math import FACES, block_color, is_air
 from .transforms import transform_position, transform_state
+from .clone_mask import is_vanilla_source_air
 
 MAX_GHOST_VOXELS = 2048
 UV = ((0., 0.), (0., 1.), (1., 1.), (1., 0.))
@@ -50,6 +51,11 @@ def project_clone_ghost(box, plan: CloneGhost, originals: tuple,
             box.minimum[i] + plan.placement[i] +
             stamp * plan.offset[i] for i in range(3))
         for original, state in zip(source, originals):
+            # Match the actual session write set: masked original air never
+            # overwrites existing terrain or previous stamps, even when the
+            # rendered ghost currently contains a block at this position.
+            if plan.skip_air and is_vanilla_source_air(state):
+                continue
             relative = tuple(original[i] - box.minimum[i] for i in range(3))
             if plan.mode in ("transformed", "oriented_scaled"):
                 relative = transform_position(

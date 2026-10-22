@@ -677,3 +677,23 @@ available and is not automatically replaced.
 - Added source regression cases for modern Java Anvil/legacy MCRegion,
   exact unknown NBT preservation, refusal/rollback, overlap, and
   original backups. Full test execution deferred.
+
+## 0.3.0a57 — Source-air-transparent rotated/scaled Clone Tool
+
+- The exact vanilla source-air mask now works for rotated/mirrored,
+  integer scaled, rotate-then-scale and downscaled native clones,
+  not just offset/repeated copies. Unknown/modded air-like blocks
+  stay real original states.
+- Masked cells produce no target writes; existing terrain and BEs
+  beneath the skipped position are preserved. Every original source
+  BE is still rejected, including skipped air and unsampled positions.
+- Read-only 3D Clone Tool plans, textured voxel ghosts, drag updates
+  and Apply reuse one explicit transparency flag. Later overlaps
+  cannot erase earlier visible stamp blocks using skipped air.
+- Qt6 unified the tool dock mask across every clone mode, added
+  per-operation scaled/reduced dialog checkboxes and invalidates old
+  previews whenever the option changes.
+- Added source regression specifications for all transformed modes,
+  original BE/unknown NBT retention, preview fidelity, rejection,
+  grouped Undo/Redo and native save/reopen. Full runtime tests remain
+  deferred.

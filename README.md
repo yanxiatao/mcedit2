@@ -8,9 +8,10 @@
 > full-cube textures),
 > a plugin manager, undoable block editing, Java Anvil (.mca) and old MCRegion (.mcr)
 > original-format editing, CloneTool-style original-state repeat/tiling,
-> with opt-in **ignore source air** for direct offset/repeat copies that
-> leaves underlying target blocks untouched and still protects every
-> source Block Entity (not yet used by scaled/rotated or 3D previews),
+> with opt-in **ignore source air** across offset, repeated, rotated,
+> mirrored, scaled, rotate-then-scale and reduced copies; the 3D ghost
+> preview uses the same original-air mask and leaves existing target
+> blocks untouched. Every source Block Entity remains protected,
 > strict 90°/180°/270° horizontal rotation or X/Z-mirrored copies,
 > plus guarded **Up/Down (Y) mirror** for verified vanilla stairs,
 > slabs, trapdoors and limited original numeric metadata (all unsupported
@@ -72,7 +73,7 @@
 > remains opt-in (Java 1.13+ only).
 > Metadata, ItemStack and map edits commit directly to their original
 > files, separate from region Undo/Redo; nondestructive native entity
-> edits use the region EditSession Undo/Redo. Version 0.3.0a56 has
+> edits use the region EditSession Undo/Redo. Version 0.3.0a57 has
 > not passed the full CI/game-world validation matrix; Windows packaging remains disabled.
 > It is **not yet fully equivalent to the original MCEdit2 editor**. Do not edit live or valuable maps. See the [migration checklist](MIGRATION_STATUS.md) for a feature-by-feature audit. For the
 > compatibility limits, developer instructions and plugin API, see
