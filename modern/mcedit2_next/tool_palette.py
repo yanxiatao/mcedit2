@@ -28,6 +28,7 @@ class ToolPaletteDock(QDockWidget):
         ("Flood-fill within selection", "flood_selection"),
         ("Line between selected corners", "selection_line"),
         ("Clone selected volume…", "clone_selection"),
+        ("Clone selected volume WITH original BE NBT (expert)…", "clone_selection_with_be"),
         ("Repeat clone / tile selection…", "repeat_clone_selection"),
         ("Clone selected volume rotated / mirrored…", "clone_selection_transformed"),
         ("Clone selected volume with XYZ scaling…", "clone_selection_scaled"),

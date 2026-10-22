@@ -2593,3 +2593,57 @@ schematic BE transfer, complete MCEdit2 GUI parity and comprehensive
 Windows/Qt/Minecraft-version testing. Tests are source specifications,
 not claimed to have passed a real-world test matrix. Existing Draft
 PR #1, `python3-modern-editor`, `master` unchanged.
+
+## 0.3.0a65 — BE-preserving original Java Clone Tool / repeated tiling (expert)
+
+Ported another important original MCEdit2 editing flow beyond the
+previous BE-aware Move Tool: **Clone selection WITH original BE NBT
+(expert)**. This is a separate, explicitly confirmed native named-Java
+Anvil operation; the existing block-only clone modes remain BE
+protected, and generic clipboard/structure imports remain unchanged.
+
+- `EditSession.clone_box_with_nbt(box, offset, repetitions=1,
+  skip_air=False, only_replace_air=False)` captures a **single frozen**
+  original source snapshot, including original/staged opaque modded
+  Block Entity payloads, and stamps it at each **N × XYZ offset** for
+  1–32 copies. Later repeated stamps win at duplicate destinations.
+  All source/target coordinates, *existing native sections*, native
+  BlockStates and BE payload identities are checked in advance; no
+  chunk/section is created and no world data is converted.
+- **Actual destination writes never overwrite an existing BE**,
+  including source cells when a target overlaps its origin. A no-write
+  result adds no Undo entry. A destination-air-only mask filters based
+  on original target state **before any new clone staging**; source-air
+  skipping omits exact vanilla air/cave_air/void_air but never drops
+  a BE-bearing source cell. Ordinary occupied non-BE targets are
+  overwritten unless masked. A failed later stamp rejects the entire
+  operation before staging. The source remains unchanged.
+- Block Entity NBT is preserved as opaque original bytes. Only
+  source-validated **root TAG_Int x/y/z** values are relocated to each
+  new cell. No modded UUID duplication handling, structure metadata
+  remapping, inventories, ownership references, scheduled ticks,
+  standalone entities, DataFixer conversions or multiblock/machine
+  links are repaired. Use disposable OFFLINE worlds only.
+- Limits: existing **32,768 planned cell** budget; 1–32 repeats;
+  **512 target BE records and 8 MiB original payload data** across
+  copies. Full target preflight occurs prior to any staging. A
+  successful clone is **one Undo/Redo transaction**, saved with
+  existing native-region transactional backups and confirmation.
+- Qt6 Edit menu / Tool Palette adds **Clone selection WITH original
+  BE NBT (expert)** with separate repeat count, source-air skip and
+  destination-air-only options, plus a required high-risk
+  confirmation. `tests/test_clone_be.py` adds disk-backed native
+  source-level regression coverage for exact NBT preservation,
+  original-source overlap, deterministic last-stamp resolution,
+  source/target masks, absent chunks, BE destination collisions,
+  no-op handling, save/backup, Undo/Redo and reload.
+  `tests/test_clone_be_qt.py` adds offscreen Qt confirmation and
+  Tool Palette test source.
+
+**Not yet migrated:** modded machine-link/UUID repair, BE-safe
+rotations/reflections of unknown mod-specific data, full native entity
+and scheduled-tick structure transfers, complete MCEdit2 GUI parity,
+Bedrock and comprehensive real-world Minecraft version testing.
+The test sources are committed; runtime test execution is **not
+confirmed**. Draft PR #1 stays on `python3-modern-editor`, with no
+changes to `master`.

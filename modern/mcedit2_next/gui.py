@@ -388,6 +388,8 @@ class MainWindow(QMainWindow):
         self.add_action(edit_menu, "Paste with BE NBT (experimental)…", "", self.paste_with_be)
         self.add_action(edit_menu, "Paste at center", "Ctrl+V", self.paste)
         self.add_action(edit_menu, "Clone selection by offset…", "", self.clone_selection)
+        self.add_action(edit_menu, "Clone selection WITH original BE NBT (expert)…", "",
+                        lambda: self.clone_selection_with_be())
         self.add_action(edit_menu, "Clone selection, ignore source air…", "",
                         lambda: self.clone_selection(skip_air=True))
         self.add_action(edit_menu, "Repeat clone, ignore source air…", "",
@@ -2489,6 +2491,78 @@ class MainWindow(QMainWindow):
         self._perform(lambda: self.session.clone_box(
             self._box(), offset, skip_air=skip_air,
             only_replace_air=only_replace_air))
+
+    def clone_selection_with_be(self):
+        """Explicit guarded BE clone; source-only copy is never deleted."""
+        if self.session is None or self.world is None or self.view.selection is None:
+            QMessageBox.information(
+                self, "Native BE clone",
+                "Open a named Java Anvil world and select a bounded 3D source.")
+            return
+        if self.world.legacy or self.world.is_mcregion:
+            QMessageBox.warning(
+                self, "Native BE clone unavailable",
+                "BE-preserving clone requires named Java Anvil.")
+            return
+        offset = self._selection_offset(
+            "Clone selection WITH original BE NBT…", with_be=True)
+        if offset is None or not any(offset):
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Original BE Clone Tool — expert")
+        form = QFormLayout(dialog)
+        repetitions = QSpinBox(dialog)
+        repetitions.setRange(1, 32)
+        repetitions.setValue(1)
+        repetitions.setObjectName("native_be_clone_repetitions")
+        form.addRow("Copies (each at N × offset)", repetitions)
+        skip_air = QCheckBox("Ignore exact source air", dialog)
+        skip_air.setObjectName("native_be_clone_skip_air")
+        form.addRow(skip_air)
+        only_air = QCheckBox("Only paste onto exact original destination air", dialog)
+        only_air.setObjectName("native_be_clone_target_air")
+        form.addRow(only_air)
+        warning = QLabel(
+            "Copy source blocks and raw original Block Entity NBT. "
+            "Destination Block Entities are NEVER overwritten. "
+            "Overlapping copies use frozen source data. No modded UUID, "
+            "machine links, inventories or owners are rewritten. "
+            "Standalone entities are excluded.", dialog)
+        warning.setWordWrap(True)
+        form.addRow(warning)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel, parent=dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        box = self._box()
+        copies = repetitions.value()
+        if box.volume * copies > self.session.max_blocks:
+            QMessageBox.warning(
+                self, "Original BE clone too large",
+                f"Planned {box.volume * copies:,} source-to-target cells "
+                f"exceed the {self.session.max_blocks:,} block limit.")
+            return
+        confirm = QMessageBox.warning(
+            self, "Confirm EXPERIMENTAL native BE clone",
+            f"Clone {box.volume:,} native cells × {copies} copies "
+            f"at XYZ step {offset}. "
+            "Existing destination Block Entities make the operation refuse "
+            "before any staging. Ordinary destination blocks may be "
+            "overwritten unless the target-air mask is enabled. "
+            "Only root BE x/y/z changes; all unknown NBT is retained. "
+            "Modded-machine UUIDs, links, owners and internal references "
+            "are NOT remapped. One Undo item; Save separately backs up "
+            "original regions. Use only an OFFLINE disposable map. Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if confirm == QMessageBox.StandardButton.Yes:
+            self._perform(lambda: self.session.clone_box_with_nbt(
+                box, offset, repetitions=copies, skip_air=skip_air.isChecked(),
+                only_replace_air=only_air.isChecked()))
 
     def repeat_clone_selection(self, repetitions=None, *, skip_air=False,
                                only_replace_air=False):

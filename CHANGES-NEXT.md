@@ -813,3 +813,19 @@ available and is not automatically replaced.
 - Added native two-BE overlap/failure/Save+Undo regression sources,
   plus Qt6 confirmation/navigation source and marked-file guard.
   Real-world runtime test matrix still deferred.
+
+## 0.3.0a65 — Exact opaque-NBT Java BE-aware Clone Tool
+
+- Added explicit native Java original-BE clone and 1–32 repeat-stamp
+  tiling with frozen source snapshots, per-target native Section
+  preflight, non-overwrite of existing destination BEs and
+  deterministic last-copy-wins on duplicated target positions.
+- Optional source-air skip and destination-air-only guards preserve
+  protected BEs. Block/BE writes stage as one Undo/Redo operation,
+  with root x/y/z relocation only and native Save/backup semantics.
+  Planned work capped at 32,768 cells, 512 BE records, 8 MiB BE data.
+- Dedicated Qt6 Edit-menu and dockable Tool Palette expert workflow;
+  old block-only clone behavior remains unchanged.
+- Added native disk-backed and offscreen Qt regression **source**.
+  Full runtime validation, including modded machine/network semantics,
+  remains deferred.

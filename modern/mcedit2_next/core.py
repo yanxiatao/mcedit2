@@ -647,6 +647,122 @@ class EditSession:
         return self._commit(self._guard_clone_destinations(
             destinations, only_replace_air=only_replace_air))
 
+    def clone_box_with_nbt(self, box: Box, offset: Position, *,
+                           repetitions: int = 1,
+                           skip_air: bool = False,
+                           only_replace_air: bool = False) -> int:
+        """Clone one frozen native cell/opaque-BE snapshot with XYZ tiling.
+
+        Every possible write is checked before modifying any staging state.
+        Only root TAG_Int BE x/y/z may change. No entity cloning, orientation
+        mapping, UUID regeneration, machine-link repair or DataFixer conversion.
+        A copy must never overwrite an existing BE, even inside its source.
+        """
+        from .be_nbt import relocate_payload
+        from .clone_mask import is_vanilla_source_air
+        from .palette import BlockState
+
+        if (not isinstance(box, Box)
+                or len(box.minimum) != 3 or len(box.maximum) != 3
+                or any(type(v) is not int for v in box.minimum + box.maximum)
+                or any(box.minimum[i] > box.maximum[i] for i in range(3))):
+            raise ValueError("BE clone requires a valid bounded XYZ selection")
+        if type(skip_air) is not bool or type(only_replace_air) is not bool:
+            raise ValueError("BE clone air-mask settings must be Boolean")
+        step = self._offset3(offset)
+        if not any(step):
+            raise ValueError("BE clone requires a nonzero XYZ step")
+        if type(repetitions) is not int or not 1 <= repetitions <= 32:
+            raise ValueError("BE clone repetitions must be an integer in 1..32")
+        if getattr(self.world, "legacy", True) or getattr(self.world, "is_mcregion", True):
+            raise ValueError("BE clone requires named Java Anvil, not numeric blocks")
+        # Limit planned work BEFORE loading or producing potentially duplicated
+        # target cells; a highly overlapping tiling cannot bypass the limit.
+        self._check_size(box.volume * repetitions)
+        get_cell = getattr(self.world, "get_cell", None)
+        checker = getattr(self.world, "has_block_entity", None)
+        section = getattr(self.world, "_section", None)
+        maker = getattr(self.world, "make_block", None)
+        if not all(callable(x) for x in (get_cell, checker, section, maker)):
+            raise ValueError("Native BE-safe snapshot/section backend required")
+
+        source = []
+        source_be_count = 0
+        source_be_bytes = 0
+        for point in box.points():
+            if (not -30_000_000 <= point[0] <= 30_000_000
+                    or not -2048 <= point[1] < 4096
+                    or not -30_000_000 <= point[2] <= 30_000_000):
+                raise ValueError("Source coordinate exceeds native Java world bounds")
+            section(point[0] >> 4, point[2] >> 4, point[1] >> 4)
+            snap = get_cell(*point)
+            if not isinstance(snap, CellSnapshot) or not isinstance(snap.block, BlockState):
+                raise ValueError(f"Original source snapshot incomplete at {point}")
+            if snap.block != maker(str(snap.block)):
+                raise ValueError("Source native BlockState cannot roundtrip")
+            # BE must be validated even if a custom/modded source state
+            # resembles air. A real BE is never skipped as source air.
+            if snap.block_entity is not None and is_vanilla_source_air(snap.block):
+                raise ValueError(f"Original Block Entity exists on air at {point}")
+            if skip_air and snap.block_entity is None and is_vanilla_source_air(snap.block):
+                continue
+            if snap.block_entity is not None:
+                source_be_count += 1
+                source_be_bytes += len(snap.block_entity)
+                if (source_be_count * repetitions > 512 or
+                        source_be_bytes * repetitions > 8 * 1024 * 1024):
+                    raise ValueError(
+                        "BE clone exceeds 512 BE records or 8 MiB opaque "
+                        "NBT payload across the requested copies")
+            source.append((point, snap))
+
+        targets = {}
+        for repeat in range(1, repetitions + 1):
+            displacement = tuple(value * repeat for value in step)
+            for source_point, snap in source:
+                destination = tuple(source_point[i] + displacement[i]
+                                    for i in range(3))
+                if (not -30_000_000 <= destination[0] <= 30_000_000
+                        or not -2048 <= destination[1] < 4096
+                        or not -30_000_000 <= destination[2] <= 30_000_000):
+                    raise ValueError("BE clone destination outside native Java bounds")
+                # Later stamps win; both states and opaque BEs come from the
+                # SAME frozen source cells, never intermediate destination.
+                targets[destination] = (source_point, snap)
+        self._check_size(len(targets))
+        planned = []
+        for destination, (source_point, snap) in sorted(targets.items()):
+            # Target sections must already exist; no missing-chunk or absent
+            # section synthesis. Inspect target from its pre-edit state.
+            section(destination[0] >> 4, destination[2] >> 4,
+                    destination[1] >> 4)
+            before = get_cell(*destination)
+            if not isinstance(before, CellSnapshot):
+                raise ValueError(f"Invalid native target snapshot at {destination}")
+            # Optional air mask checks the frozen original target, never an
+            # earlier stamp. Skipped occupied cells are not touched.
+            if only_replace_air and not is_vanilla_source_air(before.block):
+                continue
+            if checker(*destination) or before.block_entity is not None:
+                raise ValueError(
+                    f"Target {destination} has original/staged BE data; "
+                    "native BE cloning cannot overwrite existing Block Entities")
+            payload = snap.block_entity
+            if payload is not None:
+                payload = relocate_payload(payload, source_point, destination)
+            after = CellSnapshot(snap.block, payload)
+            if before != after:
+                planned.append((destination, before, after))
+        if not planned:
+            return 0
+        # A single native edit with normal rollback and one Undo/Redo entry.
+        self._apply(planned, reverse=False)
+        self.undo_stack.append(planned)
+        self.undo_stack = self.undo_stack[-100:]
+        self.redo_stack.clear()
+        self.dirty = True
+        return len(planned)
+
     def clone_box_transformed(self, box: Box, offset: Position,
                               operation: str, repetitions: int = 1, *,
                               placement: Position = (0, 0, 0),
