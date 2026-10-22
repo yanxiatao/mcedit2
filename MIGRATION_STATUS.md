@@ -3076,3 +3076,75 @@ The 3D editor and entity transaction matrix remain incomplete.
 
 Development remains in original Draft PR #1 branch
 `python3-modern-editor`; `master` untouched.
+
+## 0.3.0a73 — Real modded BE move/clone cross-region native roundtrip
+
+**Executed actual user-supplied private Java world ZIP testing
+locally**, using the matching native backend exported from successful
+feature-branch GitHub Actions as a source-only artifact. Real ZIPs
+and player data were never committed or sent to GitHub. All edits
+occurred exclusively in disposable temporary world copies.
+
+- Java **1.21.1 DataVersion 3955**: a dynamically selected
+  original modded `lootr:lootr_barrel` Block Entity (202 bytes)
+  was **cloned** and **moved** from an existing chunk on one
+  side of a .mca region boundary to an already generated
+  destination chunk in the adjacent region. Each operation
+  preserved the exact original opaque NBT bytes except the
+  three top-level TAG_Int x/y/z coordinates intentionally
+  relocated. Undo, Redo, Save, fresh native reopen and
+  byte-for-byte original region backup restoration succeeded.
+- A second original high-payload BE, a `minecraft:mob_spawner`
+  compound of **5,146 bytes**, was independently moved/cloned
+  across a generated chunk boundary with the same checks.
+  The whole NBT compound, including nested original data
+  outside root coordinates, remained byte-identical to the
+  coordinate-only expected relocation after disk Save.
+- Four successful real-world transactions total: clone/move
+  of each source; clone changes exactly one target block
+  cell and only writes/backs up the target region; move
+  changes two cells and writes the affected source/target
+  regions. Tests check original staging is not written to
+  disk until Save; source remains identical for clone and
+  is cleared for move; Undo restores both original cells,
+  Redo restores staged exact NBT, and backup restores
+  original BE/source/target bytes on fresh reopen.
+- In every original-world transaction, an attempt to clone
+  or move onto an **already occupied original BE** was
+  rejected without any staging/Undo entry. Attempts to
+  move/clone outside native Java coordinates also failed
+  without writes. All unrelated original BE compounds
+  in the two touched chunks and all unedited generated
+  chunk raw NBT in changed .mca regions were checked
+  byte-for-byte after reopen.
+- Java **1.12.2 DataVersion 1343**: numeric ID/metadata
+  format BE relocation is not yet safely implemented by
+  this editor. Both native BE clone and move were
+  explicitly refused with no stage data, Undo changes or
+  source ZIP writes. **This is a verified fail-closed
+  guard, not implemented 1.12.2 BE migration support.**
+- Added reusable **`scripts/verify_native_be_transfer.py`**
+  selecting original candidate BE records from existing
+  generated chunks, with a preference for a modded region
+  crossing and the largest opaque BE payload.
+  Hard original ZIP-path/extraction protections are reused
+  from the a71 real-world runner, and output reports
+  per-operation completion and safety constraints.
+- Added synthetic regression **`tests/test_native_be_transfer_world.py`**
+  with two generated chunks in separate .mca regions,
+  BE preservation, Undo/Redo/Save/reopen/backup and
+  numeric-format fail-closed checks. The a73 feature-branch
+  CI run executed **887 migrated tests (95 modules), all
+  passed**; core Python 3.12/3.13/3.14, Qt6 GUI and Mesa
+  OpenGL jobs also passed. Initial private runner assumption
+  that clone must back up the *unmodified* source region
+  was corrected: clone backs up only the written target
+  region; the source region must instead remain untouched.
+
+**Remaining limitations:** No real modded-machine network/link
+repair or UUID semantic migration; a BE may physically transfer
+losslessly but be logically invalid in-game. No general legacy
+1.12.2 numeric BE move/clone, full 3D interaction on these saves,
+all-dimension edits, game-client load tests or exhaustive mod
+compatibility matrix. PR #1 stays Draft on `python3-modern-editor`;
+`master` was not modified.

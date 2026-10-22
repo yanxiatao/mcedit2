@@ -966,3 +966,23 @@ available and is not automatically replaced.
 - Committed reusable bounded private-ZIP multi-region runner
   and synthetic multi-region / BE-collision regressions to
   the existing Draft PR. Never commit real user world bytes.
+
+## 0.3.0a73 — Actual Java modded Block Entity clone/move verification
+
+- Ran the original 1.21.1 world with the current native backend
+  for two real Block Entity sources and both Clone and Move:
+  a modded Lootr barrel crossing an .mca region boundary and a
+  5,146-byte original vanilla spawner BE crossing a chunk boundary.
+- Verified exact opaque root-XYZ-only BE NBT relocation, original
+  state restoration under Undo, repeat application under Redo,
+  disk Save/reopen, original BE collision rejection and
+  byte-exact region backup recovery.
+- Verified original BEs elsewhere in both touched chunks and
+  untouched original chunks in affected .mca regions keep their
+  exact NBT bytes. Original user ZIP files were never rewritten.
+- Confirmed native 1.12.2 numeric BE move/clone fails closed,
+  without staging data, rather than pretending to support
+  unsafe conversion.
+- Added repeatable private-ZIP BE transfer runner and synthetic
+  cross-region regression tests to the existing Draft PR.
+  The full migrated CI suite passed 887 tests in 95 modules.
