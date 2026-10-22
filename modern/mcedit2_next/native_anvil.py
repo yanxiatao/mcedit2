@@ -600,7 +600,12 @@ class NativeAnvilWorld:
                 raise UnsafeFormat("Cannot attach BE data to an air block")
         section = self._section(x >> 4, z >> 4, y >> 4)
         base_state = section[((y & 15) << 8) | ((z & 15) << 4) | (x & 15)]
-        if original == snapshot.block_entity and base_state != snapshot.block:
+        # Only an ACTUAL original BE is protected by this rule. A normal
+        # block has original=None and proposed BE=None; cloning/moving that
+        # plain block alongside BEs must remain legal. This regression was
+        # exposed by mixed ordinary-block + multiple-BE 1.12/1.21 selections.
+        if (original is not None and original == snapshot.block_entity
+                and base_state != snapshot.block):
             raise UnsafeFormat("Refusing to change a protected BE block without changing BE NBT")
         if self.legacy:
             if original is not None and snapshot.block_entity is None and (

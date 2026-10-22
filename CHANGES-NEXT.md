@@ -1006,3 +1006,22 @@ available and is not automatically replaced.
 - New synthetic regression `test_legacy_be_transfer.py`
   exercises numeric ID 511/data 13 and legacy data safety.
   Full GUI/OS and mod semantic behavior are still not claimed.
+
+## 0.3.0a75 — Native BE-aware mixed ordinary-block selection bug
+
+- Corrected protected original BE guard: **no original BE + no
+  proposed BE** means a normal block edit in an explicit BE-aware
+  Clone/Move is permitted. Previously mixed selections could fail
+  incorrectly when a normal block changed, including valid
+  native 1.12/1.21 original Java worlds.
+- Real-world two-version matrix: 1.12.2 cloned/moved **5 BEs**
+  in 12/24 affected cells; 1.21.1's final committed selector
+  cloned/moved **5 BEs** in 24/42 affected cells, with an additional
+  real two-BE one-block overlapping move in each world. Exact opaque BE NBT relocation,
+  one Undo/Redo group, native Save/reopen, original backup
+  restore and unrelated generated chunk NBT byte equality
+  verified on disposable world copies.
+- Added a repeatable bounded private-world multi-BE runner,
+  modern/legacy atomic transaction regressions and synthetic
+  ZIP cross-chunk/overlap/missing-target tests. Unsupported
+  mod-specific linkage and full GUI behavior remain unverified.

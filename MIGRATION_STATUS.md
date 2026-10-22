@@ -3220,3 +3220,61 @@ MCRegion, game-client success or exhaustive versions/mods.
 Never assume numeric ID 0 BEs are safely movable; those
 remain refused. Draft PR #1 on `python3-modern-editor` retained,
 and `master` remains untouched.
+
+## 0.3.0a75 — Mixed BE + ordinary block selections: real-world fix and regression
+
+The original Minecraft 1.12.2 / 1.21.1 private ZIP archives exposed
+a **real native data-editing defect** in BE-aware group cloning and
+moving. A normal block with no original BE (`original=None`)
+and no new BE (`snapshot.block_entity=None`) incorrectly tripped
+the protected-BE guard whenever its block state changed. Thus a
+multi-block selection combining original modded BEs and ordinary
+blocks could fail even though every source and target was safe.
+
+Fixed `NativeAnvilWorld.set_cell` to apply this specific protection
+**only when a real original BE exists**. It continues to reject
+changing the block state underneath an unchanged original BE and
+never relaxes the block-only editing BE guard or explicit destination
+collision validation.
+
+Executed the native backend on two original private user ZIPs using
+only temporary extracted world copies:
+- **1.12.2 / DataVersion 1343**: mixed-selection **clone 5 original
+  BEs / 12 changed target cells**; mixed-selection **move 5 original
+  BEs / 24 affected cells**; plus original **two-BE overlapping
+  move** across a one-block translation (3 changed cells).
+  All three operations completed with one grouped Undo record,
+  exact original BE root XYZ-only relocation, Undo/Redo, Save,
+  fresh backend reopen, original .mca backup byte recovery and
+  **377 or 378 untouched generated chunks** verified unchanged
+  (depending on affected source/target region).
+- **1.21.1 / DataVersion 3955**: using the committed
+  candidate selector on the same real private ZIP, mixed-selection
+  **clone 5 BEs / 24 changed cells**; mixed-selection **move 5
+  BEs / 42 changed cells**; plus original **two-BE overlapping
+  move** (3 changed cells). All three passed equivalent BE NBT byte-preservation,
+  Undo/Redo, original region backup restoration and verification
+  of **573–575 untouched generated chunks** across touched
+  .mca region files.
+- The original ZIP hashes were unchanged. No new chunk or section
+  was generated and no playerdata was extracted. This is an
+  offline format-level check only, not validation of modded
+  machine links/UUIDs or game-client load.
+
+Added `scripts/verify_native_be_batch.py` to repeat bounded
+real private-world verification, selecting only already generated
+chunks and two or more original BE records in one small box
+(volume <=24), with at most 128 affected cells, testing ordinary
+and overlapping translations. Added
+`tests/test_be_mixed_native.py` for **both** modern and numeric
+Java Anvil mixed BE/ordinary block atomic edit + Save/reopen,
+and `tests/test_native_be_batch_world.py` for synthetic zipped
+two-BE cross-chunk and overlapping transactions plus refusal
+on missing chunks/insufficient original BEs. The normal
+unmodified BE still cannot be overwritten.
+
+Remaining limitations: complex UUID/network repair, entity and
+BE coupled moves, very large selections, all dimension/file
+formats, in-game behavior and complete classic MCEdit2 GUI parity
+are **not** established by this bounded regression. PR #1
+remains Draft on `python3-modern-editor`; `master` unchanged.
