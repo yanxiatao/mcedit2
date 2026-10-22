@@ -44,6 +44,10 @@ class SliceView(QWidget):
         super().__init__()
         self.session = None
         self.overlay = None
+        self.show_biome_overlay = False
+        self.biome_overlay_snapshot = None
+        self.biome_overlay_error = None
+        self._biome_overlay_key = None
         self.y = 64
         self.center_x = 0
         self.center_z = 0
@@ -68,6 +72,29 @@ class SliceView(QWidget):
         raw = hashlib.sha256(name.encode("utf-8")).digest()
         return QColor(65 + raw[0] // 2, 65 + raw[1] // 2, 65 + raw[2] // 2)
 
+    def invalidate_biome_overlay(self):
+        """Discard the read-only picture after world/undo/save changes."""
+        self._biome_overlay_key = None
+        self.biome_overlay_snapshot = None
+        self.biome_overlay_error = None
+
+    def biome_snapshot(self, ox, oz, cols, rows):
+        """Cache a bounded original quart scan, never a rewritten chunk."""
+        key = (id(self.session), ox, oz, cols, rows, self.y)
+        if key != self._biome_overlay_key:
+            self.biome_overlay_snapshot = None
+            self.biome_overlay_error = None
+            if self.session is not None:
+                from .biome_overlay import scan_biome_overlay
+                try:
+                    self.biome_overlay_snapshot = scan_biome_overlay(
+                        self.session.world, ox, oz, ox + cols - 1,
+                        oz + rows - 1, self.y)
+                except (ValueError, OSError) as exc:
+                    self.biome_overlay_error = str(exc)
+            self._biome_overlay_key = key
+        return self.biome_overlay_snapshot
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor(22, 26, 31))
@@ -89,6 +116,45 @@ class SliceView(QWidget):
                         color = QColor(75, 32, 37)
                 painter.fillRect(rx * self.tile_size, rz * self.tile_size,
                                  self.tile_size - 1, self.tile_size - 1, color)
+        if self.show_biome_overlay and self.session is not None:
+            # Quart cells are four blocks across; decode each visible native
+            # section only once per cached viewport instead of per pixel.
+            overlay = self.biome_snapshot(ox, oz, cols, rows)
+            if overlay is None:
+                # Unsupported/oversized slices are visibly red, never
+                # silently rendered as a default plains biome.
+                painter.fillRect(self.rect(), QColor(145, 40, 50, 90))
+                painter.setPen(QPen(QColor(255, 192, 192), 2))
+                painter.drawText(
+                    self.rect(), Qt.AlignmentFlag.AlignCenter,
+                    "BIOME OVERLAY UNAVAILABLE\n"
+                    + (self.biome_overlay_error or "Original biome data missing"))
+            else:
+                from .biome_overlay import biome_overlay_rgb
+                grid_pen = QPen(QColor(18, 22, 30, 135), 1)
+                staged_pen = QPen(QColor(255, 226, 74, 240), 2)
+                for cell in overlay.cells:
+                    px = (cell.x - ox) * self.tile_size
+                    pz = (cell.z - oz) * self.tile_size
+                    footprint = QRect(px, pz, 4 * self.tile_size,
+                                      4 * self.tile_size)
+                    red, green, blue = biome_overlay_rgb(cell.biome)
+                    painter.fillRect(footprint, QColor(
+                        red, green, blue, 142))
+                    painter.setPen(staged_pen if cell.staged else grid_pen)
+                    painter.setBrush(Qt.BrushStyle.NoBrush)
+                    painter.drawRect(footprint.adjusted(0, 0, -1, -1))
+                if overlay.failures:
+                    # A missing/invalid original chunk must be obvious.
+                    painter.setPen(QPen(QColor(255, 112, 122, 230), 2))
+                    for failed in overlay.failures:
+                        px = (failed.cx * 16 - ox) * self.tile_size
+                        pz = (failed.cz * 16 - oz) * self.tile_size
+                        span = 16 * self.tile_size
+                        painter.fillRect(QRect(px, pz, span, span),
+                                         QColor(155, 30, 42, 118))
+                        painter.drawLine(px, pz, px + span, pz + span)
+                        painter.drawLine(px + span, pz, px, pz + span)
         if self.selection:
             x1, z1, x2, z2 = self.selection
             x = (min(x1, x2) - ox) * self.tile_size
@@ -262,6 +328,14 @@ class MainWindow(QMainWindow):
         self.file_menu, self.edit_menu = file_menu, edit_menu
         self.plugin_menu = self.menuBar().addMenu(self.tr_ui("Plugins"))
         self.view_menu = self.menuBar().addMenu("View")
+        self.biome_overlay_action = QAction(
+            "Show original/staged Java biomes (2D only)", self)
+        self.biome_overlay_action.setObjectName("toggle_biome_overlay_2d")
+        self.biome_overlay_action.setCheckable(True)
+        self.biome_overlay_action.toggled.connect(self.toggle_biome_overlay)
+        self.view_menu.addAction(self.biome_overlay_action)
+        self.add_action(self.view_menu, "Biome overlay legend / diagnostics…", "",
+                        self.show_biome_overlay_report)
         self.add_action(
             self.view_menu, "3D translucent opacity…", "",
             self.change_translucent_opacity)
@@ -512,6 +586,66 @@ class MainWindow(QMainWindow):
         else:
             self.statusBar().showMessage("2D slice view")
 
+    def toggle_biome_overlay(self, enabled):
+        if enabled and (self.world is None or self.world.legacy
+                        or self.world.version < 2865):
+            self.biome_overlay_action.blockSignals(True)
+            self.biome_overlay_action.setChecked(False)
+            self.biome_overlay_action.blockSignals(False)
+            QMessageBox.information(
+                self, "Original biome overlay",
+                "Open a Java 1.18+ native Anvil world first. "
+                "Legacy numeric biome data remains read-only in its inspector.")
+            return
+        self.slice_view.show_biome_overlay = enabled
+        self.slice_view.invalidate_biome_overlay()
+        self.slice_view.update()
+        self.statusBar().showMessage(
+            "2D biome overlay " + (
+                "on (original + unsaved quart cells; 3D view unaffected)"
+                if enabled else "off"))
+
+    def show_biome_overlay_report(self):
+        if not self.slice_view.show_biome_overlay:
+            QMessageBox.information(
+                self, "Biome overlay",
+                "Enable View > Show original/staged Java biomes (2D only).")
+            return
+        # Use the 2D viewport even if currently displaying a 3D view.
+        view = self.slice_view
+        cols = view.width() // view.tile_size + 1
+        rows = view.height() // view.tile_size + 1
+        ox = view.center_x - (view.width() // view.tile_size) // 2
+        oz = view.center_z - (view.height() // view.tile_size) // 2
+        overlay = view.biome_snapshot(ox, oz, cols, rows)
+        report = (overlay.report() if overlay is not None
+                  else "Original biome overlay unavailable: "
+                       + (view.biome_overlay_error or "no original data"))
+        from PySide6.QtWidgets import QPlainTextEdit
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Native 2D biome overlay legend / diagnostics")
+        dialog.resize(700, 490)
+        layout = QVBoxLayout(dialog)
+        label = QLabel(
+            "Names determine stable visualization colors. Gold outlines mark "
+            "unsaved biome quart edits; red crossed chunks cannot be decoded. "
+            "The overlay NEVER alters the world, and only the 2D view renders it.")
+        label.setWordWrap(True)
+        layout.addWidget(label)
+        view_text = QPlainTextEdit(dialog)
+        view_text.setObjectName("biome_overlay_diagnostics")
+        view_text.setReadOnly(True)
+        view_text.setPlainText(report)
+        layout.addWidget(view_text)
+        controls = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, dialog)
+        copy_button = controls.addButton(
+            "Copy report", QDialogButtonBox.ButtonRole.ActionRole)
+        copy_button.clicked.connect(
+            lambda: QApplication.clipboard().setText(view_text.toPlainText()))
+        controls.rejected.connect(dialog.accept)
+        layout.addWidget(controls)
+        dialog.exec()
+
     def change_translucent_opacity(self):
         value, accepted = QInputDialog.getDouble(
             self, "3D blended textures", "Water/glass opacity (0.10–1.00):",
@@ -760,6 +894,7 @@ class MainWindow(QMainWindow):
         self.world = candidate
         self.session = EditSession(candidate)
         self._sampled_native_biome = None
+        self.slice_view.invalidate_biome_overlay()
         self.update_native_editor()
         self.view.session = self.session
         self.slice_view.session = self.session
@@ -1392,6 +1527,7 @@ class MainWindow(QMainWindow):
             return
         try:
             result = callback()
+            self.slice_view.invalidate_biome_overlay()
             if self.volume_view is not None and self.session.dirty:
                 self.volume_view.invalidate_world_edits()
             self.view.update()
@@ -1504,6 +1640,7 @@ class MainWindow(QMainWindow):
         self.world = candidate
         self.session = EditSession(candidate)
         self._sampled_native_biome = None
+        self.slice_view.invalidate_biome_overlay()
         # A selection from an earlier world must never carry into a newly
         # opened map: its coordinates are not valid for this world.
         for widget in (self.slice_view, self.volume_view):

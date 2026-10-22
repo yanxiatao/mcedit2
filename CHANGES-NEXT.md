@@ -744,3 +744,21 @@ available and is not automatically replaced.
 - Add source-only native save/reopen, modded NBT, malformed-data,
   mixed block/biome and cross-chunk rejection specifications. Full runtime
   CI/Minecraft/Qt/Windows validation is still deferred.
+
+## 0.3.0a61 — 2D original/staged biome overlay
+
+- View > Show original/staged Java biomes (2D only) renders stable
+  name-colored native Java 1.18+ quart biome cells from original
+  Section palettes at the current world Y, with gold borders for
+  unsaved staged biome edits. A dialog lists name/color legend
+  and error diagnostics; the existing 3D viewport is unchanged.
+- Bounded to 64 visible chunks, decoded once per viewport snapshot;
+  refreshes after edits, Undo/Redo, Save, dimension/world changes,
+  Y or viewport movement. Rendering never creates missing sections
+  or modifies block states, BE NBT or region files.
+- Malformed, unavailable, or mismatched native chunks are rendered
+  distinctly red/crossed rather than assigned guessed biome data;
+  unsupported versions explicitly refuse an overlay.
+- New native geometry/metadata and offscreen Qt controller
+  regression **source** covers caching, staged-state visuals,
+  unreadable data and no world writes. Full runtime testing deferred.

@@ -2391,3 +2391,45 @@ namespace strings but cannot prove they are registered for the destination.
 The new regression cases were committed as source only; full Qt/Windows/
 game-version testing remains deferred. This is still Draft PR #1 on
 `python3-modern-editor`; `master` remains unchanged.
+
+## 0.3.0a61 — Read-only 2D original/staged biome overlay
+
+Implemented the missing **2D Java 1.18+ quart-biome visualization** for
+the existing Python 3 / Qt6 slice view. This is *not* a new biome writer
+or a 3D biome renderer.
+
+- The View menu now provides a checkable **Show original/staged Java biomes
+  (2D only)** overlay and **Biome overlay legend / diagnostics** dialog.
+  At each view Y it depicts the original 4×4×4 biome quart cells, preserving
+  exact modded biome registry names as read from native NBT, while showing
+  staged unsaved names for changed quart cells. Each cell uses a stable
+  original-name-derived display color; a gold outline distinguishes staged
+  changes. The legend reports matching name/color codes and counts.
+- An existing chunk's Section biome palette is decoded at most once per
+  bounded viewport snapshot, not once for every onscreen block. Maximum
+  visible chunk scan: **64 chunks**; larger scans are explicitly refused.
+  The cached snapshot is invalidated by viewport movement/Y changes,
+  world/dimension swaps, edit actions, Undo/Redo and Save. This is only a
+  rendering cache and never writes/churns world NBT.
+- Missing chunks, absent biome sections, native version mismatch and
+  malformed/unknown original palette data are represented as conspicuous
+  red crossed region rectangles; no false `plains` default or new chunk
+  generation occurs. When the entire scan is refused, the 2D viewport
+  displays an explicit error tint and message rather than silently drawing
+  incomplete biome colors. Biome overlay is not available on numeric-ID
+  legacy or MCRegion worlds.
+- Added `tests/test_biome_overlay.py` source specifications for exact
+  quart geometry, staged/original comparison, cross-chunk and missing
+  data differentiation, bounds, original modded NBT preservation and
+  post-save backed-up results. Added
+  `tests/test_biome_overlay_qt.py` offscreen Qt controller source cases
+  for cache reuse/invalidation, changed-state display and no edit history
+  changes from enabling/displaying the overlay.
+
+**Still missing:** visual 3D biome volume slices, zoomed-out biome map
+overview, biome search/navigation, registry/data-pack validation and
+original MCEdit2 feature parity. Original block/BE/entity/lighting
+content is not modified by this visualization. Tests added as source only;
+full Qt/Mesa/Windows and real Minecraft-version runtime runs are deferred.
+Development remains confined to existing Draft PR #1 and
+`python3-modern-editor` — no new PR, branch or `master` write.
