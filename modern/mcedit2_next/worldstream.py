@@ -42,11 +42,13 @@ class RegionIndex:
         self.chunks: frozenset[ChunkKey] = frozenset()
         self.regions = 0
         self.invalid = []
+        self.empty = ()  # Zero-byte region placeholders: no header/chunk data.
         self.scan()
 
     def scan(self):
         discovered = set()
         invalid = []
+        empty = []
         count = 0
         if self.root.is_dir():
             for filename in sorted(self.root.glob("r.*.*" + self.extension)):
@@ -57,6 +59,11 @@ class RegionIndex:
                 try:
                     with filename.open("rb") as stream:
                         header = stream.read(8192)
+                    if len(header) == 0:
+                        # No region header OR chunk sectors are present. These
+                        # are empty placeholders, not malformed generated chunks.
+                        empty.append(str(filename))
+                        continue
                     if len(header) != 8192:
                         raise IndexErrorWorld("Incomplete region header")
                     for index in range(1024):
@@ -76,6 +83,7 @@ class RegionIndex:
         self.chunks = frozenset(discovered)
         self.regions = count
         self.invalid = invalid
+        self.empty = tuple(empty)
 
     def __contains__(self, key: ChunkKey) -> bool:
         return key in self.chunks

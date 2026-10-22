@@ -34,6 +34,7 @@ class BEWorldSearchResult:
     invalid_region_examples: tuple[str, ...]
     missing_staged_chunks: tuple[tuple[int, int], ...]
     cancelled: bool
+    empty_region_files: int = 0
 
     @property
     def complete(self):
@@ -59,6 +60,7 @@ class BEWorldSearchResult:
             f"Displayed matches: {len(self.matches)} / {MAX_SEARCH_RESULTS} limit",
             f"Cancelled: {self.cancelled}",
             f"Complete index AND chunk scan: {self.complete}",
+            f"Zero-byte region placeholders (no chunk header): {self.empty_region_files}",
             "Original NBT identifiers/coordinates are read without conversion.",
             "This is a search snapshot, NOT modded-machine-link validation.",
         ]
@@ -202,4 +204,4 @@ def search_generated_be(world, identifier="*", *,
     return BEWorldSearchResult(
         identifier, include_staged, len(chunks), examined, decoded, total,
         tuple(matches), tuple(failures), count_index_invalid,
-        invalid_examples, missing_staged, cancelled)
+        invalid_examples, missing_staged, cancelled, len(index.empty))

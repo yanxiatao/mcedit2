@@ -57,6 +57,7 @@ class WorldEntitySearchResult:
     invalid_region_examples: tuple[str, ...]
     orphaned_staging: tuple[str, ...]
     cancelled: bool
+    empty_region_files: int = 0
 
     @property
     def truncated(self):
@@ -81,6 +82,7 @@ class WorldEntitySearchResult:
             f"Matching entity records: {self.matching_entities}",
             f"Results listed: {len(self.matches)} / {MAX_ENTITY_RESULTS} cap",
             f"Cancelled: {self.cancelled}; complete: {self.complete}",
+            f"Zero-byte region placeholders (no chunk header): {self.empty_region_files}",
             "Sources marked 'chunk' and 'entities' denote distinct original files.",
             "Missing entity Pos is never guessed; original NBT is never changed.",
         ]
@@ -179,16 +181,17 @@ def _storage_keys(world, max_regions, max_chunks):
         raise ValueError(
             f"Original Java entity search has {files_count} region files; "
             f"limit {max_regions}")
-    keys, invalid = [], []
+    keys, invalid, empty_count = [], [], 0
     for source, directory, extension in paths:
         index = RegionIndex(directory, extension=extension)
+        empty_count += len(index.empty)
         keys.extend((source, cx, cz) for cx, cz in index.chunks)
         invalid.extend((source, filename, slot)
                        for filename, slot in index.invalid)
         if len(keys) > max_chunks:
             raise ValueError(
                 f"Original entity search exceeds {max_chunks} generated storage chunks")
-    return sorted(keys, key=lambda x: (x[2], x[1], x[0])), invalid
+    return sorted(keys, key=lambda x: (x[2], x[1], x[0])), invalid, empty_count
 
 
 def search_generated_entities(world, identifier="*", *, include_staged=True,
@@ -221,7 +224,7 @@ def search_generated_entities(world, identifier="*", *, include_staged=True,
             or not callable(getattr(world, "_entity_chunk", None))):
         raise ValueError("Native Java entity region reader required")
 
-    keys, invalid = _storage_keys(world, max_regions, max_chunks)
+    keys, invalid, empty_count = _storage_keys(world, max_regions, max_chunks)
     keyset = set(keys)
     snapshot = staged_snapshot if staged_snapshot is not None else {
         "edits": dict(getattr(world, "_entity_edits", {})),
@@ -351,4 +354,4 @@ def search_generated_entities(world, identifier="*", *, include_staged=True,
         tuple(matches), tuple(failures), len(invalid),
         tuple(f"{src} {path} (header {slot})"
               for src, path, slot in invalid[:32]),
-        tuple(orphaned), stop.is_set())
+        tuple(orphaned), stop.is_set(), empty_count)

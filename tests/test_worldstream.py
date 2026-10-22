@@ -52,6 +52,20 @@ class IndexTests(unittest.TestCase):
         self.assertNotIn((0, 0), index)
         self.assertEqual(index.nearby(-64, 96, 1)[0], (-64, 96))
 
+    def test_zero_byte_region_placeholder_is_distinct_from_damage(self):
+        # Modded worlds may leave empty named .mca files that physically
+        # contain no header and therefore no generated chunk records.
+        empty = self.root / "r.-1.-1.mca"
+        empty.write_bytes(b"")
+        damaged = self.root / "r.2.2.mca"
+        damaged.write_bytes(b"truncated")
+        region_with_chunks(self.root, 0, 0, [0])
+        index = RegionIndex(self.root)
+        self.assertEqual(index.chunks, frozenset({(0, 0)}))
+        self.assertEqual(index.empty, (str(empty),))
+        self.assertEqual(index.invalid, [(str(damaged), None)])
+        self.assertEqual(index.regions, 1)
+
     def test_section_y_index_exposes_legacy_and_modern(self):
         for modern in (False, True):
             section = nbt.compound_payload([

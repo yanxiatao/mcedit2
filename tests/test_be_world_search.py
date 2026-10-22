@@ -129,6 +129,21 @@ class GeneratedBESearchTests(unittest.TestCase):
             self.assertEqual(files[0].read_bytes(), original)
             world.close()
 
+    def test_zero_byte_modded_region_placeholder_does_not_hide_generated_BEs(self):
+        with tempfile.TemporaryDirectory() as folder:
+            world, files = synthetic_world(folder)
+            empty = Path(folder) / "region/r.5.5.mca"
+            empty.write_bytes(b"")
+            result = search_generated_be(world, "testmod:machine")
+            self.assertTrue(result.complete)
+            self.assertEqual(result.indexed_chunks, 1)
+            self.assertEqual(result.matching_records, 1)
+            self.assertEqual(result.empty_region_files, 1)
+            self.assertEqual(result.invalid_region_entries, 0)
+            self.assertIn("Zero-byte region placeholders", result.report())
+            self.assertEqual(empty.read_bytes(), b"")
+            world.close()
+
     def test_bad_region_header_is_partial_even_if_all_indexed_chunks_read(self):
         with tempfile.TemporaryDirectory() as folder:
             world, files = synthetic_world(folder)

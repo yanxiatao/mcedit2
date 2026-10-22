@@ -420,3 +420,22 @@ jobs:
           result = unittest.TextTestRunner(verbosity=2).run(suite)
           sys.exit(0 if result.wasSuccessful() else 1)
           PY
+      - name: Package public backend source for private local-world validation
+        if: success()
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile, ZIP_DEFLATED
+          with ZipFile("mcedit2-native-source.zip", "w", ZIP_DEFLATED) as output:
+              for folder in (Path("modern/mcedit2_next"), Path("scripts")):
+                  for path in sorted(folder.rglob("*.py")):
+                      if "__pycache__" not in path.parts:
+                          output.write(path, path.as_posix())
+          PY
+      - name: Upload source-only backend artifact (no private worlds)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcedit2-next-source-only
+          path: mcedit2-native-source.zip
+          retention-days: 2

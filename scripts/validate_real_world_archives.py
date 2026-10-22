@@ -93,18 +93,10 @@ def inspect_archive(archive: str | Path, *, section_samples=128):
             for idx in (terrain_index, split_index):
                 if idx is None:
                     continue
+                zero_header_files += len(idx.empty)
                 for filename, slot in idx.invalid:
-                    # A file of length 0 physically contains no generated
-                    # chunk sectors. Distinguish that from broken populated
-                    # headers, but do NOT modify/create the region.
-                    try:
-                        size = Path(filename).stat().st_size
-                    except OSError:
-                        size = -1
-                    if size == 0 and slot is None:
-                        zero_header_files += 1
-                    else:
-                        errors.append(f"Invalid nonempty region header: {Path(filename).name}, slot {slot}")
+                    errors.append(
+                        f"Invalid nonempty region header: {Path(filename).name}, slot {slot}")
             sample_keys = []
             for cx, cz in sorted(terrain_index.chunks):
                 try:

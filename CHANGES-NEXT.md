@@ -926,3 +926,27 @@ available and is not automatically replaced.
 - Aligned packaged `pyproject.toml` and runtime version
   to 0.3.0a70. Real game/OS/3D editing parity tests remain
   outstanding.
+
+## 0.3.0a71 — Native real 1.12.2 / 1.21.1 validation, empty-region fix
+
+- Obtained current public native backend source through a source-only
+  GitHub Actions artifact; user-supplied worlds stayed local/private.
+  **Executed** full original chunk reads, bounded Section decode and
+  indexed BE/Entity searches on both actual uploaded worlds.
+- Verified 1.12.2: 637 terrain chunks / 33 BEs / 304 Entities.
+  Verified 1.21.1: 2,338 terrain chunks / 1,329 BEs / 155 independent
+  Entity chunks with 405 Entities. All original generated chunks
+  decoded without failure.
+- Fixed genuine indexed whole-world search false-INCOMPLETE from 72
+  zero-byte `.mca` placeholders in the actual 1.21.1 world.
+  `RegionIndex.empty` tracks these separately from nonempty
+  malformed headers, while exact BE/Entity diagnostics preserve
+  counts and completeness.
+- On privately isolated world copies, tested native EditSession
+  paint, Undo, Redo, Save, reopening, opaque original BE bytes and
+  byte-identical original region backup restoration for both world
+  versions; **all exercised operations passed**.
+- Added a reusable guarded private-ZIP one-cell roundtrip runner,
+  synthetic CI smoke and zero-byte placeholder regressions.
+  Game loading, all mod interactions and exhaustive edit matrix
+  remain unverified.

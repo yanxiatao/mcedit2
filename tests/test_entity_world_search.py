@@ -134,6 +134,25 @@ class GeneratedEntityIndexTests(unittest.TestCase):
             self.assertEqual(result.indexed_chunks, 2)
             world.close()
 
+    def test_zero_byte_placeholders_in_both_region_families_are_not_corruption(self):
+        with tempfile.TemporaryDirectory() as folder:
+            world, files = make_world(folder)
+            terrain = Path(folder) / "region/r.2.2.mca"
+            entities = Path(folder) / "entities/r.-2.1.mca"
+            terrain.write_bytes(b"")
+            entities.write_bytes(b"")
+            result = search_generated_entities(world)
+            self.assertTrue(result.complete)
+            self.assertEqual(result.indexed_chunks, 2)
+            self.assertEqual(result.decoded_chunks, 2)
+            self.assertEqual(result.matching_entities, 2)
+            self.assertEqual(result.invalid_region_entries, 0)
+            self.assertEqual(result.empty_region_files, 2)
+            self.assertIn("Zero-byte region placeholders", result.report())
+            self.assertEqual(terrain.read_bytes(), b"")
+            self.assertEqual(entities.read_bytes(), b"")
+            world.close()
+
     def test_cancel_does_not_claim_complete_coverage(self):
         with tempfile.TemporaryDirectory() as folder:
             world, files = make_world(folder, extra=((1, 0), (2, 0)))

@@ -2960,3 +2960,71 @@ in-game editor Save or complete world/version parity.
 Version metadata in `pyproject.toml` was synchronized with
 `modern/mcedit2_next/__init__.py` (now 0.3.0a70). Remains an
 experimental Draft PR, with `master` unchanged.
+
+## 0.3.0a71 — Actual private Java 1.12.2 / 1.21.1 native backend validation
+
+**Executed the existing PR's native editor backend on both user-supplied
+private worlds in this isolated session**. To overcome local GitHub
+network access restrictions, a GitHub Actions job exported a short-lived
+**source-only public artifact**, which was downloaded into the private
+local test environment; the real worlds were NEVER uploaded to GitHub.
+The exact `NativeAnvilWorld` backend on the public feature branch was
+then run locally against two private archives:
+
+- **1.12.2 / DataVersion 1343**: native `_chunk` parsed all 637 generated
+  terrain chunks, decoded 128 sampled original block Sections, and
+  the real native full-world BE/Entity search decoded all 637 chunks
+  each, returning **33 original BE and 304 Entity records**, no failures.
+- **1.21.1 / DataVersion 3955**: native `_chunk` parsed all 2,338 generated
+  terrain chunks, decoded 128 sampled original block Sections;
+  original BE search decoded 2,338 chunks and returned **1,329 BEs**;
+  original Entity search decoded 2,493 storage chunks (2,338 terrain
+  + 155 separate Entity) and returned **405 Entities**, no failed
+  generated chunk reads.
+
+A **real-world compatibility defect** emerged: 1.21.1 contains
+**72 zero-length `.mca` region placeholders**. `RegionIndex`
+previously classified these as damaged headers; both BE and Entity
+full-world searches marked their coverage INCOMPLETE even though
+every generated chunk was decoded successfully. The new index keeps
+`empty` placeholder paths separate from `invalid` nonempty,
+truncated or broken region headers. BE, Entity and ZIP audit reports
+retain separate placeholder totals; they now correctly show
+**complete generated-chunk coverage** for the 1.21.1 world.
+These are not claims that empty files once contained data; true
+nonzero-but-malformed headers must still cause incomplete results.
+Synthetic regression sources cover all three paths.
+
+**Native Save/Undo/Redo/reopen/backup tests on actual copies**:
+Each real ZIP was extracted privately to a disposable temporary
+directory; one already-generated block cell was changed with
+`EditSession.paint` in a chunk containing real opaque BEs. After
+Undo/Redo, Save, and a fresh native `NativeAnvilWorld` reopen:
+- 1.12.2: **one actual opaque BE** in the edited chunk remained
+  byte-for-byte unchanged.
+- 1.21.1: **three actual opaque BEs** in the edited chunk remained
+  byte-for-byte unchanged.
+- The native region backup exactly matched the original pre-edit
+  region bytes. Restoring that backup in the isolated test copy
+  and opening the world again recovered the original block and BEs.
+  The original ZIPs were never edited or uploaded.
+
+A reusable `scripts/verify_native_roundtrip.py` now runs a guarded
+one-cell native Save/Undo/Redo/BE/backup smoke against private
+original Java ZIPs. It extracts only level.dat and overworld
+terrain regions into a temporary directory; never touches
+playerdata or the original archive:
+```
+python scripts/validate_real_world_archives.py 1.12.2.zip 1.21.1.zip
+python scripts/verify_native_roundtrip.py 1.12.2.zip 1.21.1.zip
+```
+Added synthetic `tests/test_native_real_roundtrip.py` to CI,
+along with zero-byte index and whole-world BE/Entity regressions.
+
+**Limits:** These are read-only exhaustive generated-chunk searches,
+128 sampled Section decodes per world and one reversible edited
+block per version. Full 3D graphics on the actual saves,
+every Section palette combination, modded machine graph semantics,
+multi-BE move/clone, in-game verification and multi-dimension saves
+remain unverified. Existing Draft PR #1 and feature branch are
+retained; `master` unchanged.
