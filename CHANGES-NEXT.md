@@ -1221,3 +1221,13 @@ available and is not automatically replaced.
 - Synthetic native Anvil Save/reopen and Undo-after-Save regression coverage.
 - Local private 1.21.1 world verified two BE targets and one Undo, without
   modifying the original ZIP. CI intentionally deferred [skip ci].
+
+## 0.3.0a86 — Four-format opaque BE pending file loader (2/5)
+
+- Explicitly select marked original .nbt, standard Java .nbt, Sponge v2/v3
+  .schem or version-tagged numeric Alpha .schematic; never silently fall back
+  to block-only import for any Block Entity NBT.
+- Enqueue only on exact Java Anvil/DataVersion matches and safe integer XYZ;
+  malformed mask flags or wrong extensions are rejected before world edits.
+- Synthetic modern/legacy fixtures and private 1.21.1 read-only checks.
+- CI deferred per five-feature batch [skip ci].
