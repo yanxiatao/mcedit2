@@ -645,3 +645,45 @@ fn native_nbt_preview_grows_palette_and_edits_legacy_numeric_without_mutations()
         .unwrap().block(0,64,0).unwrap().name,"numeric:301");
     assert_eq!(legacy.bytes_now(),legacy.original_region);
 }
+
+#[test]
+fn session_produces_complete_append_only_region_image_without_changing_java_world(){
+    for modern in [true,false] {
+        let fixture=NativeWorld::create(modern);
+        let original=fixture.bytes_now();
+        let mut editor=Session::new(fixture.metadata(),"minecraft:overworld").unwrap();
+        let y=if modern{-64}else{64};
+        let replacement=parse_state(if modern{
+            "minecraft:gold_block"
+        }else{"numeric:42[data=9]"}).unwrap();
+        let bounds=Bounds::new((0,y,0),(1,y,0)).unwrap();
+        editor.commit(editor.prepare(bounds,&replacement,None).unwrap()).unwrap();
+        let images=editor.prepare_native_region_candidates(1_600_000_000).unwrap();
+        assert_eq!(images.len(),1);
+        let candidate=&images[0];
+        assert_eq!(candidate.modified_chunks,1);
+        assert_eq!(candidate.original_bytes,original.len());
+        assert_eq!(candidate.original_region_sha256.len(),64);
+        assert_eq!(candidate.region_x,0);
+        assert_eq!(candidate.region_z,0);
+        assert!(candidate.planned_bytes>candidate.original_bytes);
+        assert_eq!(&candidate.image[8192..original.len()],&original[8192..]);
+        assert_eq!(&candidate.image[4096..4100],&1_600_000_000u32.to_be_bytes());
+        assert_eq!(fixture.bytes_now(),original,"dry run MUST NOT save a world");
+        assert_eq!(editor.pending_cells(),2,"planning MUST preserve Undo overlay");
+        assert!(editor.undo().unwrap());
+        assert_eq!(fixture.bytes_now(),original);
+    }
+}
+
+#[test]
+fn region_image_plan_rejects_unrepresentable_mcregion_modded_id_without_disk_changes(){
+    let fixture=NativeWorld::create(false);
+    let original=fixture.bytes_now();
+    let mut editor=Session::new(fixture.metadata(),"minecraft:overworld").unwrap();
+    let bounds=Bounds::new((0,64,0),(0,64,0)).unwrap();
+    editor.commit(editor.prepare(bounds,&parse_state("numeric:301[data=7]").unwrap(),None).unwrap()).unwrap();
+    assert!(editor.prepare_native_region_candidates(12).is_err());
+    assert_eq!(editor.pending_cells(),1);
+    assert_eq!(fixture.bytes_now(),original);
+}

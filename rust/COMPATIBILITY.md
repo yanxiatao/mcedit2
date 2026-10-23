@@ -155,3 +155,12 @@ MCRegion and old numeric Anvil now have an in-memory Blocks/Data/Add
 byte-level editing candidate, including optional Add growth for Anvil.
 This does not provide actual region persistence, lighting/heightmap fixes,
 or guarantee compatibility with untested modded save layouts.
+
+### Original Region image construction — round 3/5
+
+The in-memory writer can now propose append-only MCA/MCR region files while
+preserving original sector bytes, compression types and untouched header
+entries. It only plans edits to preexisting internal chunks. External .mcc
+sidecar chunks, unsupported codecs, overlapping sector maps and oversized
+internal chunk allocations deliberately fail closed. No on-disk save is
+exposed until the next separate transactional writer stage.

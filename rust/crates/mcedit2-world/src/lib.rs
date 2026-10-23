@@ -9,6 +9,7 @@ pub mod sections;
 pub mod alpha;
 pub mod block_lookup;
 pub mod editing;
+pub mod region_plan;
 mod patch;
 mod oldnumeric;
 

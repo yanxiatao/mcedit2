@@ -7,7 +7,8 @@
 //! atomic backups, schema safety and all-version coverage before exposure.
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
-use crate::patch;
+use crate::{patch,region_plan};
+use crate::region_plan::NativeRegionCandidate;
 
 use crate::block_lookup::{parse_xyz, read_world_block, read_world_chunk, Lookup};
 use crate::sections::{decode_sections,patch_named_growing_palette,patch_original_numeric_arrays,Chunk,InPaletteEdit,Layout,State};
@@ -699,6 +700,16 @@ impl Session {
             });
         }
         Ok(result)
+    }
+    /// Preview complete append-only MCA/MCR images for staged block edits.
+    /// Never replaces original region data, never writes any file.
+    pub fn prepare_native_region_candidates(
+        &self, timestamp: u32,
+    ) -> Result<Vec<NativeRegionCandidate>, WorldError> {
+        let candidates=self.prepare_native_palette_candidates()?;
+        region_plan::plan_world_regions(
+            &self.world,&self.dimension,&candidates,timestamp,
+        )
     }
     /// Write an external original-NBT-verified edit journal, never a world file.
     pub fn export_patch(&self, path: &Path) -> Result<usize, WorldError> {

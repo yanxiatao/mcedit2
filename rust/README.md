@@ -251,3 +251,20 @@ All Block Entities are guarded, untouched NBT tags are copied verbatim, and
 all 4096 original cells in each Section are verified after re-decoding.
 The Rust editor preview now dispatches numeric vs named byte patchers.
 No Minecraft region file is written; CI remains deferred until round 5.
+
+## Persistence round 3/5 — in-memory append-only Region image planner (unbuilt)
+
+The Rust backend now assembles MCA/MCR candidate images from verified
+original-byte chunk edits. It reads the *whole* source region, checks its
+location table and overlap-free sector allocation, original compressed NBT
+fingerprints, and retains untouched region bytes and original chunk slots
+without repacking. Changed chunks are compressed using their original
+GZip/Zlib/raw codec and appended in fresh 4 KiB sectors; only the relevant
+header offsets and timestamps are changed. No missing chunks are created.
+External .mcc streams, overlapping allocations, oversized compressed chunks,
+ambiguous files, source drift, invalid source Block Entity metadata and
+any change to an untouched original sector are rejected. The assembled
+image is decoded again and each changed block counted. An iced dry-run button
+shows the number of images, changed chunks and candidate bytes. This step
+DOES NOT WRITE Minecraft world files, and has not been built or CI-tested.
+Next: round 4 adds disk backups/recovery and fail-closed atomic commit.

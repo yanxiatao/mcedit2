@@ -6,6 +6,7 @@ use mcedit2_world::block_lookup::{parse_xyz,read_world_block};
 use mcedit2_world::editing::{parse_bounds,parse_state,Preview,Session};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::{SystemTime,UNIX_EPOCH};
 
 #[derive(Default)]
 struct App{
@@ -36,7 +37,7 @@ enum Message{
     SelectionText(String),TargetText(String),FilterText(String),
     CloneDestination(String), PreviewClone,
     FillSeed(String), PreviewFill,
-    PatchPath(String),ExportPatch,ImportPatch,AnalyzeNativePatch,
+    PatchPath(String),ExportPatch,ImportPatch,AnalyzeNativePatch,AnalyzeRegionPlan,
     PreviewEdit,ApplyEdit,UndoEdit,RedoEdit,DiscardEdits,Clear
 }
 impl App{
@@ -257,6 +258,25 @@ fn update(app:&mut App,message:Message){
         Message::SelectionText(value)=>{app.edit_area=value;app.prepared=None;}
         Message::TargetText(value)=>{app.edit_target=value;app.prepared=None;}
         Message::FilterText(value)=>{app.edit_filter=value;app.prepared=None;}
+        Message::AnalyzeRegionPlan=>{
+            let timestamp=SystemTime::now().duration_since(UNIX_EPOCH)
+                .ok().and_then(|d|u32::try_from(d.as_secs()).ok());
+            app.edit_report=match (app.current_key(),timestamp){
+                (None,_)=>"Select an original Java world first.".into(),
+                (_,None)=>"System clock outside supported Region timestamp range.".into(),
+                (Some(key),Some(timestamp))=>app.current_session(key)
+                    .and_then(|editor|editor.prepare_native_region_candidates(timestamp)
+                        .map_err(|e|e.to_string()))
+                    .map(|plans|format!(
+                        "Original Region dry-run: {} Region images, {} changed chunks, {} original bytes -> {} candidate bytes. NO FILES WRITTEN.",
+                        plans.len(),
+                        plans.iter().map(|p|p.modified_chunks).sum::<usize>(),
+                        plans.iter().map(|p|p.original_bytes).sum::<usize>(),
+                        plans.iter().map(|p|p.planned_bytes).sum::<usize>(),
+                    ))
+                    .unwrap_or_else(|e|format!("Region dry-run refused: {e}")),
+            };
+        },
         Message::AnalyzeNativePatch=>{
             app.edit_report=match app.current_key(){
                 None=>"Open a world before analyzing native NBT changes.".into(),
@@ -417,7 +437,8 @@ fn view(app:&App)->Element<'_,Message>{
             button("Discard edits").on_press(Message::DiscardEdits)
         ].spacing(8));
         body=body.push(row![
-            button("Analyze lossless native NBT preview").on_press(Message::AnalyzeNativePatch)
+            button("Analyze lossless native NBT preview").on_press(Message::AnalyzeNativePatch),
+            button("Analyze append-only Region save plan").on_press(Message::AnalyzeRegionPlan)
         ].spacing(8));
         body=body.push(row![
             text_input("External .mcedit2patch path (outside the world)",&app.patch_path)
