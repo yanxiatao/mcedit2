@@ -1351,3 +1351,39 @@ fn compound_path_scalar_surgery_changes_one_leaf_without_reserializing_siblings(
         ).is_err(),"Accepted invalid nested path {path}");
     }
 }
+
+#[test]
+fn declarative_modded_be_batch_is_all_or_nothing_without_world_writes(){
+    let world=NativeWorld::create(true);
+    overwrite_region(&world,&chunk_with_be("minecraft:stone",(2,-64,3)));
+    let saved=world.bytes_now();
+    let path=std::env::temp_dir().join(format!(
+        "mcedit2-batch-{}-{}.mcedit2beops.json",
+        std::process::id(),COUNTER.fetch_add(1,Ordering::Relaxed)
+    ));
+    let mut session=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    let manifest=|invalid:bool|serde_json::json!({
+        "version":1,"original_world_root":world.metadata().root.to_string_lossy(),
+        "dimension":"minecraft:overworld",
+        "data_version":world.metadata().data_version,
+        "operations":[
+            {"xyz":[2,-64,3],"field":"ModdedCompound/Inner/BurnTime","value":"90"},
+            {"xyz":[2,-64,3],
+                "field":if invalid{"no_such_field"}else{"MachineHeat"},
+                "value":"99.5"}
+        ]
+    });
+    fs::write(&path,serde_json::to_vec(&manifest(true)).unwrap()).unwrap();
+    assert!(session.stage_be_operation_file(&path).is_err());
+    assert_eq!(session.pending_be_chunks(),0);
+    fs::write(&path,serde_json::to_vec(&manifest(false)).unwrap()).unwrap();
+    assert_eq!(session.preview_be_operation_file(&path).unwrap(),(2,1));
+    assert_eq!(session.pending_be_chunks(),0);
+    assert_eq!(session.stage_be_operation_file(&path).unwrap(),2);
+    assert_eq!(session.pending_be_chunks(),1);
+    assert!(session.undo_be_edit().unwrap());
+    assert!(session.undo_be_edit().unwrap());
+    assert_eq!(session.pending_be_chunks(),0);
+    assert_eq!(world.bytes_now(),saved);
+    fs::remove_file(path).unwrap();
+}

@@ -82,6 +82,7 @@ struct App{
     be_scalar_value:String,
     be_snapshot_path:String,
     be_journal_path:String,
+    be_batch_path:String,
     plugin_manifest_path:String,
     clone_destination:String,
     fill_seed:String,
@@ -110,6 +111,7 @@ enum Message{
     StageBeScalar,UndoBeScalar,RedoBeScalar,InspectStagedBe,
     BeSnapshotPath(String),ExportOriginalBe,VerifyOriginalBe,
     BeJournalPath(String),ExportBeJournal,ImportBeJournal,
+    BeBatchPath(String),PreviewBeBatch,StageBeBatch,
     PluginManifestPath(String),PreviewPlugin,
     InspectBlock,InspectOriginalBlockEntity,SliceText(String),InspectSlice,PickSlice(i32,i32,i32),MoveSlice(i32,i32,i32),
     VerticalText(String),InspectVertical,PickVertical(usize,usize),
@@ -957,6 +959,34 @@ fn update(app:&mut App,message:Message){
         Message::BeScalarField(value)=>{app.be_scalar_field=value;app.be_prepared=None;},
         Message::BeSnapshotPath(value)=>app.be_snapshot_path=value,
         Message::BeJournalPath(value)=>app.be_journal_path=value,
+        Message::BeBatchPath(value)=>app.be_batch_path=value,
+        Message::PreviewBeBatch=>{
+            let file=PathBuf::from(app.be_batch_path.trim());
+            let result=app.current_key().ok_or_else(||"Select a world".to_string())
+                .and_then(|key|app.current_session(key))
+                .and_then(|session|session.preview_be_operation_file(&file)
+                    .map_err(|e|e.to_string()));
+            app.edit_report=match result{
+                Ok((count,chunks))=>format!("Validated all {count} BE scalar edits against source NBT across {chunks} chunks. Nothing staged or written."),
+                Err(e)=>format!("BE batch preview refused: {e}"),
+            };
+        },
+        Message::StageBeBatch=>{
+            if app.readonly {app.edit_report="-view forbids BE changes".into();}
+            else{
+                app.be_prepared=None;app.prepared=None;app.save_preview=None;
+                let file=PathBuf::from(app.be_batch_path.trim());
+                let result=app.current_key().ok_or_else(||"Select a world".to_string())
+                    .and_then(|key|app.current_session(key))
+                    .and_then(|session|session.stage_be_operation_file(&file)
+                        .map_err(|e|e.to_string()));
+                app.edit_report=match result{
+                    Ok(n)=>format!("Atomically staged all {n} BE scalar operations IN MEMORY. Existing BE Undo available; world disk unchanged."),
+                    Err(e)=>format!("Entire BE batch refused: {e}"),
+                };
+                app.surface=None;app.slice_grid=None;app.vertical_grid=None;
+            }
+        },
         Message::ExportBeJournal=>{
             let file=PathBuf::from(app.be_journal_path.trim());
             let result=app.current_key().ok_or_else(||"Select an original world".to_string())
@@ -1357,6 +1387,12 @@ fn view(app:&App)->Element<'_,Message>{
             text_input("Type SAVE_BE_NBT to write",&app.be_save_phrase)
                 .on_input(Message::BeSavePhrase).width(Length::Fill),
             button("Confirm BE Region save").on_press(Message::ConfirmBeSave),
+        ].spacing(8));
+        body=body.push(row![
+            text_input("Declarative BE scalar .mcedit2beops.json",&app.be_batch_path)
+                .on_input(Message::BeBatchPath).width(Length::Fill),
+            button("Preview whole BE batch").on_press(Message::PreviewBeBatch),
+            button("Stage all BE edits").on_press(Message::StageBeBatch),
         ].spacing(8));
         body=body.push(row![
             text_input("Outside-world BE edit .mcedit2bejournal.json",&app.be_journal_path)

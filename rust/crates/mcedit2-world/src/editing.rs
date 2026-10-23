@@ -677,6 +677,15 @@ impl Session {
     }
     /// Preview an untrusted declarative plugin operation using the EXACT
     /// same guarded batch prepare/commit/Undo logic as manual block edits.
+    /// Preflight a declarative set of BE scalar surgeries atomically.
+    pub fn preview_be_operation_file(&self,path:&Path)
+        ->Result<(usize,usize),WorldError>{
+        crate::be_operations::preview_file(self,path)
+    }
+    /// Stage the whole file or nothing; never write a Minecraft Region.
+    pub fn stage_be_operation_file(&mut self,path:&Path)->Result<usize,WorldError>{
+        crate::be_operations::stage_file(self,path)
+    }
     pub fn prepare_plugin_file(&self,path:&Path)->Result<Preview,WorldError>{
         crate::plugins::prepare_file(self,path)
     }

@@ -619,3 +619,13 @@ siblings at every nesting level are verified with their original exact NBT
 bytes. Lists, arrays, unknown leaf types, identity or coordinate fields
 remain protected; paths never create or delete tags. Test fixtures include
 nested opaque mod data and invalid path refusals.
+
+## Round 3/5 — atomic declarative BE NBT scalar batches
+
+An external strict `.mcedit2beops.json` file (<=64KiB) supports 1–24
+existing numeric/String BE scalar replacements with per-world/dimension/
+DataVersion scope. The engine clones the original edit Session and replays
+every operation with original source SHA and byte-preserving NBT checks;
+only on full success does it adopt the new in-memory overlay. A later bad
+operation leaves no partial changes; each accepted edit retains its BE Undo.
+The iced GUI provides separate preview/stage controls. No disk writes.
