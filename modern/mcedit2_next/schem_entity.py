@@ -153,9 +153,16 @@ def encode_sponge_entity_structure(structure: JavaEntityStructure,
         (tag.start, tag.end, nbt.list_tag("Entities", 10, entities)),
     ])
     checked = decode_sponge_entity_structure(serialized)
-    if (checked.blocks.structure != structure.blocks.structure
-            or len(checked.blocks.block_entities) != len(structure.blocks.block_entities)
-            or len(checked.entities) != len(structure.entities)):
+    original_blocks = structure.blocks.structure
+    decoded_blocks = checked.blocks.structure
+    # Sponge chooses Y/Z/X palette order independently from native
+    # selection traversal. Compare exact coordinates and states, not
+    # incidental file or memory enumeration order.
+    if (decoded_blocks.size != original_blocks.size or
+            decoded_blocks.data_version != original_blocks.data_version or
+            dict(decoded_blocks.blocks) != dict(original_blocks.blocks) or
+            len(checked.blocks.block_entities) != len(structure.blocks.block_entities) or
+            len(checked.entities) != len(structure.entities)):
         raise SpongeEntityError("Sponge entity roundtrip changed structure")
     # Canonical Sponge changes wrapper order, never arbitrary extra NBT tags.
     for original, decoded in zip(structure.entities, checked.entities):
