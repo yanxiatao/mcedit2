@@ -842,6 +842,21 @@ impl Session {
         let source=schematic::import_legacy(&self.world,&self.dimension,path)?;
         self.prepare_paste_clipboard(&source,destination_min)
     }
+    /// Import Sponge v2 palette-based named blocks; DataVersion must match.
+    pub fn prepare_import_sponge_v2(
+        &self,path:&Path,destination_min:Position,
+    )->Result<Preview,WorldError>{
+        let block_clip=schematic::import_sponge_v2(&self.world,&self.dimension,path)?;
+        self.prepare_paste_clipboard(&block_clip,destination_min)
+    }
+    /// Export only BE-free named blocks to Sponge v2; no entity/biome data.
+    pub fn export_sponge_v2(
+        &self,bounds:Bounds,path:&Path,
+    )->Result<usize,WorldError>{
+        let block_clip=self.capture_clipboard(bounds)?;
+        schematic::export_sponge_v2(&self.world,&block_clip,path)?;
+        Ok(block_clip.blocks.len())
+    }
     /// Write an external original-NBT-verified edit journal, never a world file.
     pub fn export_patch(&self, path: &Path) -> Result<usize, WorldError> {
         if self.overlay.is_empty() {return Err(refuse("No pending blocks to export"));}

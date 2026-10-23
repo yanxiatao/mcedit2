@@ -382,3 +382,18 @@ preview a classic structure paste at its clipboard destination and apply
 it using the existing guarded/undoable operation. Only original Alpha
 Materials numeric schematics and numeric destination chunks are supported;
 modern Sponge `.schem` and non-lossy BE structure transfer remain pending.
+
+## Next migration batch 5/5 — Sponge v2 structures
+
+Modern Java named-block Sponge schematic v2 `.schem` import/export is
+implemented with GZip NBT, exact DataVersion matching, required palette,
+PaletteMax, bounded varint BlockData and canonical Y/Z/X ordering. The
+exporter emits a new file outside the original world and never regenerates
+unrelated original NBT. Nonempty entities/BlockEntities and all biome
+information are rejected on import rather than silently discarded; nonzero
+Offset, unknown schematic Versions, malformed indices and structures over
+4096 cells are likewise refused. iced adds export and paste-preview buttons
+and the existing BE guard and Undo system handles destination edits. Sponge
+v3, full BE/entity schematic transfers, and version conversion still remain
+unimplemented. This completes the five new migration source rounds; perform
+combined Linux/Windows **check and test only** next, not application builds.

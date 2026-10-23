@@ -198,3 +198,11 @@ Versioned `.mcedit2clip` provides same-world block-state source capture,
 recoverable clipboard import, safe destination preview and Undo. It is NOT
 a Minecraft schematic file and contains no opaque Block Entity/entity NBT.
 Source or destination Block Entity collisions refuse the entire action.
+
+### Sponge v2 block-only .schem import/export
+
+Named-state Sponge v2 GZip NBT with exact target DataVersion supports
+lossless block-state-only transfer. Entities, BlockEntities, biomes and
+nonzero schematic Offset cannot be carried and refuse import, rather than
+being stripped silently. v3, full structure NBT and conversions remain
+unsupported.

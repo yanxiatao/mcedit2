@@ -72,6 +72,7 @@ struct App{
     clipboard_path:String,
     clipboard_destination:String,
     schematic_path:String,
+    sponge_path:String,
     save_phrase:String,
     recover_region:String,
     recovery_phrase:String,
@@ -92,6 +93,7 @@ enum Message{
     PatchPath(String),ExportPatch,ImportPatch,AnalyzeNativePatch,AnalyzeRegionPlan,
     ClipboardPath(String),ClipboardDestination(String),ExportClipboard,PreviewPasteClipboard,
     SchematicPath(String),PreviewLegacySchematic,
+    SpongePath(String),PreviewSpongeV2,ExportSpongeV2,
     PrepareWorldSave,SavePhrase(String),ConfirmWorldSave,
     RecoverRegion(String),RecoveryPhrase(String),FinalizeRegion,RollbackRegion,
     PreviewEdit,ApplyEdit,UndoEdit,RedoEdit,DiscardEdits,Clear
@@ -474,6 +476,7 @@ fn update(app:&mut App,message:Message){
         Message::Path(x)=>app.path=x,
         Message::ClipboardPath(value)=>app.clipboard_path=value,
         Message::SchematicPath(value)=>app.schematic_path=value,
+        Message::SpongePath(value)=>app.sponge_path=value,
         Message::ClipboardDestination(value)=>app.clipboard_destination=value,
         Message::ExportClipboard=>{
             app.save_preview=None;
@@ -489,6 +492,41 @@ fn update(app:&mut App,message:Message){
                 Ok(n)=>format!("Exported {n} selected block states to a create-new .mcedit2clip file. Block Entities/entities excluded; Minecraft world unchanged."),
                 Err(e)=>format!("Block-only clipboard export refused: {e}"),
             };
+        },
+        Message::ExportSpongeV2=>{
+            app.save_preview=None;
+            app.prepared=None;
+            let path=PathBuf::from(app.sponge_path.trim());
+            let result=(||->Result<usize,String>{
+                let area=parse_bounds(&app.edit_area).map_err(|e|e.to_string())?;
+                let key=app.current_key().ok_or("Select an original world")?;
+                app.current_session(key)?
+                    .export_sponge_v2(area,&path).map_err(|e|e.to_string())
+            })();
+            app.edit_report=match result{
+                Ok(n)=>format!("Exported {n} named block states to new Sponge v2 .schem (no BE/entity/biome NBT). World unchanged."),
+                Err(e)=>format!("Sponge v2 export refused: {e}"),
+            };
+        },
+        Message::PreviewSpongeV2=>{
+            app.save_preview=None;
+            app.prepared=None;
+            let path=PathBuf::from(app.sponge_path.trim());
+            let result=(||->Result<Preview,String>{
+                let target=parse_xyz(&app.clipboard_destination).map_err(|e|e.to_string())?;
+                let key=app.current_key().ok_or("Select an original world")?;
+                app.current_session(key)?
+                    .prepare_import_sponge_v2(&path,target).map_err(|e|e.to_string())
+            })();
+            match result {
+                Ok(preview)=>{
+                    app.edit_report=format!("Sponge v2 exact-DataVersion block-only preview: {}",preview.summary());
+                    if let Some((wi,di))=app.current_key(){
+                        app.prepared=Some((wi,di,preview));
+                    }
+                },
+                Err(e)=>app.edit_report=format!("Sponge v2 import refused: {e}"),
+            }
         },
         Message::PreviewLegacySchematic=>{
             app.save_preview=None;
@@ -861,6 +899,12 @@ fn view(app:&App)->Element<'_,Message>{
             text_input("Original MCEdit .schematic path",&app.schematic_path)
                 .on_input(Message::SchematicPath).width(Length::Fill),
             button("Preview numeric schematic import").on_press(Message::PreviewLegacySchematic)
+        ].spacing(8));
+        body=body.push(row![
+            text_input("Modern Sponge v2 .schem file",&app.sponge_path)
+                .on_input(Message::SpongePath).width(Length::Fill),
+            button("Export selection to Sponge v2").on_press(Message::ExportSpongeV2),
+            button("Preview Sponge v2 paste").on_press(Message::PreviewSpongeV2),
         ].spacing(8));
         body=body.push(row![
             text_input("External .mcedit2patch path (outside the world)",&app.patch_path)
