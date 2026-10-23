@@ -13,7 +13,7 @@ use std::path::{Path,PathBuf};
 use flate2::{Compression,read::{GzDecoder,ZlibDecoder},write::{GzEncoder,ZlibEncoder}};
 use sha2::{Digest,Sha256};
 use crate::editing::NativeChunkCandidate;
-use crate::sections::{decode_sections,Chunk};
+use crate::sections::{decode_sections,patch_named_growing_palette,patch_original_numeric_arrays,Chunk,InPaletteEdit,Layout};
 use crate::{WorldError,WorldSummary};
 
 const SECTOR:usize=4096;
@@ -250,6 +250,128 @@ fn plan_region_image(
     }
     Ok(image)
 }
+
+
+/// Reconstruct the expected edited NBT with our ONLY allowed block-byte
+/// adapters, then compare EVERY output byte. This is essential: a public
+/// NativeRegionCandidate must never smuggle changes to opaque modded tags,
+/// entities, inventory, or Block Entity NBT into an on-disk transaction.
+fn verify_exact_block_only_replay(
+    original_nbt:&[u8],patched_nbt:&[u8],before:&Chunk,after:&Chunk,
+)->Result<(),WorldError>{
+    if !equivalent_metadata(before,after) {
+        return Err(refuse("Replayed NBT metadata or BE coordinates differ"));
+    }
+    let mut edits=Vec::new();
+    for section in &before.sections {
+        let updated=after.sections.iter().find(|s|s.y==section.y)
+            .ok_or_else(||refuse("Original NBT Section missing during replay"))?;
+        for index in 0..4096usize {
+            let initial=section.palette.get(section.indices[index] as usize)
+                .ok_or_else(||refuse("Original state index invalid during replay"))?;
+            let final_state=updated.palette.get(updated.indices[index] as usize)
+                .ok_or_else(||refuse("Replacement state index invalid during replay"))?;
+            if initial!=final_state {
+                edits.push(InPaletteEdit {
+                    local_x:(index%16) as u8,
+                    local_z:((index/16)%16) as u8,
+                    y:section.y as i32*16+(index/256) as i32,
+                    original:initial.clone(),replacement:final_state.clone(),
+                });
+            }
+        }
+    }
+    if edits.is_empty(){return Err(refuse("No actual edited cells in candidate"));}
+    // Session's overlay is an ordered BTreeMap by world X,Y,Z. Repeating the
+    // same deterministic order reconstructs palette growth insertion order.
+    edits.sort_by_key(|e|(e.local_x,e.y,e.local_z));
+    let expected=match before.layout {
+        Layout::Named113|Layout::Modern118=>
+            patch_named_growing_palette(original_nbt,&edits),
+        Layout::McRegion128|Layout::NumericAnvil112=>
+            patch_original_numeric_arrays(original_nbt,&edits),
+    }.map_err(|e|refuse(format!("Canonical NBT block-only replay rejected: {e}")))?;
+    if expected!=patched_nbt {
+        return Err(refuse("Edited NBT differs from block-only byte replay; opaque NBT must be retained"));
+    }
+    Ok(())
+}
+/// Prove that a candidate differs from the original region in exactly its
+/// declared chunk-header entries and newly appended sectors. Reject forged,
+/// stale, reordered or partially overwritten Region images before staging.
+pub(crate) fn verify_candidate(original:&[u8],candidate:&NativeRegionCandidate)
+    -> Result<(),WorldError>{
+    if hash(original)!=candidate.original_region_sha256
+        || original.len()!=candidate.original_bytes
+        || candidate.image.len()!=candidate.planned_bytes {
+        return Err(refuse("Region candidate original digest or image size differs"));
+    }
+    let original_slots=parse_slots(original)?;
+    let image_slots=parse_slots(&candidate.image)?;
+    if candidate.image.len()<=original.len()
+        || candidate.image.get(HEADER..original.len())!=Some(&original[HEADER..]) {
+        return Err(refuse("Region candidate failed original-sector preservation"));
+    }
+    let original_end=original.len()/SECTOR;
+    let mut modified=0;
+    let mut ranges=Vec::new();
+    for slot_index in 0..1024 {
+        let header=slot_index*4;
+        let old=original_slots[slot_index];
+        let new=image_slots[slot_index];
+        let same=old.map(|s|(s.start,s.sectors))==new.map(|s|(s.start,s.sectors));
+        if same {
+            if original[header..header+4]!=candidate.image[header..header+4]
+                || original[4096+header..4096+header+4]
+                    !=candidate.image[4096+header..4096+header+4] {
+                return Err(refuse("Unmodified original region header/timestamp was changed"));
+            }
+            continue;
+        }
+        let source=old.ok_or_else(||refuse("Candidate created a previously missing original chunk"))?;
+        let destination=new.ok_or_else(||refuse("Candidate removed an original chunk"))?;
+        if destination.start<original_end {
+            return Err(refuse("Candidate repointed a chunk into original sector bytes"));
+        }
+        let (source_method,source_nbt)=original_nbt(original,source)?;
+        let (target_method,target_nbt)=original_nbt(&candidate.image,destination)?;
+        if source_method!=target_method {
+            return Err(refuse("Candidate changed original chunk compression method"));
+        }
+        let before=decode_sections(&source_nbt)
+            .map_err(|e|refuse(format!("Original chunk decode failed: {e}")))?;
+        let after=decode_sections(&target_nbt)
+            .map_err(|e|refuse(format!("Replacement chunk decode failed: {e}")))?;
+        if before.x.is_some_and(|x|x.div_euclid(32)!=candidate.region_x
+            ||x.rem_euclid(32)!=(slot_index%32) as i32)
+            ||before.z.is_some_and(|z|z.div_euclid(32)!=candidate.region_z
+            ||z.rem_euclid(32)!=(slot_index/32) as i32) {
+            return Err(refuse("Candidate original chunk coordinate does not match its Region slot"));
+        }
+        if count_actual_edits(&before,&after)?==0 {
+            return Err(refuse("Region image needlessly replaced original chunk"));
+        }
+        verify_exact_block_only_replay(&source_nbt,&target_nbt,&before,&after)?;
+        ranges.push((destination.start,destination.start+destination.sectors));
+        modified+=1;
+    }
+    if modified!=candidate.modified_chunks || modified==0 {
+        return Err(refuse("Region candidate modified-chunk count mismatch"));
+    }
+    ranges.sort_unstable();
+    let mut expected_start=original_end;
+    for (start,end) in ranges {
+        if start!=expected_start {
+            return Err(refuse("Candidate has unexplained appended sector bytes or gaps"));
+        }
+        expected_start=end;
+    }
+    if expected_start!=candidate.image.len()/SECTOR {
+        return Err(refuse("Region candidate has unreferenced appended sectors"));
+    }
+    Ok(())
+}
+
 /// Group current verified original-NBT chunk candidates by their existing
 /// MCA/MCR file. The original bytes are re-read and hashed before returning.
 pub(crate) fn plan_world_regions(

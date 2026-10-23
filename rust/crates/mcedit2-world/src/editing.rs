@@ -8,6 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use crate::{patch,region_plan};
+use crate::region_transaction::{self,RegionWriteReceipt};
 use crate::region_plan::NativeRegionCandidate;
 
 use crate::block_lookup::{parse_xyz, read_world_block, read_world_chunk, Lookup};
@@ -710,6 +711,23 @@ impl Session {
         region_plan::plan_world_regions(
             &self.world,&self.dimension,&candidates,timestamp,
         )
+    }
+    /// Experimental single-Region world write. Refuses any staged edit that
+    /// touches a second Region; manual-only library API, not exposed in iced.
+    /// A successful atomic replacement clears the overlay and returns the
+    /// persistent original backup + pending marker for explicit finalization.
+    pub fn apply_single_region_save(
+        &mut self,timestamp:u32,
+    )->Result<RegionWriteReceipt,WorldError>{
+        let mut images=self.prepare_native_region_candidates(timestamp)?;
+        if images.len()!=1 {
+            return Err(refuse("Multi-Region edits are not an atomic transaction; export a journal instead"));
+        }
+        let candidate=images.pop().ok_or_else(||refuse("Missing single Region save candidate"))?;
+        let receipt=region_transaction::apply_single_region(
+            &self.world,&self.dimension,&candidate)?;
+        self.discard();
+        Ok(receipt)
     }
     /// Write an external original-NBT-verified edit journal, never a world file.
     pub fn export_patch(&self, path: &Path) -> Result<usize, WorldError> {

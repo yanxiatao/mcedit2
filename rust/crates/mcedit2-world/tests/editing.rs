@@ -687,3 +687,116 @@ fn region_image_plan_rejects_unrepresentable_mcregion_modded_id_without_disk_cha
     assert_eq!(editor.pending_cells(),1);
     assert_eq!(fixture.bytes_now(),original);
 }
+
+#[test]
+fn one_region_transaction_can_be_finalized_and_retains_original_backup(){
+    use mcedit2_world::region_transaction::finalize_single_region;
+    let fixture=NativeWorld::create(true);
+    let before=fixture.bytes_now();
+    let mut editor=Session::new(fixture.metadata(),"minecraft:overworld").unwrap();
+    let box_=Bounds::new((0,-64,0),(1,-64,0)).unwrap();
+    let target=parse_state("minecraft:gold_block").unwrap();
+    editor.commit(editor.prepare(box_,&target,None).unwrap()).unwrap();
+    let receipt=editor.apply_single_region_save(23456).unwrap();
+    assert_eq!(editor.pending_cells(),0);
+    assert_ne!(fixture.bytes_now(),before);
+    assert_eq!(fs::read(&receipt.backup_path).unwrap(),before);
+    assert!(receipt.marker_path.is_file());
+    let finished=finalize_single_region(&fixture.metadata(),"minecraft:overworld",0,0,"mca").unwrap();
+    assert!(finished.marker_path.is_file());
+    assert_eq!(fs::read(&finished.backup_path).unwrap(),before);
+    let actual=mcedit2_world::block_lookup::read_world_block(
+        &fixture.metadata(),"minecraft:overworld",0,-64,0).unwrap();
+    match actual {
+        Lookup::Present(block)=>assert_eq!(block.state,target),
+        other=>panic!("Unexpected saved region {other:?}"),
+    }
+}
+#[test]
+fn pending_region_crash_recovery_restores_original_verbatim(){
+    use mcedit2_world::region_transaction::{rollback_pending_region,finalize_single_region};
+    let fixture=NativeWorld::create(false);
+    let before=fixture.bytes_now();
+    let mut editor=Session::new(fixture.metadata(),"minecraft:overworld").unwrap();
+    let cell=Bounds::new((1,64,1),(1,64,1)).unwrap();
+    editor.commit(editor.prepare(cell,&parse_state("numeric:7[data=3]").unwrap(),None).unwrap()).unwrap();
+    let receipt=editor.apply_single_region_save(99).unwrap();
+    assert_ne!(fixture.bytes_now(),before);
+    let restored=rollback_pending_region(&fixture.metadata(),"minecraft:overworld",0,0,"mcr").unwrap();
+    assert_eq!(fixture.bytes_now(),before);
+    assert_eq!(fs::read(&restored.backup_path).unwrap(),before);
+    assert!(restored.marker_path.exists());
+    assert!(!receipt.marker_path.exists());
+    assert!(finalize_single_region(&fixture.metadata(),"minecraft:overworld",0,0,"mcr").is_err());
+}
+#[test]
+fn stale_or_tampered_region_backup_refuses_unsafe_recovery(){
+    use mcedit2_world::region_transaction::{rollback_pending_region,finalize_single_region};
+    let fixture=NativeWorld::create(true);
+    let mut editor=Session::new(fixture.metadata(),"minecraft:overworld").unwrap();
+    let cell=Bounds::new((1,-64,1),(1,-64,1)).unwrap();
+    editor.commit(editor.prepare(cell,&parse_state("minecraft:diamond_block").unwrap(),None).unwrap()).unwrap();
+    let receipt=editor.apply_single_region_save(4).unwrap();
+    let current=fixture.bytes_now();
+    fs::write(&receipt.backup_path,b"tampered backup").unwrap();
+    assert!(rollback_pending_region(&fixture.metadata(),"minecraft:overworld",0,0,"mca").is_err());
+    assert!(finalize_single_region(&fixture.metadata(),"minecraft:overworld",0,0,"mca").is_err());
+    assert_eq!(fixture.bytes_now(),current);
+}
+#[test]
+fn second_save_refuses_unresolved_marker_and_does_not_clobber_backup(){
+    let fixture=NativeWorld::create(true);
+    let mut editor=Session::new(fixture.metadata(),"minecraft:overworld").unwrap();
+    let cell=Bounds::new((1,-64,1),(1,-64,1)).unwrap();
+    editor.commit(editor.prepare(cell,&parse_state("minecraft:gold_block").unwrap(),None).unwrap()).unwrap();
+    let receipt=editor.apply_single_region_save(88).unwrap();
+    let saved=fixture.bytes_now();
+    let backup=fs::read(&receipt.backup_path).unwrap();
+    let mut followup=Session::new(fixture.metadata(),"minecraft:overworld").unwrap();
+    followup.commit(followup.prepare(
+        cell,&parse_state("minecraft:diamond_block").unwrap(),None
+    ).unwrap()).unwrap();
+    assert!(followup.apply_single_region_save(89).is_err());
+    assert_eq!(fixture.bytes_now(),saved);
+    assert_eq!(fs::read(receipt.backup_path).unwrap(),backup);
+}
+
+#[test]
+fn incomplete_pending_region_write_stage_can_be_recovered_without_modifying_original(){
+    use mcedit2_world::region_transaction::rollback_pending_region;
+    let fixture=NativeWorld::create(true);
+    let before=fixture.bytes_now();
+    let mut editor=Session::new(fixture.metadata(),"minecraft:overworld").unwrap();
+    let target=parse_state("minecraft:gold_block").unwrap();
+    let point=Bounds::new((0,-64,0),(0,-64,0)).unwrap();
+    editor.commit(editor.prepare(point,&target,None).unwrap()).unwrap();
+    // The final rename is intentionally not invoked. Simulate a valid
+    // pending state produced by a crash between stage fsync and rename.
+    let plans=editor.prepare_native_region_candidates(678).unwrap();
+    let candidate=&plans[0];
+    let original_sha=candidate.original_region_sha256.clone();
+    let new_sha={
+        use sha2::{Digest,Sha256};
+        Sha256::digest(&candidate.image).iter().map(|b|format!("{b:02x}")).collect::<String>()
+    };
+    let original_path=fixture.path.join("region/r.0.0.mca");
+    let marker_path=original_path.with_file_name("r.0.0.mca.mcedit2.pending.json");
+    let backup_path=original_path.with_file_name(format!("r.0.0.mca.mcedit2.{original_sha}.backup"));
+    let stage_path=original_path.with_file_name("r.0.0.mca.mcedit2.stage");
+    fs::write(&backup_path,&before).unwrap();
+    fs::write(&stage_path,&candidate.image).unwrap();
+    let marker=serde_json::json!({
+        "version":1,
+        "original_sha256":original_sha,
+        "replacement_sha256":new_sha,
+        "original_size":before.len(),
+        "replacement_size":candidate.image.len(),
+    });
+    fs::write(&marker_path,serde_json::to_vec(&marker).unwrap()).unwrap();
+    let receipt=rollback_pending_region(&fixture.metadata(),"minecraft:overworld",0,0,"mca").unwrap();
+    assert_eq!(fixture.bytes_now(),before);
+    assert!(!marker_path.exists());
+    assert!(!stage_path.exists());
+    assert!(receipt.marker_path.exists());
+    assert_eq!(fs::read(&backup_path).unwrap(),before);
+}

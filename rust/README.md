@@ -268,3 +268,33 @@ image is decoded again and each changed block counted. An iced dry-run button
 shows the number of images, changed chunks and candidate bytes. This step
 DOES NOT WRITE Minecraft world files, and has not been built or CI-tested.
 Next: round 4 adds disk backups/recovery and fail-closed atomic commit.
+
+## Persistence round 4/5 — opt-in one-Region disk transaction (unbuilt)
+
+The Rust core now offers a **library-only** Session::apply_single_region_save
+operation; there is intentionally still NO GUI save button. It rejects edits
+spanning multiple MCA/MCR files, because a sequence of per-file renames is
+not a global atomic operation. Backups are immutable, created with
+create_new, flushed to disk, followed by a same-directory staged candidate
+and a recoverable JSON pending marker. The original full Region hash is
+checked again immediately before the rename; original bytes are replaced
+through a same-filesystem rename, not in-place sector modifications.
+
+A pending transaction must be explicitly confirmed with
+region_transaction::finalize_single_region or reverted using
+region_transaction::rollback_pending_region. Crash recovery restores EXACT
+backup bytes and refuses corrupted backups or region hashes that have
+changed independently. Completion and rollback records are preserved,
+along with the original backup; neither operation deletes a backup. The
+current GUI does not expose actual write, finalize or rollback. Do not
+edit live worlds. Cross-region atomicity, process-level locking, complete
+filesystem crash durability and GUI recovery remain unfinished. No
+compiler/test verification has been performed: this is round 4/5, with
+only manual workflow_dispatch available.
+
+Round-4 hardening: the transaction boundary replays every changed voxel
+through the allowed original-byte adapter and byte-compares its resulting
+NBT to each proposed replacement. This prevents a modified candidate from
+rewriting unrelated modded NBT. The pending marker is now fsynced before
+the write-stage so interrupted pre-rename work is recoverable. Recovery
+archives valid abandoned stage bytes rather than deleting them.

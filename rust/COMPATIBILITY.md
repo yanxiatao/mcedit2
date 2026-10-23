@@ -164,3 +164,13 @@ entries. It only plans edits to preexisting internal chunks. External .mcc
 sidecar chunks, unsupported codecs, overlapping sector maps and oversized
 internal chunk allocations deliberately fail closed. No on-disk save is
 exposed until the next separate transactional writer stage.
+
+### Round 4: experimental atomic one-file writer (not yet tested)
+
+MCA/MCR single-file backing-up, same-directory staged rename, strict
+whole-source checksum checking, pending JSON transaction marker,
+explicit commit finalization and recovery to exact immutable bytes are
+present in the Rust core API. The GUI deliberately cannot save worlds.
+No claims are made for multi-region atomicity, external .mcc, Alpha
+chunk writing, fully recalculated lighting/heightmaps, or live Minecraft
+worlds. Run round-5 CI and tests before any operational use.
