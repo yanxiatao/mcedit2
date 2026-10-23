@@ -1075,3 +1075,35 @@ fn external_original_be_nbt_snapshot_preserves_modded_compound_and_detects_sourc
     assert!(editor.verify_original_be_snapshot(&file).is_err());
     fs::remove_file(file).unwrap();
 }
+
+#[test]
+fn declarative_plugin_preview_uses_original_chunk_safety_and_a_single_undo(){
+    let world=NativeWorld::create(true);
+    let before=world.bytes_now();
+    let path=std::env::temp_dir().join(format!(
+        "mcedit2-test-{}-{}.mcedit2plugin.json",
+        std::process::id(),COUNTER.fetch_add(1,Ordering::Relaxed)
+    ));
+    let manifest=serde_json::json!({
+        "schema_version":1,"name":"test original-only 3D replacement",
+        "only_data_version":5125,
+        "only_dimension":"minecraft:overworld",
+        "operation":{
+            "kind":"replace_blocks",
+            "minimum":[0,-64,0],"maximum":[1,-64,1],
+            "with_state":"minecraft:gold_block",
+            "only_if_state":"minecraft:stone"
+        }
+    });
+    fs::write(&path,serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let mut session=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    let preview=session.prepare_plugin_file(&path).unwrap();
+    assert_eq!(preview.changed(),4);
+    assert_eq!(session.pending_cells(),0);
+    session.commit(preview).unwrap();
+    assert_eq!(session.pending_cells(),4);
+    assert!(session.undo().unwrap());
+    assert_eq!(session.pending_cells(),0);
+    assert_eq!(world.bytes_now(),before);
+    fs::remove_file(path).unwrap();
+}

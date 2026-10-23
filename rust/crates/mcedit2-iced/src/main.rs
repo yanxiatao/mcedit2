@@ -80,6 +80,7 @@ struct App{
     be_scalar_field:String,
     be_scalar_value:String,
     be_snapshot_path:String,
+    plugin_manifest_path:String,
     clone_destination:String,
     fill_seed:String,
     patch_path:String,
@@ -103,6 +104,7 @@ enum Message{
     SurfaceArea(String),InspectSurface,PickSurface(i32,i32,i32),RotateSurface,
     BeScalarField(String),BeScalarValue(String),PreviewBeScalar,
     BeSnapshotPath(String),ExportOriginalBe,VerifyOriginalBe,
+    PluginManifestPath(String),PreviewPlugin,
     InspectBlock,InspectOriginalBlockEntity,SliceText(String),InspectSlice,PickSlice(i32,i32,i32),MoveSlice(i32,i32,i32),
     VerticalText(String),InspectVertical,PickVertical(usize,usize),
     SelectionText(String),TargetText(String),FilterText(String),
@@ -836,6 +838,26 @@ fn update(app:&mut App,message:Message){
         },
         Message::BeScalarField(value)=>app.be_scalar_field=value,
         Message::BeSnapshotPath(value)=>app.be_snapshot_path=value,
+        Message::PluginManifestPath(value)=>app.plugin_manifest_path=value,
+        Message::PreviewPlugin=>{
+            app.prepared=None;
+            app.save_preview=None;
+            let filename=PathBuf::from(app.plugin_manifest_path.trim());
+            let result=(||->Result<Preview,String>{
+                let key=app.current_key().ok_or("Select an original world/dimension")?;
+                app.current_session(key)?.prepare_plugin_file(&filename)
+                    .map_err(|e|e.to_string())
+            })();
+            match result{
+                Ok(preview)=>{
+                    app.edit_report=format!("Declarative plugin PREVIEW: {}. Stage using existing Undo-able Apply control; no arbitrary executable is run.",preview.summary());
+                    if let Some((wi,di))=app.current_key(){
+                        app.prepared=Some((wi,di,preview));
+                    }
+                },
+                Err(e)=>app.edit_report=format!("Plugin manifest preflight refused: {e}"),
+            }
+        },
         Message::ExportOriginalBe=>{
             let path=PathBuf::from(app.be_snapshot_path.trim());
             let result=(||->Result<usize,String>{
@@ -1078,7 +1100,7 @@ fn view(app:&App)->Element<'_,Message>{
         ].spacing(8));
         if let Some((wi,di,view))=&app.surface{
             if app.current_key()==Some((*wi,*di)){
-                body=body.push(button(format!("Rotate 3D camera 90° (view {})",app.surface_camera))
+                body=body.push(button(text(format!("Rotate 3D camera 90° (view {})",app.surface_camera)))
                     .on_press(Message::RotateSurface));
                 body=body.push(canvas(IsometricSurface{
                     surface:view.clone(),camera_quarters:app.surface_camera
@@ -1234,6 +1256,11 @@ fn view(app:&App)->Element<'_,Message>{
                 .on_input(Message::SpongePath).width(Length::Fill),
             button("Export selection to Sponge v2").on_press(Message::ExportSpongeV2),
             button("Preview Sponge v2 paste").on_press(Message::PreviewSpongeV2),
+        ].spacing(8));
+        body=body.push(row![
+            text_input("Declarative .mcedit2plugin.json file",&app.plugin_manifest_path)
+                .on_input(Message::PluginManifestPath).width(Length::Fill),
+            button("Preview safe plugin replacement").on_press(Message::PreviewPlugin),
         ].spacing(8));
         body=body.push(row![
             text_input("External .mcedit2patch path (outside the world)",&app.patch_path)

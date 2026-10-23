@@ -501,3 +501,23 @@ same order so the nearest visible surface wins. The camera never changes
 source NBT or edit positions. Rotated terrain is still an untextured
 highest-block-per-column preview, not a complete interior/hidden-face
 3D mesh renderer.
+
+## Migration batch 4, round 5/5 — declarative plugin compatibility entry
+
+A versioned `.mcedit2plugin.json` manifest can declare a strictly bounded
+replace-blocks operation with exact optional DataVersion, dimension,
+replacement and source-state filter. The operation uses the same original
+NBT checks, BE refusal and single Undo transaction as manual edits; iced
+shows a preview and the user must still choose Apply. Plugin JSON is
+size/type checked and never executes arbitrary Python, shell, DLL, network,
+or native plugin code. This is a minimal extension protocol foundation,
+NOT compatibility with original MCEdit2 Python plugins. Broader plugin
+permissions, signed sandbox runtimes and complete legacy plugin APIs are
+still unimplemented. The five source rounds are now complete; run only
+Linux/Windows `cargo check` and `cargo test`, no build/package actions.
+
+3D CI follow-up: iced 0.14 requires an Element (e.g. `text`) rather than
+a plain `String` as button content. The voxel inspector now reuses the
+already decoded source chunk and overlays staged effective block states
+without re-decompressing NBT for every cell. The isometric Y projection is
+anchored to the top Y level so visible high blocks are on-screen.

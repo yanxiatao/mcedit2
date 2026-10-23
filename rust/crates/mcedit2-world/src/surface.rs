@@ -69,11 +69,7 @@ pub fn inspect_surface(
             for y in (y_min..=y_max).rev(){
                 let Some(original)=chunk.block(wx.rem_euclid(16) as u8,y,
                     wz.rem_euclid(16) as u8) else{continue};
-                let state=session.visible_block((wx,y,wz))?;
-                let state=match state{
-                    crate::block_lookup::Lookup::Present(details)=>details.state,
-                    _=>return Err(refuse("Original Section changed during surface inspection")),
-                };
+                let state=session.effective_state((wx,y,wz),original);
                 let voxel=SurfaceVoxel{
                     x:wx,y,z:wz,state,
                     original_block_entity:chunk.has_block_entity(wx,y,wz),
@@ -82,7 +78,6 @@ pub fn inspect_surface(
                 if !is_air(&voxel.state){
                     chosen=Some(voxel);break;
                 }
-                let _=original;
             }
             if let Some(voxel)=chosen.or(fallback){
                 voxels.push(voxel);

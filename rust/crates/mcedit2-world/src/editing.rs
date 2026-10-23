@@ -344,6 +344,12 @@ impl Session {
         Ok(Self { world, dimension, overlay: BTreeMap::new(), undo: Vec::new(), redo: Vec::new() })
     }
     pub fn original_world(&self) -> &WorldSummary { &self.world }
+    /// Reuse an already strictly decoded source chunk instead of reopening
+    /// it for each cell in a 3D render. This never exposes the overlay for
+    /// direct mutation, and original source BE guards remain authoritative.
+    pub(crate) fn effective_state(&self,position:Position,source:&State)->State{
+        self.overlay.get(&position).unwrap_or(source).clone()
+    }
     pub fn dimension(&self) -> &str { &self.dimension }
     pub fn pending_cells(&self) -> usize { self.overlay.len() }
     pub fn undo_depth(&self) -> usize { self.undo.len() }
@@ -430,6 +436,11 @@ impl Session {
     )->Result<(Position,usize),WorldError>{
         let snap=crate::be_snapshot::verify_file(&self.world,&self.dimension,path)?;
         Ok(((snap.xyz[0],snap.xyz[1],snap.xyz[2]),snap.raw_compound.len()))
+    }
+    /// Preview an untrusted declarative plugin operation using the EXACT
+    /// same guarded batch prepare/commit/Undo logic as manual block edits.
+    pub fn prepare_plugin_file(&self,path:&Path)->Result<Preview,WorldError>{
+        crate::plugins::prepare_file(self,path)
     }
     /// Group by original chunk; inspect each native NBT at most once.
     /// Entire preview is read-only. Missing original chunks/Sections are

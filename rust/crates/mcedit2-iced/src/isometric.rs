@@ -45,10 +45,10 @@ fn rotated(voxel:&SurfaceVoxel,view:&SurfaceView,camera:u8)->(f32,f32){
 fn center(voxel:&SurfaceVoxel,view:&SurfaceView,camera:u8,size:iced::Size)->Point{
     // Orthographic isometric XYZ projection with natural vertical heights.
     let (px,pz)=rotated(voxel,view,camera);
-    let py=(voxel.y-view.y_min) as f32;
+    let below_top=(view.y_max-voxel.y) as f32;
     Point::new(
         size.width/2.0+(px-pz)*12.0,
-        54.0+(px+pz)*6.0-py*7.0
+        54.0+(px+pz)*6.0+below_top*7.0
     )
 }
 fn top_diamond(c:Point)->[Point;4]{
