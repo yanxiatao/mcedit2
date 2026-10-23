@@ -65,6 +65,10 @@ class LiveSelectionTemplateTests(unittest.TestCase):
                 capture_live_template(
                     editor, Box((2, -62, 3), (2, -62, 3)),
                     mode="blocks", target_origin=(8, -62, 3))
+            # Use a genuinely different source state from the target.
+            # Original test copied stone onto stone: correctly 0 changes.
+            world.set_block(1, -62, 1, make_block("minecraft:diamond_block"))
+            world.save()
             snap = capture_live_template(
                 editor, Box((1, -62, 1), (1, -62, 1)), mode="blocks",
                 target_origin=(8, -62, 1))

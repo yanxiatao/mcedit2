@@ -148,9 +148,30 @@ def encode_schem_be(transfer: BETransfer, *, schematic_version: int = 3) -> byte
         (tag.start, tag.end, nbt.list_tag("BlockEntities", 10, entries)),
     ])
     checked = decode_schem_be(result)
-    if (checked.structure != transfer.structure or
+    # Sponge writes BlockData in Y/Z/X order, while native selections may be
+    # enumerated in another order. Compare by coordinates, never by list
+    # position, so multi-cell structures round-trip without false rejection.
+    if (checked.structure.size != transfer.structure.size or
+            checked.structure.data_version != transfer.structure.data_version or
+            dict(checked.structure.blocks) != dict(transfer.structure.blocks) or
             len(checked.block_entities) != len(entries)):
         raise SpongeBEError("Sponge BE structure export did not round-trip")
+    # Verify original opaque BE members explicitly after absolute->relative
+    # coordinate relocation. Never substitute a count-only NBT check.
+    def signature(payload):
+        wrapped = nbt.make_tag(10, "", payload)
+        root = nbt.parse(wrapped)
+        return tuple(nbt.bytes_of(wrapped, tag) for tag in root.children
+                     if tag.name not in ("x", "y", "z"))
+    before = {}
+    for relative, payload in transfer.block_entities:
+        absolute = tuple(transfer.source_origin[i] + relative[i]
+                         for i in range(3))
+        before[relative] = signature(relocate_payload(payload, absolute, relative))
+    after = {relative: signature(payload)
+             for relative, payload in checked.block_entities}
+    if before != after:
+        raise SpongeBEError("Sponge export modified original opaque BE NBT")
     return result
 
 

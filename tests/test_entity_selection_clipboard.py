@@ -72,7 +72,11 @@ class EntityClipboardWorldTests(unittest.TestCase):
             original_entity_uuid(self.item), original_entity_uuid(self.orb)})
         self.assertEqual(tuple(self.world.get_entities_in_chunk(0, 0)),
                          before_entities)
-        for before, after in zip((self.item, self.orb), (target[1].payload, target[2].payload)):
+        # Newly staged native entities can be returned in UUID/key order.
+        # Match by position, not by their unstable enumeration order.
+        added_by_x = {entity_position(e.payload)[0]: e.payload for e in target[1:]}
+        for before in (self.item, self.orb):
+            after = added_by_x[entity_position(before)[0] + 16]
             self.assertEqual(entity_position(after)[0],
                              entity_position(before)[0] + 16)
             self.assertEqual(full_tag_bytes(before, "id"),

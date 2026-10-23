@@ -181,11 +181,13 @@ class SpongeEntityTransferTests(unittest.TestCase):
         self.assertGreater(
             place_sponge_entity_structure(self.session, structure, self.target), 0)
         first = {original_entity_uuid(r.payload)
-                 for r in self.world.get_entities_in_chunk(0, 0)[2:]}
+                 for r in self.world.get_entities_in_chunk(0, 0)
+                 if 8 <= entity_position(r.payload)[0] < 10}
         self.assertGreater(
             place_sponge_entity_structure(self.session, structure, (11, -62, 3)), 0)
         second = {original_entity_uuid(r.payload)
-                  for r in self.world.get_entities_in_chunk(0, 0)[4:]}
+                  for r in self.world.get_entities_in_chunk(0, 0)
+                  if 11 <= entity_position(r.payload)[0] < 13}
         self.assertFalse(first & second)
         self.assertEqual(len(self.session.undo_stack), 2)
         self.assertTrue(self.session.undo())

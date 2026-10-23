@@ -182,14 +182,16 @@ class JavaEntityStructureTests(unittest.TestCase):
                                                      (8, -62, 3)),
                          before.changed_blocks + before.added_entities)
         ids_a = {original_entity_uuid(r.payload)
-                 for r in self.world.get_entities_in_chunk(0, 0)[2:]}
+                 for r in self.world.get_entities_in_chunk(0, 0)
+                 if 8 <= entity_position(r.payload)[0] < 10}
         next_preview = preview_java_entity_structure(self.session, structure,
                                                      (11, -62, 3))
         self.assertEqual(place_java_entity_structure(self.session, structure,
                                                      (11, -62, 3)),
                          next_preview.changed_blocks + next_preview.added_entities)
         ids_b = {original_entity_uuid(r.payload)
-                 for r in self.world.get_entities_in_chunk(0, 0)[4:]}
+                 for r in self.world.get_entities_in_chunk(0, 0)
+                 if 11 <= entity_position(r.payload)[0] < 13}
         self.assertFalse(ids_a & ids_b)
         self.assertEqual(len(self.session.undo_stack), 2)
         self.assertTrue(self.session.undo())
