@@ -236,11 +236,12 @@ def save_be_transfer(path, transfer: BETransfer):
 
 
 def place_be_transfer(session: EditSession, transfer: BETransfer, origin, *,
-                      skip_air: bool = False):
+                      skip_air: bool = False,
+                      only_replace_air: bool = False):
     """One guarded undoable BE import, with full preflight and no overwrites."""
     _validate_transfer(transfer)
-    if type(skip_air) is not bool:
-        raise BETransferError("skip_air must be a boolean")
+    if type(skip_air) is not bool or type(only_replace_air) is not bool:
+        raise BETransferError("Air mask options must be booleans")
     world = session.world
     is_legacy = transfer.structure.data_version < 1519
     if (getattr(world, "is_mcregion", True)
@@ -281,6 +282,19 @@ def place_be_transfer(session: EditSession, transfer: BETransfer, origin, *,
         validated = world.make_block(str(state))
         if validated != state:
             raise BETransferError("Unsafe native blockstate conversion")
+        if only_replace_air:
+            index = ((point[1] & 15) << 8) | ((point[2] & 15) << 4) | (point[0] & 15)
+            original_state = original_section[index]
+            staged_state = world.get_block(*point)
+            if is_legacy:
+                target_air = (
+                    legacy_anvil.id_meta(original_state) == (0, 0)
+                    and legacy_anvil.id_meta(staged_state) == (0, 0))
+            else:
+                target_air = (is_vanilla_source_air(original_state)
+                              and is_vanilla_source_air(staged_state))
+            if not target_air:
+                continue
         be = payloads.get(relative)
         if be is not None:
             if is_legacy:

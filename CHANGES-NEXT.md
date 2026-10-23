@@ -1173,3 +1173,20 @@ available and is not automatically replaced.
 - Added synthetic modern and numeric legacy Anvil Undo/Save regressions,
   custom air-name non-skipping, strict invalid option refusal.
 - CI intentionally deferred while batching five feature commits [skip ci].
+
+## 0.3.0a83 — Original-air-only destinations for all expert BE pastes (4/5)
+
+- Added optional only_replace_air target filter for marked .nbt, standard
+  Java .nbt, Sponge v2/v3 .schem and legacy Alpha .schematic BE imports.
+- Only the original, EXACT vanilla air/cave_air/void_air named identities
+  or original legacy numeric 0:0 count as air. BOTH original Section
+  and current staged block must be air before the paste writes that cell.
+  Destination BE conflicts still fail the whole operation, never overwrite.
+  Non-air targets are skipped, preventing accidental replacement of
+  existing constructions; no skipped destination is recorded in Undo.
+- Qt6 adds a separate checkable "BE imports: only write into original
+  destination air" toggle, combinable with the strict source-air mask.
+  Existing modes remain unchanged unless the user enables the option.
+- Added synthetic modern and pre-1.13 numeric Anvil placement, backup,
+  Undo-after-Save, staged occupancy and conflict refusal regressions.
+- No CI is run for this batch commit [skip ci].

@@ -160,9 +160,11 @@ def capture_schem_be(world, box, limit=MAX_OPERATION_BLOCKS) -> BETransfer:
     return capture_be_transfer(world, box, limit=limit)
 
 
-def place_schem_be(session, transfer: BETransfer, origin, *, skip_air: bool = False):
+def place_schem_be(session, transfer: BETransfer, origin, *, skip_air: bool = False,
+                     only_replace_air: bool = False):
     """Use native same-DataVersion/BE collision preflight and one Undo entry."""
-    return place_be_transfer(session, transfer, origin, skip_air=skip_air)
+    return place_be_transfer(session, transfer, origin, skip_air=skip_air,
+                             only_replace_air=only_replace_air)
 
 
 def load_schem_be(path):

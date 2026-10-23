@@ -152,10 +152,12 @@ def capture_vanilla_be_structure(world, box, limit=None) -> BETransfer:
 
 
 def place_vanilla_be_structure(session: EditSession, transfer: BETransfer,
-                               origin, *, skip_air: bool = False) -> int:
+                               origin, *, skip_air: bool = False,
+                               only_replace_air: bool = False) -> int:
     """Native preflight and one-Undo staging, never overwrite existing BE."""
     _ensure_modern(transfer)
-    return place_be_transfer(session, transfer, origin, skip_air=skip_air)
+    return place_be_transfer(session, transfer, origin, skip_air=skip_air,
+                             only_replace_air=only_replace_air)
 
 
 def load_vanilla_be_structure(path):
