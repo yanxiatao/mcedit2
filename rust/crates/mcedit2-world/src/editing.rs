@@ -1075,6 +1075,15 @@ impl Session {
         let clip=clipboard::load(&self.world,&self.dimension,path)?;
         self.prepare_paste_clipboard(&clip,destination_min)
     }
+    /// Export exact 1.12.2/MCRegion numeric-ID source blocks to classic
+    /// GZip .schematic; source/destination original BE safety still enforced.
+    pub fn export_legacy_schematic(
+        &self,bounds:Bounds,path:&Path,
+    )->Result<usize,WorldError>{
+        let clip=self.capture_clipboard(bounds)?;
+        schematic::export_legacy(&self.world,&clip,path)?;
+        Ok(clip.blocks.len())
+    }
     /// Import old numeric MCEdit schematic as a block-only paste preview.
     /// Nonempty entities, TileEntities and ticks are rejected, not lost.
     pub fn prepare_import_legacy_schematic(

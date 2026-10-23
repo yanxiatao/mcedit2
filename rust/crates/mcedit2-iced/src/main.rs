@@ -98,7 +98,7 @@ enum Message{
     PatchPath(String),ExportPatch,ImportPatch,AnalyzeNativePatch,AnalyzeRegionPlan,
     ClipboardPath(String),ClipboardDestination(String),ExportClipboard,PreviewPasteClipboard,
     PreviewTransformedClipboard(HorizontalTransform),
-    SchematicPath(String),PreviewLegacySchematic,
+    SchematicPath(String),PreviewLegacySchematic,ExportLegacySchematic,
     SpongePath(String),PreviewSpongeV2,ExportSpongeV2,
     PrepareWorldSave,SavePhrase(String),ConfirmWorldSave,
     RecoverRegion(String),RecoveryPhrase(String),FinalizeRegion,RollbackRegion,
@@ -602,6 +602,22 @@ fn update(app:&mut App,message:Message){
                 Err(e)=>app.edit_report=format!("Sponge v2 import refused: {e}"),
             }
         },
+        Message::ExportLegacySchematic=>{
+            app.save_preview=None;
+            app.prepared=None;
+            let path=PathBuf::from(app.schematic_path.trim());
+            let result=(||->Result<usize,String>{
+                let area=parse_bounds(&app.edit_area).map_err(|e|e.to_string())?;
+                let key=app.current_key().ok_or("Select an original Java world")?;
+                app.current_session(key)?
+                    .export_legacy_schematic(area,&path)
+                    .map_err(|e|e.to_string())
+            })();
+            app.edit_report=match result{
+                Ok(n)=>format!("Exported {n} ORIGINAL numeric block states to new old MCEdit .schematic. All BE/entity data deliberately excluded. Source world unchanged."),
+                Err(e)=>format!("Legacy schematic export refused: {e}"),
+            };
+        },
         Message::PreviewLegacySchematic=>{
             app.save_preview=None;
             app.prepared=None;
@@ -1058,7 +1074,8 @@ fn view(app:&App)->Element<'_,Message>{
         body=body.push(row![
             text_input("Original MCEdit .schematic path",&app.schematic_path)
                 .on_input(Message::SchematicPath).width(Length::Fill),
-            button("Preview numeric schematic import").on_press(Message::PreviewLegacySchematic)
+            button("Preview numeric schematic import").on_press(Message::PreviewLegacySchematic),
+            button("Export numeric schematic").on_press(Message::ExportLegacySchematic)
         ].spacing(8));
         body=body.push(row![
             text_input("Modern Sponge v2 .schem file",&app.sponge_path)

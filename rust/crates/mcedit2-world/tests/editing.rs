@@ -895,7 +895,7 @@ fn opaque_original_block_entity_inspection_preserves_moded_fields_verbatim(){
     assert!(value.fields.iter().any(|field|
         field.name=="UnrecognizedPayload"&&field.kind==8
     ));
-    assert!(value.report().contains("original"));
+    assert!(value.report().contains("Original Block Entity"));
     assert!(editor.inspect_original_block_entity((1,-64,3)).unwrap().is_none());
     assert_eq!(fixture.bytes_now(),original);
 }
@@ -973,5 +973,27 @@ fn original_be_refuses_move_of_source_or_destination_without_partial_stage(){
     let from=Bounds::new((2,-64,0),(2,-64,0)).unwrap();
     assert!(editor.prepare_move(from,(1,-64,0)).is_err());
     assert_eq!(editor.pending_cells(),0);
+    assert_eq!(world.bytes_now(),original);
+}
+
+#[test]
+fn legacy_numeric_schematic_export_import_roundtrips_addblocks_and_meta(){
+    use mcedit2_world::schematic;
+    let world=NativeWorld::create(false);
+    let original=world.bytes_now();
+    let mut editor=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    let selection=Bounds::new((0,64,0),(1,64,1)).unwrap();
+    let desired=parse_state("numeric:301[data=13]").unwrap();
+    editor.commit(editor.prepare(selection,&desired,None).unwrap()).unwrap();
+    let path=std::env::temp_dir().join(format!(
+        "mcedit2-classic-export-{}-{}.schematic",std::process::id(),
+        COUNTER.fetch_add(1,Ordering::Relaxed)
+    ));
+    assert_eq!(editor.export_legacy_schematic(selection,&path).unwrap(),4);
+    let restored=schematic::import_legacy(&world.metadata(),"minecraft:overworld",&path).unwrap();
+    assert_eq!(restored.size,[2,1,2]);
+    assert!(restored.blocks.iter().all(|s|s==&desired));
+    assert!(editor.export_legacy_schematic(selection,&path).is_err());
+    fs::remove_file(path).unwrap();
     assert_eq!(world.bytes_now(),original);
 }

@@ -442,3 +442,16 @@ named identities must pass strict preflight; moves touching opaque BE NBT
 are refused. Combined source/destination changes remain bounded to 4096
 cells. iced exposes a Move preview button next to the existing Clone.
 Original Minecraft disk content is never changed by a Move preview.
+
+## Migration batch 3, round 5/5 — original classic schematic export
+
+Classic MCEdit GZip `.schematic` export is now symmetrical with the existing
+numeric-ID importer: exact 8-bit Blocks, four-bit metadata Data bytes and
+optional nibble-packed AddBlocks high IDs are preserved, with empty entity,
+Block Entity and scheduled tick lists. Source capture refuses all original
+BE coordinates, unknown Sections and modern named-only IDs, rather than
+exporting a lossy machine schematic. Files are create-new outside the world,
+up to 4096 cells; iced supports export alongside classic import and modern
+Sponge v2. The five feature milestones are complete; the planned next step
+is ONE consolidated Linux/Windows `cargo check` + `cargo test` run, with no
+application binary building or packaging.

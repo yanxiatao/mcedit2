@@ -86,6 +86,87 @@ pub fn import_legacy(world:&WorldSummary,dimension:&str,path:&Path)
     decode_legacy(world,dimension,&fs::read(path)?)
 }
 
+
+/// Lossless block-only export of exact original 0..4095 numeric IDs with
+/// four-bit metadata and optional AddBlocks high nibbles. Unlike a guessed
+/// modern state mapping this roundtrips original numeric IDs verbatim.
+pub fn export_legacy(world:&WorldSummary,clip:&BlockClipboard,path:&Path)
+    ->Result<(),WorldError>{
+    clip.validate(world,&clip.dimension)?;
+    if !clip.numeric{return Err(err("Legacy .schematic requires exact numeric:ID metadata"));}
+    if path.extension().and_then(|v|v.to_str())!=Some("schematic"){
+        return Err(err("Legacy MCEdit export requires .schematic extension"));
+    }
+    let parent=path.parent().filter(|p|!p.as_os_str().is_empty())
+        .unwrap_or_else(||Path::new("."));
+    if fs::canonicalize(parent)?.starts_with(fs::canonicalize(&world.root)?){
+        return Err(err("Schematic must be exported outside original Minecraft world"));
+    }
+    let len=clip.blocks.len();
+    if len==0||len>4096{return Err(err("Schematic cell count exceeds safe export budget"));}
+    let mut blocks=Vec::with_capacity(len);
+    let mut data=Vec::with_capacity(len);
+    let mut add=vec![0u8;len.div_ceil(2)];
+    let mut high=false;
+    for (index,state) in clip.blocks.iter().enumerate(){
+        let id=state.name.strip_prefix("numeric:")
+            .ok_or_else(||err("Legacy schematic BlockState is not numeric"))?
+            .parse::<u16>().map_err(|_|err("Invalid numeric block ID"))?;
+        let meta=state.properties.first()
+            .ok_or_else(||err("Numeric metadata absent"))?
+            .1.parse::<u8>().map_err(|_|err("Invalid numeric metadata"))?;
+        if id>4095||meta>15 || state.properties.len()!=1
+            ||state.properties[0].0!="data" {
+            return Err(err("Legacy numeric ID or metadata is out of format bounds"));
+        }
+        blocks.push(id as u8);
+        data.push(meta);
+        let extra=(id>>8) as u8;
+        if extra>0{high=true;}
+        if index%2==0{add[index/2]|=extra;}
+        else{add[index/2]|=extra<<4;}
+    }
+    let mut nbt=Vec::new();
+    for (key,value) in [("Width",clip.size[0]),("Height",clip.size[1]),
+        ("Length",clip.size[2])] {
+        let v=i16::try_from(value).map_err(|_|err("Schematic side exceeds TAG_Short"))?;
+        nbt.extend(nbt_tag(2,key,&v.to_be_bytes())?);
+    }
+    nbt.extend(nbt_tag(8,"Materials",&[0,5,b'A',b'l',b'p',b'h',b'a'])?);
+    for (key,values) in [("Blocks",&blocks),("Data",&data)]{
+        let mut payload=(values.len() as i32).to_be_bytes().to_vec();
+        payload.extend(values.iter());
+        nbt.extend(nbt_tag(7,key,&payload)?);
+    }
+    if high{
+        let mut payload=(add.len() as i32).to_be_bytes().to_vec();
+        payload.extend(add);
+        nbt.extend(nbt_tag(7,"AddBlocks",&payload)?);
+    }
+    for key in ["TileEntities","Entities","TileTicks"]{
+        nbt.extend(nbt_tag(9,key,&[10,0,0,0,0])?);
+    }
+    nbt.push(0);
+    let original=nbt_tag(10,"Schematic",&nbt)?;
+    if original.len()>16*1024*1024{
+        return Err(err("Legacy schematic expanded NBT exceeds 16 MiB"));
+    }
+    let mut compressor=GzEncoder::new(Vec::new(),Compression::default());
+    compressor.write_all(&original)?;
+    let output=compressor.finish()?;
+    if output.len()>8*1024*1024 {
+        return Err(err("Legacy schematic compressed NBT exceeds 8 MiB"));
+    }
+    let mut file=OpenOptions::new().write(true).create_new(true).open(path)?;
+    let written=file.write_all(&output).and_then(|_|file.sync_all());
+    drop(file);
+    if let Err(e)=written{
+        let _=fs::remove_file(path);
+        return Err(e.into());
+    }
+    Ok(())
+}
+
 /// Strict Sponge v2 block-state palette reader. Import fails rather than
 /// discarding any original BlockEntity, Entity or BiomeData.
 pub fn decode_sponge_v2(world:&WorldSummary,dimension:&str,compressed:&[u8])
