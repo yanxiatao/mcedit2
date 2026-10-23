@@ -1,16 +1,15 @@
-"""Run the entire native private-world regression matrix in ONE command.
+"""Run every native real-world check as one isolated, concurrent matrix.
 
 PYTHONPATH=modern:. python scripts/verify_native_matrix.py 1.12.2.zip 1.21.1.zip
 
-This exercises six already-implemented checks per archive, INCLUDING a real
-same-EditSession mixed BE/block/Entity Save. Each worker handles one original
-ZIP; every test uses its own temporary copy. Nothing is uploaded, and all
-errors are collected before returning a nonzero exit status.
+Each (archive, suite) pair is an independent job working on a disposable
+world copy. Original ZIPs remain local and read-only. Complete every check
+even when another check fails, then emit a deterministic combined report.
 """
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
 import sys
@@ -25,8 +24,6 @@ from scripts.verify_native_be_batch import verify_archive as be_batch
 from scripts.verify_native_integrated import verify_archive as integrated
 
 
-# Keep the full battery in ONE audited place. All suite functions operate
-# independently on disposable copies, so no suite can contaminate another.
 SUITES = (
     ("complete_native_chunk_audit", inspect_archive),
     ("one_cell_native_roundtrip", one_cell),
@@ -37,82 +34,116 @@ SUITES = (
 )
 
 
-def _one_archive(path: Path, suites=SUITES):
-    original_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-    reports = []
-    for title, test in suites:
-        started = time.monotonic()
-        print(f"[{path.name}] start {title}", file=sys.stderr, flush=True)
-        try:
-            result = test(path)
-            successful = isinstance(result, dict) and result.get("passed") is True
-            report = {
-                "suite": title, "passed": successful,
-                "result": result if successful else
-                {"error": "Test returned an unsuccessful or malformed result",
-                 "detail": result},
-            }
-        except Exception as exc:
-            # Do not abort remaining tests: report every issue in one
-            # consolidated run rather than asking the user to rerun manually.
-            report = {"suite": title, "passed": False,
-                      "error": f"{type(exc).__name__}: {str(exc)[:500]}"}
-        reports.append(report)
-        print(
-            f"[{path.name}] finish {title}: "
-            f"{'PASS' if report['passed'] else 'FAIL'} "
-            f"({time.monotonic() - started:.1f}s)",
-            file=sys.stderr, flush=True)
-    current_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-    unchanged = original_hash == current_hash
-    return {
-        "archive": path.name, "passed": unchanged and
-        all(record["passed"] for record in reports),
-        "executed_suites": len(reports),
-        "passed_suites": sum(record["passed"] for record in reports),
-        "original_zip_unchanged": unchanged,
-        "results": reports,
-    }
+def _hash_file(path: Path) -> str:
+    """Hash without holding large private world archives in RAM."""
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
-def run_matrix(archives, *, workers=2, suites=SUITES):
-    """Run all suites on up to two worlds in parallel; return one report."""
+def _run_check(path: Path, title: str, check):
+    started = time.monotonic()
+    print(f"[{path.name}] start {title}", file=sys.stderr, flush=True)
+    try:
+        result = check(path)
+        successful = isinstance(result, dict) and result.get("passed") is True
+        record = {
+            "suite": title,
+            "passed": successful,
+            "result": result if successful else {
+                "error": "Test returned an unsuccessful or malformed result",
+                "detail": result,
+            },
+        }
+    except Exception as exc:
+        record = {
+            "suite": title,
+            "passed": False,
+            "error": f"{type(exc).__name__}: {str(exc)[:500]}",
+        }
+    print(
+        f"[{path.name}] finish {title}: "
+        f"{'PASS' if record['passed'] else 'FAIL'} "
+        f"({time.monotonic() - started:.1f}s)",
+        file=sys.stderr, flush=True,
+    )
+    return record
+
+
+def run_matrix(archives, *, workers=4, suites=SUITES):
+    """Schedule ALL archive/suite pairs together; never stop at first error.
+
+    Results retain the user-supplied archive and SUITES order even though
+    individual tasks finish out of order. Suite functions must operate only
+    on their own disposable copies of the original archives.
+    """
     paths = [Path(name) for name in archives]
     if (not paths or len(paths) > 8 or type(workers) is not int or
-            workers < 1 or workers > 2 or
+            not 1 <= workers <= 16 or
             any(not p.is_file() for p in paths) or
             not isinstance(suites, tuple) or not suites or
-            any(not isinstance(t, tuple) or len(t) != 2 or
-                type(t[0]) is not str or not callable(t[1])
-                for t in suites)):
-        raise ValueError("Expected 1–8 existing private ZIP files and 1–2 workers")
+            any(not isinstance(entry, tuple) or len(entry) != 2 or
+                type(entry[0]) is not str or not callable(entry[1])
+                for entry in suites)):
+        raise ValueError("Expected 1–8 existing private ZIP files and 1–16 workers")
     if len({str(p.resolve()) for p in paths}) != len(paths):
         raise ValueError("Duplicate original ZIP file supplied")
-    with ThreadPoolExecutor(max_workers=min(workers, len(paths))) as pool:
-        per_world = list(pool.map(lambda p: _one_archive(p, suites), paths))
-    total = sum(item["executed_suites"] for item in per_world)
-    succeeded = sum(item["passed_suites"] for item in per_world)
-    passed = (succeeded == total and
-              all(item["original_zip_unchanged"] for item in per_world))
+
+    before = [_hash_file(path) for path in paths]
+    ordered = [[None] * len(suites) for _ in paths]
+    parallel_workers = min(workers, len(paths) * len(suites))
+
+    with ThreadPoolExecutor(max_workers=parallel_workers) as pool:
+        pending = {
+            pool.submit(_run_check, path, title, check): (world_index, suite_index)
+            for world_index, path in enumerate(paths)
+            for suite_index, (title, check) in enumerate(suites)
+        }
+        for completed in as_completed(pending):
+            world_index, suite_index = pending[completed]
+            ordered[world_index][suite_index] = completed.result()
+
+    after = [_hash_file(path) for path in paths]
+    per_world = []
+    for path, records, original_hash, final_hash in zip(paths, ordered, before, after):
+        unchanged = original_hash == final_hash
+        passed_suites = sum(record["passed"] for record in records)
+        per_world.append({
+            "archive": path.name,
+            "passed": unchanged and passed_suites == len(records),
+            "executed_suites": len(records),
+            "passed_suites": passed_suites,
+            "original_zip_unchanged": unchanged,
+            "results": records,
+        })
+
+    total = sum(world["executed_suites"] for world in per_world)
+    succeeded = sum(world["passed_suites"] for world in per_world)
+    integrity_failures = sum(not world["original_zip_unchanged"] for world in per_world)
     return {
-        "passed": passed,
+        "passed": succeeded == total and integrity_failures == 0,
         "archives": len(paths),
         "suite_types": len(suites),
         "completed_checks": total,
         "passed_checks": succeeded,
         "failed_checks": total - succeeded,
+        "integrity_failed_archives": integrity_failures,
+        "concurrent_workers": parallel_workers,
         "worlds": per_world,
-        "note": "Original Java world ZIP files remained private. All writes "
-                "are to disposable copies. No in-game mod/runtime semantics verified.",
+        "note": "Original Java world ZIP files remain private. Suites must write "
+                "only to disposable copies. No in-game mod/runtime semantics verified.",
     }
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("archives", nargs="+", type=Path)
-    parser.add_argument("--workers", type=int, default=2)
+    parser.add_argument("--workers", type=int, default=4,
+                        help="Maximum concurrent archive/suite jobs (1–16, default 4)")
     parser.add_argument("--output", type=Path, default=None,
-                        help="Optional local JSON report destination; never uploads")
+                        help="Optional local JSON report; never uploaded by this script")
     args = parser.parse_args()
     try:
         result = run_matrix(args.archives, workers=args.workers)
