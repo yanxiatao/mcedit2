@@ -80,6 +80,7 @@ struct App{
     be_scalar_field:String,
     be_scalar_value:String,
     be_snapshot_path:String,
+    be_journal_path:String,
     plugin_manifest_path:String,
     clone_destination:String,
     fill_seed:String,
@@ -106,6 +107,7 @@ enum Message{
     BeScalarField(String),BeScalarValue(String),PreviewBeScalar,
     StageBeScalar,UndoBeScalar,RedoBeScalar,InspectStagedBe,
     BeSnapshotPath(String),ExportOriginalBe,VerifyOriginalBe,
+    BeJournalPath(String),ExportBeJournal,ImportBeJournal,
     PluginManifestPath(String),PreviewPlugin,
     InspectBlock,InspectOriginalBlockEntity,SliceText(String),InspectSlice,PickSlice(i32,i32,i32),MoveSlice(i32,i32,i32),
     VerticalText(String),InspectVertical,PickVertical(usize,usize),
@@ -855,6 +857,32 @@ fn update(app:&mut App,message:Message){
         },
         Message::BeScalarField(value)=>{app.be_scalar_field=value;app.be_prepared=None;},
         Message::BeSnapshotPath(value)=>app.be_snapshot_path=value,
+        Message::BeJournalPath(value)=>app.be_journal_path=value,
+        Message::ExportBeJournal=>{
+            let file=PathBuf::from(app.be_journal_path.trim());
+            let result=app.current_key().ok_or("Select an original world")
+                .and_then(|key|app.current_session(key))
+                .and_then(|editor|editor.export_be_journal(&file).map_err(|e|e.to_string()));
+            app.edit_report=match result{
+                Ok(n)=>format!("Exported {n} source-hashed BE scalar operations to detached create-new journal; original world untouched."),
+                Err(e)=>format!("BE checkpoint export refused: {e}"),
+            };
+        },
+        Message::ImportBeJournal=>{
+            if app.readonly{app.edit_report="-view forbids BE journal import.".into();}
+            else{
+                app.be_prepared=None;app.prepared=None;app.save_preview=None;
+                let file=PathBuf::from(app.be_journal_path.trim());
+                let result=app.current_key().ok_or("Select an original world")
+                    .and_then(|key|app.current_session(key))
+                    .and_then(|editor|editor.import_be_journal(&file).map_err(|e|e.to_string()));
+                app.edit_report=match result{
+                    Ok(n)=>format!("Restored {n} verified BE scalar changes IN MEMORY. Each step separately undoable; Region world save remains blocked."),
+                    Err(e)=>format!("BE journal restore refused without modifying session: {e}"),
+                };
+                app.surface=None;app.slice_grid=None;app.vertical_grid=None;
+            }
+        },
         Message::PluginManifestPath(value)=>app.plugin_manifest_path=value,
         Message::PreviewPlugin=>{
             app.prepared=None;
@@ -1209,6 +1237,12 @@ fn view(app:&App)->Element<'_,Message>{
             button("Undo BE").on_press(Message::UndoBeScalar),
             button("Redo BE").on_press(Message::RedoBeScalar),
             button("Inspect staged BE").on_press(Message::InspectStagedBe),
+        ].spacing(8));
+        body=body.push(row![
+            text_input("Outside-world BE edit .mcedit2bejournal.json",&app.be_journal_path)
+                .on_input(Message::BeJournalPath).width(Length::Fill),
+            button("Checkpoint staged BE edits").on_press(Message::ExportBeJournal),
+            button("Restore BE edits (memory)").on_press(Message::ImportBeJournal),
         ].spacing(8));
         body=body.push(row![
             text_input("Outside-world .mcedit2be original NBT snapshot",&app.be_snapshot_path)

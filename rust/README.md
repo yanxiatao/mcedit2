@@ -553,3 +553,19 @@ Batch-2 hardening: click-picking any X/Z, vertical or isometric voxel
 invalidates a prepared BE scalar edit; previews display real candidate
 SHA-256 instead of a placeholder. Inspecting staged BE bytes also verifies
 that the complete original chunk has not changed independently.
+
+## Five-batch migration cycle — Batch 3: BE scalar replay checkpoint
+
+BE scalar edits are now exportable as a provenance-bound, create-new
+`.mcedit2bejournal.json` file outside the original Minecraft world.
+Each step records original full-chunk SHA-256, exact original XYZ,
+existing scalar field/value, and the resulting entire-chunk digest. The
+exporter reconstructs EVERY active operation from original source bytes
+and refuses truncated/non-replayable histories. Import checks exact
+world/dimension/DataVersion and all source hashes, replays every operation
+in a cloned temporary Session, and swaps it into place ONLY if all checks
+pass. The restored history supports separate BE Undo/Redo. No block-only
+Region write is enabled while any BE bytes remain staged. This is a
+checkpoint/restore capability, not a Minecraft world writer.
+
+**Cycle: 3 full batches of 5 completed; no CI yet.**

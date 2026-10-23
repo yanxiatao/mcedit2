@@ -339,6 +339,7 @@ impl BeScalarPreview{
 #[derive(Debug,Clone)]
 struct BeHistory{
     chunk:ChunkPos,source_sha:String,before:Option<Vec<u8>>,after:Vec<u8>,
+    position:Position,field:String,value:String,
 }
 fn nbt_sha(raw:&[u8])->String{
     Sha256::digest(raw).iter().map(|v|format!("{v:02x}")).collect()
@@ -504,15 +505,20 @@ impl Session {
         if verified!=preview.patched_nbt{
             return Err(refuse("BE candidate differs from original-byte replay"));
         }
+        // Preserve full deterministic provenance rather than truncating an
+        // earlier operation that later changes depend upon.
+        if self.be_undo.len()>=24{
+            return Err(refuse("BE history requires 24 or fewer fully replayable scalar edits; export, discard and restart"));
+        }
         let history=BeHistory{
             chunk:preview.chunk,source_sha:source_sha.clone(),
             before:self.be_overlay.get(&preview.chunk).cloned(),
             after:preview.patched_nbt.clone(),
+            position:preview.position,field:preview.field.clone(),value:preview.value.clone(),
         };
         self.be_overlay.insert(preview.chunk,preview.patched_nbt);
         self.be_source.insert(preview.chunk,source_sha);
         self.be_undo.push(history);
-        if self.be_undo.len()>24{self.be_undo.remove(0);}
         self.be_redo.clear();
         Ok(())
     }
@@ -568,6 +574,86 @@ impl Session {
             crate::sections::inspect_original_block_entity(raw,position)
                 .map_err(|e|refuse(format!("Staged NBT invalid: {e}")))
         }else{self.inspect_original_block_entity(position)}
+    }
+    /// Export only the ACTIVE chronological BE history, with every scalar
+    /// operation and its exact original/final NBT digests. No world writes.
+    pub fn export_be_journal(&self,path:&Path)->Result<usize,WorldError>{
+        use crate::be_journal::{BeJournal,BeJournalEdit};
+        if self.be_overlay.is_empty()||self.be_undo.is_empty(){
+            return Err(refuse("No active BE scalar edits to checkpoint"));
+        }
+        // Validate the chain's final state and replay EVERY recorded edit
+        // from original disk bytes, including existing modded sibling tags.
+        let mut source=BTreeMap::new();
+        let mut chain=BTreeMap::new();
+        let mut entries=Vec::new();
+        for change in &self.be_undo{
+            if !source.contains_key(&change.chunk){
+                let original=read_world_chunk_bytes(
+                    &self.world,&self.dimension,change.chunk.0,change.chunk.1
+                )?.ok_or_else(||refuse("BE journal source chunk disappeared"))?;
+                if nbt_sha(&original)!=change.source_sha{
+                    return Err(refuse("BE journal original source changed"));
+                }
+                chain.insert(change.chunk,original.clone());
+                source.insert(change.chunk,original);
+            }
+            let before=chain.get(&change.chunk)
+                .ok_or_else(||refuse("BE journal source replay missing"))?;
+            if before!=change.before.as_ref().unwrap_or(source.get(&change.chunk).unwrap()){
+                return Err(refuse("BE journal previous NBT does not match active history"));
+            }
+            let after=crate::sections::patch_original_block_entity_scalar(
+                before,change.position,&change.field,&change.value
+            ).map_err(|e|refuse(format!("BE journal replay failed: {e}")))?;
+            if after!=change.after{
+                return Err(refuse("BE journal has a nonreplayable scalar operation"));
+            }
+            entries.push(BeJournalEdit{
+                xyz:[change.position.0,change.position.1,change.position.2],
+                field:change.field.clone(),value:change.value.clone(),
+                original_chunk_sha256:change.source_sha.clone(),
+                resulting_chunk_sha256:nbt_sha(&after),
+            });
+            chain.insert(change.chunk,after);
+        }
+        if chain!=self.be_overlay{
+            return Err(refuse("BE journal active history differs from current staged NBT"));
+        }
+        let manifest=BeJournal{
+            version:1,world_root:self.world.root.to_string_lossy().to_string(),
+            dimension:self.dimension.clone(),data_version:self.world.data_version,
+            edits:entries,
+        };
+        let count=manifest.edits.len();
+        crate::be_journal::save(&self.world,&self.dimension,&manifest,path)?;
+        Ok(count)
+    }
+    /// Restore a BE checkpoint atomically into an otherwise empty session.
+    /// A completely local cloned session is mutated first; if ANY of the
+    /// 24 scalar operations fails all original overlay/Undo state is intact.
+    pub fn import_be_journal(&mut self,path:&Path)->Result<usize,WorldError>{
+        if self.has_pending_changes()||!self.be_undo.is_empty()
+            ||!self.be_redo.is_empty()||!self.undo.is_empty()||!self.redo.is_empty(){
+            return Err(refuse("Import requires an entirely clean editing session"));
+        }
+        let manifest=crate::be_journal::load(&self.world,&self.dimension,path)?;
+        let mut proposed=self.clone();
+        for entry in &manifest.edits{
+            let point=(entry.xyz[0],entry.xyz[1],entry.xyz[2]);
+            let candidate=proposed.prepare_be_edit(point,&entry.field,&entry.value)?;
+            if candidate.source_sha!=entry.original_chunk_sha256
+                ||nbt_sha(&candidate.patched_nbt)!=entry.resulting_chunk_sha256{
+                return Err(refuse("BE journal source or reconstructed scalar checksum mismatch"));
+            }
+            proposed.commit_be_edit(candidate)?;
+        }
+        if proposed.pending_be_chunks()==0{
+            return Err(refuse("BE journal restored no candidate NBT"));
+        }
+        let count=manifest.edits.len();
+        *self=proposed;
+        Ok(count)
     }
     /// Copy the complete original opaque Block Entity byte payload to an
     /// external, immutable .mcedit2be file. Never mutates world or overlay.

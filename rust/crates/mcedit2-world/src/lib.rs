@@ -12,6 +12,7 @@ pub mod editing;
 pub mod surface;
 pub mod plugins;
 pub mod be_snapshot;
+pub mod be_journal;
 pub mod clipboard;
 pub mod schematic;
 pub mod region_plan;

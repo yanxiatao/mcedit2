@@ -1176,3 +1176,58 @@ fn be_scalar_stale_preview_and_changed_disk_are_rejected(){
     assert!(editor.undo_be_edit().is_err());
     assert_eq!(editor.pending_be_chunks(),1);
 }
+
+#[test]
+fn be_journal_restores_modded_scalar_operations_and_separate_undo_atomically(){
+    let world=NativeWorld::create(true);
+    overwrite_region(&world,&chunk_with_be("minecraft:stone",(2,-64,3)));
+    let original=world.bytes_now();
+    let path=std::env::temp_dir().join(format!(
+        "mcedit2-be-replay-{}-{}.mcedit2bejournal.json",
+        std::process::id(),COUNTER.fetch_add(1,Ordering::Relaxed)
+    ));
+    let mut editor=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    for text in ["FIRST MOD NBT","SECOND MOD NBT"]{
+        let candidate=editor.prepare_be_edit((2,-64,3),"UnrecognizedPayload",text).unwrap();
+        editor.commit_be_edit(candidate).unwrap();
+    }
+    assert_eq!(editor.export_be_journal(&path).unwrap(),2);
+    assert!(editor.export_be_journal(&path).is_err(),"BE journal must be create-new");
+    let mut recovered=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    assert_eq!(recovered.import_be_journal(&path).unwrap(),2);
+    assert_eq!(recovered.pending_be_chunks(),1);
+    assert_eq!(
+        recovered.inspect_staged_be((2,-64,3)).unwrap().unwrap().original_compound_sha256,
+        editor.inspect_staged_be((2,-64,3)).unwrap().unwrap().original_compound_sha256
+    );
+    assert!(recovered.undo_be_edit().unwrap());
+    assert!(recovered.redo_be_edit().unwrap());
+    assert!(recovered.prepare_native_region_candidates(1).is_err());
+    assert_eq!(world.bytes_now(),original);
+    fs::remove_file(path).unwrap();
+}
+#[test]
+fn be_journal_source_drift_and_invalid_entry_are_refused_without_partial_import(){
+    let world=NativeWorld::create(true);
+    overwrite_region(&world,&chunk_with_be("minecraft:stone",(2,-64,3)));
+    let path=std::env::temp_dir().join(format!(
+        "mcedit2-be-tamper-{}-{}.mcedit2bejournal.json",
+        std::process::id(),COUNTER.fetch_add(1,Ordering::Relaxed)
+    ));
+    let mut editor=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    let candidate=editor.prepare_be_edit((2,-64,3),"UnrecognizedPayload","VERIFY").unwrap();
+    editor.commit_be_edit(candidate).unwrap();
+    editor.export_be_journal(&path).unwrap();
+    let original_bytes=fs::read(&path).unwrap();
+    let mut file:serde_json::Value=serde_json::from_slice(&original_bytes).unwrap();
+    file["edits"][0]["resulting_chunk_sha256"]=serde_json::json!("0".repeat(64));
+    fs::write(&path,serde_json::to_vec(&file).unwrap()).unwrap();
+    let mut empty=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    assert!(empty.import_be_journal(&path).is_err());
+    assert_eq!(empty.pending_be_chunks(),0);
+    fs::write(&path,&original_bytes).unwrap();
+    overwrite_region(&world,&chunk_with_be("minecraft:gold_block",(2,-64,3)));
+    assert!(empty.import_be_journal(&path).is_err());
+    assert_eq!(empty.pending_be_chunks(),0);
+    fs::remove_file(path).unwrap();
+}
