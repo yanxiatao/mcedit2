@@ -1,0 +1,6 @@
+[plugin]
+id = "example.selection_tools"
+name = "Selection tools (MCEdit2-compatible example)"
+version = "0.1.0"
+api = 1
+description = "Count and replace blocks using the legacy command signature"

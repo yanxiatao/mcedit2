@@ -1,3 +1,90 @@
+> **MCEdit2 Next experimental Python 3 branch**
+>
+> You are viewing `python3-modern-editor`, an in-progress Qt6 and native Java
+> Anvil port. The legacy Python 2.7 instructions further down refer to the
+> original MCEdit2 and are **not** suitable for this branch's new application.
+> Use Python 3.12+, `python -m pip install -e .`, then
+> `python -m mcedit2_next`. The new app has **2D slice and experimental 3D OpenGL voxel views** (optional client-JAR
+> full-cube textures),
+> a plugin manager, undoable block editing, Java Anvil (.mca) and old MCRegion (.mcr)
+> original-format editing, CloneTool-style original-state repeat/tiling,
+> with opt-in **ignore source air** across offset, repeated, rotated,
+> mirrored, scaled, rotate-then-scale and reduced copies; the 3D ghost
+> preview uses the same original-air mask and leaves target cells
+> beneath skipped source air unchanged. A separate opt-in **paste only
+> into exact destination air** mode is now available for all six
+> block-only clone paths, retaining occupied native blocks and BE NBT.
+> In this mode the 3D preview uses wireframes only; Apply checks the
+> original destination occupancy and all accepted write targets again.
+> Every source Block Entity remains protected,
+> strict 90°/180°/270° horizontal rotation or X/Z-mirrored copies,
+> plus guarded **Up/Down (Y) mirror** for verified vanilla stairs,
+> slabs, trapdoors and limited original numeric metadata (all unsupported
+> orientation/link semantics remain refused), and nearest-neighbour
+> integer XYZ scaling (1–8× per axis), including **rotation followed by
+> per-output-axis scaling** with native BE-protected placement, plus **integer XYZ
+> downscaling** (independent divisors 1–8; nearest-neighbour sampling
+> with trailing partial groups retained). Reduction checks every
+> source coordinate for a protected Block Entity, even unsampled
+> blocks, and preflights all native targets before any write.
+> The Clone Tool now shows per-copy cyan/green 3D target-volume
+> wireframes in both OpenGL view paths: preview, orbit/zoom,
+> Ctrl+Alt+left-drag the white center control in X/Z, or
+> Ctrl+Alt+Shift+left-drag vertically, with 1/2/4/8/16-block absolute
+> world-coordinate snapping. The dock separately maintains
+> **Step XYZ** (copy spacing) and **Group position XYZ** (rigid group
+> placement). Dragging moves all copies together without altering
+> their n×step spacing. Apply revalidates original native data,
+> while Clear dismisses the preview without writes.
+> For previews of up to **2,048 planned block cells**, both 3D
+> renderers also display a read-only semi-transparent **full-cube
+> material/color ghost** from one cached original BlockState snapshot.
+> The streamed renderer uses the existing texture atlas without
+> remeshing native world chunks; custom multi-element models and
+> fluid surfaces are not yet accurate per-block ghosts. Larger or
+> unsafe selections fall back to the wireframe, with a UI explanation.
+> This is not proof that target BEs/sections are writable. All block-only
+> cloning operations share single-step Undo, full BE/native target
+> preflight and persistent Qt6 copy-count/orientation/scale controls;
+> guarded BE NBT scalar/structure
+> editing remains separate,
+> a level-aware 3D fluid preview, guarded world/player metadata
+> scalar editing, and restricted original Java player **ItemStack count,
+> slot moves/swaps, Inventory↔EnderItems transfers, split, strict merge and
+> explicit deletion**. Unknown modded item NBT is preserved through original
+> byte-span edits; unsupported custom slots and unequal mod data are rejected.
+> The editor cannot infer each item's registry maximum stack size.
+> The Qt6 **Filled Maps** panel now supports a staged pixel painting canvas,
+> raw map palette byte editing, limited original map scalar metadata and
+> independent map_N.dat gzip backup/restore. Unsupported modern colors
+> have diagnostic previews, not invented palette mappings. Qt6 entity
+> inspection additionally supports undoable original Pos, yaw/pitch
+> Rotation, preflighted same-chunk multi-entity movement, and restricted
+> existing-typed entity scalar flags/Health/AbsorptionAmount edits.
+> It also supports guarded multi-selection deletion and same-chunk
+> UUID-fresh duplication of original standalone dropped items/XP orbs,
+> preserving existing modded ItemStack/unknown NBT bytes. Native
+> original-UUID transfer between already-existing Java chunks is also
+> available for standalone dropped items/XP orbs, even across region
+> files, with source/target full-region backups. Multiple original items
+> and XP orbs may transfer together by XYZ offset as one preflighted,
+> Undo/Redo-grouped action; any unsafe target refuses the whole group.
+> Missing or unrecognized
+> UUID layouts, referenced/linked/modded entities and cross-dimension
+> transfers remain refused. Entity List changes support Undo/Redo
+> **before saving**; after saving, recovery uses the complete native
+> region backup because original List indices can shift.
+> Complete original-file backups and explicit restoration are provided. The **experimental BE-aware clipboard**
+> remains opt-in (Java 1.13+ only).
+> Metadata, ItemStack and map edits commit directly to their original
+> files, separate from region Undo/Redo; nondestructive native entity
+> edits use the region EditSession Undo/Redo. Version 0.3.0a58 has
+> not passed the full CI/game-world validation matrix; Windows packaging remains disabled.
+> It is **not yet fully equivalent to the original MCEdit2 editor**. Do not edit live or valuable maps. See the [migration checklist](MIGRATION_STATUS.md) for a feature-by-feature audit. For the
+> compatibility limits, developer instructions and plugin API, see
+> [MODERNIZATION.md](MODERNIZATION.md) and
+> [plugin development](doc/modern_plugins.md).
+
 [![Build status](https://ci.appveyor.com/api/projects/status/76956gfy2n7sl5me?svg=true)](https://ci.appveyor.com/project/codewarrior0/mcedit2)
 [![Build Status](https://travis-ci.org/mcedit/mcedit2.svg?branch=master)](https://travis-ci.org/mcedit/mcedit2)
 

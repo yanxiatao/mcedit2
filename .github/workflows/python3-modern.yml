@@ -1,0 +1,444 @@
+name: MCEdit2 Next validation
+
+# Batch development commits; run manually after several commits.
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [master]
+    types: [opened, reopened, ready_for_review, labeled]
+  push:
+    branches: [master, python3-modern-editor]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: next-validation-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core-tests:
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.action == 'labeled' && github.event.label.name == 'run-next-ci') ||
+      (github.event.action != 'labeled' && !github.event.pull_request.draft)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Compile Python 3 code
+        run: python -m compileall -q modern
+      - name: Run headless editor core and plugin tests
+        run: |
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_modern_*.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_native_anvil.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_native_map_edit.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_be_transfer.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_legacy_anvil.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_mcregion.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_entity_index.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_entity_edit.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_nbt_scalar.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_nbt_arrays.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_nbt_structure.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_backup_restore.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_worldstream.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_stream_geometry.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_greedymesh.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_meshworker.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_edit_shapes.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_selection_move.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_selection_native.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_world_audit.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_derived_data.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_heightmap_codec.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_heightmap_commit.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_heightmap_collision.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_heightmap_evidence.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_runtime_export_verifier.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_transforms.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_transforms_native.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_plugins_*.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_viewport3d_*.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_resourcepack*.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_structure_io.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_schem_io.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_schem_v3.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_classic_schematic.py' -v
+
+  qt-gui-smoke:
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.action == 'labeled' && github.event.label.name == 'run-next-ci') ||
+      (github.event.action != 'labeled' && !github.event.pull_request.draft)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Linux Qt runtime libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libegl1 libgl1 libopengl0 libxcb-cursor0 libxkbcommon-x11-0 libxcb-xinerama0
+      - name: Install Qt6 desktop editor
+        run: python -m pip install -e .
+      - name: Import PySide6
+        run: python -c 'from PySide6.QtWidgets import QApplication; print("Qt ready")'
+      - name: Test Qt6 PNG resource atlas
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_textureatlas_qt.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_streaming_atlas_qt.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_search_gui_qt.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_tool_palette_qt.py' -v
+          PYTHONPATH=modern python -m unittest discover -s tests -p 'test_world_audit_qt.py' -v
+      - name: Import the MCEdit2 Next GUI
+        run: python -c 'from mcedit2_next.gui import MainWindow; print("GUI import ready")'
+      - name: Construct the editor window using the offscreen Qt platform
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python - <<'PY'
+          from PySide6.QtWidgets import QApplication
+          from mcedit2_next.gui import MainWindow
+          app = QApplication([])
+          window = MainWindow()
+          assert window.view.session is None
+          assert window.tool_palette.objectName() == "mcedit2_next_tool_palette"
+          assert window.tool_palette.toggleViewAction() in window.view_menu.actions()
+          assert window.tool_palette.tool_choice.findData("native|fill") >= 0
+          assert "example.selection_tools" in window.plugins.available
+          window.plugins.load("example.selection_tools")
+          window.refresh_plugin_menu()
+          assert len(window.plugins.commands()) == 2
+          assert len(window.plugins.extensions("brush_mode")) == 1
+          assert len(window.plugins.runnable_extensions("generate")) == 1
+          assert len(window.plugins.extensions("inspector")) == 1
+          assert len(window.plugins.extensions("brush_shape")) == 1
+          assert len(window.plugins.extensions("widget")) == 1
+          assert len(window.plugins.runnable_filters()) == 2
+          assert window.plugins.filter_definition(
+              "example.selection_tools:configured_native_filter") is not None
+          assert "Python 3 native block filters" in {
+              action.text() for action in window.plugin_menu.actions()
+          }
+          assert len(window.plugins.available_tile_entity_decoders()) == 1
+          assert "example.selection_tools:minecraft:chest" in window.plugins.available_tile_entity_decoders()
+          assert "Python 3 Block Entity decoders" in {
+              action.text() for action in window.plugin_menu.actions()
+          }
+          assert "Python 3 plugin panels" in {
+              action.text() for action in window.plugin_menu.actions()
+          }
+          panel_callback = next(iter(window.plugins.extensions("widget").values()))
+          from PySide6.QtWidgets import QWidget
+          panel_parent = QWidget()
+          panel = panel_callback(panel_parent)
+          assert isinstance(panel, QWidget)
+          panel_parent.close()
+          assert "Python 3 block inspectors" in {
+              action.text() for action in window.plugin_menu.actions()
+          }
+          assert "Python 3 brush shapes" in {
+              action.text() for action in window.plugin_menu.actions()
+          }
+          shape_id = next(iter(window.plugins.extensions("brush_shape")))
+          window.select_brush_shape(shape_id)
+          assert window.active_brush_shape == shape_id
+          assert window.active_brush is None
+          assert "Python 3 generators" in {
+              action.text() for action in window.plugin_menu.actions()
+          }
+          window.select_brush(next(iter(window.plugins.extensions("brush_mode"))))
+          assert window.active_brush is not None
+          from mcedit2_next import nbtwire
+          from mcedit2_next.nbt_inspector import NBTInspectorDialog
+          be = nbtwire.compound_payload([
+              nbtwire.string_tag("id", "example:be"),
+              nbtwire.make_tag(3, "x", (1).to_bytes(4, "big", signed=True))
+          ])
+          inspector = NBTInspectorDialog(be, window)
+          assert inspector.tree.topLevelItemCount() == 1
+          inspector.close()
+          edit_be = nbtwire.compound_payload([
+              nbtwire.string_tag("id", "example:be"),
+              nbtwire.make_tag(3, "energy", (100).to_bytes(4, "big", signed=True))
+          ])
+          from mcedit2_next.nbt_scalar import patch_scalar
+          editable = NBTInspectorDialog(
+              edit_be, window,
+              on_scalar_edit=lambda path, value: patch_scalar(edit_be, path, value))
+          assert editable.on_scalar_edit is not None
+          child = editable.tree.topLevelItem(0).child(1)
+          from PySide6.QtCore import Qt
+          assert child.data(0, Qt.ItemDataRole.UserRole) == (("energy",), 3)
+          editable.close()
+          long_label = "NBT-" + "A" * 600 + "中文"
+          large_be = nbtwire.compound_payload([
+              nbtwire.string_tag("CustomLabel", long_label)
+          ])
+          large_editor = NBTInspectorDialog(
+              large_be, window, on_scalar_edit=lambda path, val:
+              patch_scalar(large_be, path, val))
+          displayed = large_editor.tree.topLevelItem(0).child(0)
+          assert len(displayed.text(2)) < len(long_label)
+          from mcedit2_next.nbt_scalar import get_scalar
+          assert get_scalar(large_editor._raw_payload, ("CustomLabel",)) == long_label
+          large_editor.close()
+          # Large arrays stay collapsed and may be edited by index.
+          import struct
+          from mcedit2_next.nbt_scalar import array_info
+          packed_be = nbtwire.compound_payload([
+              nbtwire.make_tag(11, "SampleData",
+                  struct.pack(">i", 5000) + struct.pack(">i", 71) * 5000)
+          ])
+          array_editor = NBTInspectorDialog(
+              packed_be, window, on_scalar_edit=lambda path, value:
+              patch_scalar(packed_be, path, value))
+          entry = array_editor.tree.topLevelItem(0).child(0)
+          assert entry.childCount() == 0
+          assert entry.text(2) == "5000 entries"
+          assert array_info(packed_be, ("SampleData",)) == (5000, 3)
+          assert get_scalar(packed_be, ("SampleData", 4999)) == 71
+          array_editor.close()
+          from mcedit2_next.nbt_structure import edit_structure, list_info
+          structural_data = nbtwire.compound_payload([
+              nbtwire.make_tag(10, "Nested", nbtwire.compound_payload([
+                  nbtwire.list_tag("Points", 3, [
+                      struct.pack(">i", 11), struct.pack(">i", 22)
+                  ])
+              ]))
+          ])
+          structure_editor = NBTInspectorDialog(
+              structural_data, window,
+              on_scalar_edit=lambda path, val: patch_scalar(structural_data, path, val),
+              on_structure_edit=lambda op, path, **kw: edit_structure(
+                  structural_data, op, path, **kw))
+          assert structure_editor.tree.topLevelItem(0).child(0).text(0) == "Nested"
+          assert list_info(structural_data, ("Nested", "Points")) == (2, 3)
+          assert hasattr(structure_editor, "add_compound_scalar")
+          assert hasattr(structure_editor, "insert_packed_array_item")
+          structure_editor.close()
+          window.plugins.unload("example.selection_tools")
+          window.refresh_plugin_menu()
+          assert window.active_brush is None
+          from mcedit2_next.entity_inspector import EntityListDialog
+          entity_dialog = EntityListDialog((), (0, 0), window,
+                                          on_move=lambda *a: ())
+          assert entity_dialog.move_button.isEnabled()
+          entity_dialog.close()
+          edit_labels = {a.text() for a in window.edit_menu.actions()}
+          assert "Clone selection by offset…" in edit_labels
+          assert "Move selection by offset…" in edit_labels
+          assert "Flood-fill connected blocks within selection" in edit_labels
+          assert "Rotate selection clockwise 90°" in edit_labels
+          assert "Rotate selection counterclockwise 90°" in edit_labels
+          assert "Mirror selection East/West (X)" in edit_labels
+          assert "Mirror selection North/South (Z)" in edit_labels
+          assert "Restore native region backup…" in {a.text() for a in window.file_menu.actions()}
+          from mcedit2_next.palette import make_block
+          class MCRegionFake:
+              legacy = True
+              is_mcregion = True
+              def get_block(self, x, y, z):
+                  return make_block("mcedit2:legacy_id_200[data=11]")
+              def close(self):
+                  pass
+          window.world = MCRegionFake()
+          window.update_native_editor()
+          assert window.numeric_id.maximum() == 255
+          assert window.y_spin.minimum() == 0 and window.y_spin.maximum() == 127
+          window.sample_block(2, 3, 4)
+          assert window.numeric_id.value() == 200
+          assert window.numeric_meta.value() == 11
+          assert window.block_text.text() == "mcedit2:legacy_id_200[data=11]"
+          window.numeric_id.setValue(123)
+          window.numeric_meta.setValue(7)
+          window.apply_native_id()
+          assert window.block_text.text() == "mcedit2:legacy_id_123[data=7]"
+          window.close()
+          print("Qt6 window constructed")
+          PY
+
+  gl3d-software-smoke:
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.action == 'labeled' && github.event.label.name == 'run-next-ci') ||
+      (github.event.action != 'labeled' && !github.event.pull_request.draft)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Mesa software OpenGL, Xvfb and Qt dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends xvfb libegl1 libgl1 libopengl0 libgl1-mesa-dri libxcb-cursor0 libxkbcommon-x11-0 libxcb-xinerama0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-xfixes0 libxcb-shape0 libxcb-xkb1 libxcb-util1 libx11-xcb1 libfontconfig1 libsm6 libice6
+      - name: Install Qt6 and PyOpenGL
+        run: python -m pip install -e .
+      - name: Render actual triangles with the 3D widget on software Mesa
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: |
+          xvfb-run -a -s '-screen 0 1280x800x24' python - <<'PY'
+          from PySide6.QtWidgets import QApplication
+          from mcedit2_next.viewport3d import Voxel3DView
+          from mcedit2_next.viewport3d_math import Camera
+          app = QApplication([])
+          view = Voxel3DView()
+          view.resize(640, 480)
+          view.show()
+          app.processEvents()
+          assert view.context() is not None, "No OpenGL context"
+          assert view._program is not None, f"Shader compile failed: {view._gl_error}"
+          class World:
+              def get_block(self, x, y, z):
+                  return "minecraft:stone" if y == 63 and abs(x) < 3 and abs(z) < 3 else "minecraft:air"
+          class Session:
+              world = World()
+          view.session = Session()
+          view.invalidate()
+          app.processEvents()
+          assert view._vertex_count > 0, "Voxel mesh was not uploaded/drawn"
+          capture = view.grabFramebuffer()
+          assert not capture.isNull(), "No framebuffer image"
+          sampled = {
+              capture.pixelColor(x, y).rgb()
+              for x in range(48, capture.width(), 32)
+              for y in range(48, capture.height(), 32)
+          }
+          assert len(sampled) > 1, "3D framebuffer contains only background color"
+          view.close()
+          from mcedit2_next.gui import MainWindow
+          window = MainWindow()
+          window.show()
+          window.set_language("zh_CN")
+          assert window.mode.itemText(0) == "绘制"
+          window.mode.setCurrentIndex(1)
+          assert window.view.mode == "Select"
+          window.view_mode.setCurrentIndex(1)
+          app.processEvents()
+          assert window.volume_view is not None, "3D mode did not initialize"
+          assert window.view is window.volume_view, "3D mode was not selected"
+          window.view_mode.setCurrentIndex(0)
+          window.close()
+          print("OpenGL voxel draw and Qt6 view switching smoke passed")
+          PY
+
+      - name: Run streamed OpenGL viewport integration smoke
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: |
+          xvfb-run -a -s '-screen 0 1280x800x24' python - <<'PY'
+          import struct
+          import tempfile
+          import time
+          from pathlib import Path
+          from PySide6.QtWidgets import QApplication
+          from mcedit2_next.viewport3d_stream import StreamingVoxel3DView
+          app = QApplication([])
+          with tempfile.TemporaryDirectory() as directory:
+              region = Path(directory, "r.0.0.mca")
+              header = bytearray(8192)
+              struct.pack_into(">I", header, 0, (2 << 8) | 1)
+              region.write_bytes(header)
+              class World:
+                  region_dir = Path(directory)
+                  _edits = {}
+                  def section_blocks(self, cx, cy, cz):
+                      if (cx, cy, cz) == (0, 4, 0):
+                          return ("minecraft:stone",) * 4096
+                      return None
+              class Session:
+                  world = World()
+              view = StreamingVoxel3DView()
+              view.radius = 2
+              view.session = Session()
+              view.resize(640, 480)
+              view.show()
+              for _ in range(120):
+                  app.processEvents()
+                  view._tick()
+                  if view._vertex_count:
+                      break
+                  time.sleep(.025)
+              assert view._program is not None, view._gl_error
+              assert view._vertex_count == 36, (
+                  f"Greedy solid Section should be six quads, got {view._vertex_count} vertices"
+              )
+              assert len(view._gpu) > 0, "No persistent GPU chunk buffer"
+              capture = view.grabFramebuffer()
+              assert not capture.isNull()
+              view.close()
+              print("Incremental indexed Section renderer smoke passed")
+          PY
+
+  full-modern-regression:
+    # Run every top-level migrated Python 3 test module, including recent
+    # BE/entity/search/Qt cases omitted from the older hand-maintained list.
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Qt6 headless runtime libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libegl1 libgl1 libopengl0 libxcb-cursor0 libxkbcommon-x11-0 libxcb-xinerama0
+      - name: Install migrated editor
+        run: python -m pip install -e .
+      - name: Compile migrated code and top-level regression tests only
+        run: |
+          python -m compileall -q modern
+          find tests -maxdepth 1 -type f -name 'test_*.py' -print0 | xargs -0 -r python -m py_compile
+      - name: Run ALL migrated top-level unittest modules (native + Qt)
+        env:
+          QT_QPA_PLATFORM: offscreen
+          PYTHONPATH: modern:tests
+        run: |
+          timeout --signal=TERM --kill-after=10s 180s python -u - <<'PY'
+          import faulthandler
+          import pathlib
+          import sys
+          import unittest
+          faulthandler.enable(all_threads=True)
+          faulthandler.dump_traceback_later(65, repeat=True, file=sys.stderr)
+          modules = sorted(p.stem for p in pathlib.Path("tests").glob("test_*.py"))
+          print(f"Running {len(modules)} migrated top-level test modules", flush=True)
+          suite = unittest.defaultTestLoader.loadTestsFromNames(modules)
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          sys.exit(0 if result.wasSuccessful() else 1)
+          PY
+      - name: Package public backend source for private local-world validation
+        if: success()
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile, ZIP_DEFLATED
+          with ZipFile("mcedit2-native-source.zip", "w", ZIP_DEFLATED) as output:
+              for folder in (Path("modern/mcedit2_next"), Path("scripts")):
+                  for path in sorted(folder.rglob("*.py")):
+                      if "__pycache__" not in path.parts:
+                          output.write(path, path.as_posix())
+          PY
+      - name: Upload source-only backend artifact (no private worlds)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcedit2-next-source-only
+          path: mcedit2-native-source.zip
+          retention-days: 2

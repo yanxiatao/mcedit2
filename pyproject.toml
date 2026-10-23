@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcedit2-next"
+version = "0.3.0a97"
+description = "Experimental Python 3 / Qt6 rewrite of MCEdit 2"
+readme = "MODERNIZATION.md"
+requires-python = ">=3.12"
+dependencies = ["PySide6>=6.7", "PyOpenGL>=3.1.7"]
+
+[project.optional-dependencies]
+world = []
+test = ["pytest>=8"]
+
+[project.scripts]
+mcedit2-next = "mcedit2_next.gui:main"
+
+[tool.setuptools]
+package-dir = {"" = "modern"}
+
+[tool.setuptools.packages.find]
+where = ["modern"]
+
+[tool.setuptools.package-data]
+"mcedit2_next.builtin_plugins.selection_tools" = ["plugin.toml"]
