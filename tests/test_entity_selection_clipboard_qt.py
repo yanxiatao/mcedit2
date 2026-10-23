@@ -51,6 +51,10 @@ class StandaloneEntityClipboardQtTests(EntityClipboardWorldTests):
         self.assertEqual(len(self.world.get_entities_in_chunk(1, 0)), 3)
         self.assertEqual(len(self.session.undo_stack), 1)
         self.assertTrue(self.session.undo())
+        # The test has intentionally reverted its staged changes; suppress
+        # only the test fixture's close-confirmation modal. Real editor UI
+        # must continue prompting on dirty windows.
+        self.session.dirty = False
 
     def test_gui_refuses_paste_from_another_world(self):
         gui = self._gui()
