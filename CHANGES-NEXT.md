@@ -1253,3 +1253,15 @@ available and is not automatically replaced.
   confirmation; commit revalidates, stages ONE Undo, and clears only on success.
 - Added Qt6 offscreen GUI regressions for original BE and mixed imports.
 - CI deferred until fifth feature [skip ci].
+
+## 0.3.0a89 — Pending BE file/world provenance and stale-queue refusal (5/5)
+
+- Expert BE queued imports now carry a SHA-256 fingerprint of the exact file
+  and the identity of the original open world. Loading verifies that the
+  file stayed unchanged during parsing; preview and Apply recheck the source.
+- A changed/deleted/oversized file or a reopened/different world is refused
+  before any native writes. In-memory explicit transfers remain supported.
+- Qt6 pending panel displays the source fingerprint for selected BE entries;
+  read-only mixed previews and single Undo continue to use exact preflight.
+- Added native Anvil tests for source edits, deletion and different world
+  identity. Feature 5 of 5: run one complete CI matrix after this commit.

@@ -7,8 +7,11 @@ or implicit last-writer-wins on overlapping structure footprints.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
+import hashlib
 
 from .core import EditSession
+from .structure_io import MAX_COMPRESSED_BYTES
 from .structure_be import (
     BETransfer, BETransferError, MAX_BE_BYTES, MAX_BE_RECORDS,
     _plan_be_transfer,
@@ -24,6 +27,8 @@ class PendingBEImport:
     origin: tuple[int, int, int]
     skip_air: bool = False
     only_replace_air: bool = False
+    source_sha256: str | None = None
+    world_token: int | None = None
 
 
 @dataclass(frozen=True)
@@ -41,6 +46,30 @@ class BEQueuePreview:
                 f"{self.new_block_entities:,}; skipped source air: "
                 f"{self.skipped_source_air:,}; skipped target non-air: "
                 f"{self.skipped_target_nonair:,}")
+
+
+def _verify_queue_source(session: EditSession, entry: PendingBEImport):
+    """Refuse stale expert queued files or entries from another world instance."""
+    if entry.world_token is not None and entry.world_token != id(session.world):
+        raise BETransferError("Queued BE file belongs to a different open world")
+    if entry.source_sha256 is None:
+        return  # Direct in-memory transfers have no external source file.
+    digest = entry.source_sha256
+    if (type(digest) is not str or len(digest) != 64
+            or any(ch not in "0123456789abcdef" for ch in digest)):
+        raise BETransferError("Invalid queued BE source fingerprint")
+    source = Path(entry.name)
+    try:
+        if not source.is_file() or source.stat().st_size > MAX_COMPRESSED_BYTES:
+            raise BETransferError("Queued BE source file missing or oversized")
+        sha = hashlib.sha256()
+        with source.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1048576), b""):
+                sha.update(chunk)
+    except OSError as exc:
+        raise BETransferError("Queued BE source file is no longer readable") from exc
+    if sha.hexdigest() != digest:
+        raise BETransferError("Queued BE file changed since enqueue; remove and reload")
 
 
 def plan_be_queue(session: EditSession, entries: tuple[PendingBEImport, ...]):
@@ -62,6 +91,7 @@ def plan_be_queue(session: EditSession, entries: tuple[PendingBEImport, ...]):
     for entry in entries:
         if not isinstance(entry, PendingBEImport) or not isinstance(entry.name, str):
             raise BETransferError("Invalid queued BE entry")
+        _verify_queue_source(session, entry)
         transfer = entry.transfer
         total_blocks += len(transfer.structure.blocks)
         total_be += len(transfer.block_entities)
@@ -125,6 +155,7 @@ def plan_mixed_queue(session: EditSession, entries: tuple):
     blocks = records = raw_bytes = skipped_source = skipped_target = 0
     for entry in entries:
         if isinstance(entry, PendingBEImport):
+            _verify_queue_source(session, entry)
             transfer = entry.transfer
             source = transfer.structure.blocks
             records += len(transfer.block_entities)

@@ -197,6 +197,7 @@ class PendingImportsDock(QDockWidget):
             f"Blocks: {len(structure.blocks)}\n"
             f"Original BE records: {len(entry.transfer.block_entities) if is_be else 0}\n"
             f"Placement origin: {entry.origin}\n"
+            f"BE file fingerprint: {(entry.source_sha256 or 'in-memory')[:16]}\n"
             "BE imports preserve opaque original NBT; no entity graphs. "
             "Nothing is staged before Apply.")
 
