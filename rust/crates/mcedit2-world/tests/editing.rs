@@ -1439,3 +1439,33 @@ fn original_modded_be_tree_lists_nested_scalar_paths_without_mutating_data(){
     ).unwrap();
     assert!(absent.is_empty());
 }
+
+#[test]
+fn five_geometry_brushes_produce_atomic_edit_previews_and_restore_original_bytes(){
+    use mcedit2_world::editing::BrushShape;
+    let world=NativeWorld::create(true);
+    let unchanged=world.bytes_now();
+    let mut editor=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    let area=Bounds::new((0,-64,0),(4,-62,4)).unwrap();
+    let target=parse_state("minecraft:gold_block").unwrap();
+    for shape in [BrushShape::HollowBox,BrushShape::Ellipsoid,
+        BrushShape::EllipsoidShell,BrushShape::CylinderY,BrushShape::CylinderShellY]{
+        let planned=editor.prepare_brush(area,shape,&target,None).unwrap();
+        assert!(planned.changed()>0 && planned.changed()<=125);
+        editor.commit(planned).unwrap();
+        assert!(editor.undo().unwrap());
+        assert_eq!(editor.pending_cells(),0);
+    }
+    assert_eq!(world.bytes_now(),unchanged);
+}
+#[test]
+fn 3d_hollow_brush_skips_original_be_inside_mask_but_full_brush_refuses(){
+    use mcedit2_world::editing::BrushShape;
+    let world=NativeWorld::create(true);
+    overwrite_region(&world,&chunk_with_be("minecraft:stone",(2,-63,2)));
+    let editor=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    let bounds=Bounds::new((0,-64,0),(4,-62,4)).unwrap();
+    let target=parse_state("minecraft:gold_block").unwrap();
+    assert!(editor.prepare_brush(bounds,BrushShape::HollowBox,&target,None).is_ok());
+    assert!(editor.prepare_brush(bounds,BrushShape::Ellipsoid,&target,None).is_err());
+}

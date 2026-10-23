@@ -662,3 +662,12 @@ volume/palette size, zero offsets and empty BE/Entity/Biome containers.
 It cannot silently drop original modded inventories or entities and never
 writes original region data on import preview. iced adds separate v3 export
 and guarded paste preview alongside v2 and numeric legacy schematics.
+
+## Major 2/5 — 3D geometry editing tools
+
+Five native original-world-safe brushes (hollow box, ellipsoid, hollow
+ellipsoid, Y-cylinder and Y-cylinder shell) now share the strict bounded
+block editor. They only read/mutate voxels in the actual brush mask, refuse
+original BE collisions and missing source Sections, use exact optional
+block filters, and stage as one Undo/Redo group. iced exposes dedicated
+preview commands; no world files are written during brush previews.

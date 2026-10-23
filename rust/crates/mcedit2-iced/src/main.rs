@@ -6,7 +6,7 @@ use isometric::IsometricSurface;
 use iced::{Element,Length,Theme};
 use mcedit2_world::{compatibility_label,inspect_input,launch,WorldSummary};
 use mcedit2_world::block_lookup::{parse_xyz,read_world_block};
-use mcedit2_world::editing::{parse_bounds,parse_state,BeScalarPreview,Bounds,Preview,Session,Slice,SliceCell,VerticalSlice};
+use mcedit2_world::editing::{parse_bounds,parse_state,BeScalarPreview,Bounds,BrushShape,Preview,Session,Slice,SliceCell,VerticalSlice};
 use mcedit2_world::region_plan::NativeRegionCandidate;
 use mcedit2_world::clipboard::HorizontalTransform;
 use mcedit2_world::region_transaction::{apply_single_region,apply_authenticated_be_single_region,finalize_single_region,rollback_pending_region};
@@ -118,7 +118,7 @@ enum Message{
     VerticalText(String),InspectVertical,PickVertical(usize,usize),
     SelectionText(String),TargetText(String),FilterText(String),
     CloneDestination(String), PreviewClone,PreviewMove,
-    FillSeed(String), PreviewFill,
+    FillSeed(String), PreviewFill,PreviewBrush(BrushShape),
     PatchPath(String),ExportPatch,ImportPatch,AnalyzeNativePatch,AnalyzeRegionPlan,
     ClipboardPath(String),ClipboardDestination(String),ExportClipboard,PreviewPasteClipboard,
     PreviewTransformedClipboard(HorizontalTransform),
@@ -1343,6 +1343,25 @@ fn update(app:&mut App,message:Message){
             app.fill_seed=value;app.prepared=None;app.save_preview=None;app.save_phrase.clear();
         }
         Message::PreviewFill=>app.prepare_fill(),
+        Message::PreviewBrush(shape)=>{
+            app.prepared=None;app.save_preview=None;
+            let result=(||->Result<Preview,String>{
+                let bounds=parse_bounds(&app.edit_area).map_err(|e|e.to_string())?;
+                let state=parse_state(&app.edit_target).map_err(|e|e.to_string())?;
+                let filter=if app.edit_filter.trim().is_empty(){None}
+                    else{Some(parse_state(&app.edit_filter).map_err(|e|e.to_string())?)};
+                let key=app.current_key().ok_or("Select a dimension")?;
+                app.current_session(key)?.prepare_brush(bounds,shape,&state,filter.as_ref())
+                    .map_err(|e|e.to_string())
+            })();
+            match result{
+                Ok(preview)=>{
+                    app.edit_report=format!("{shape:?} brush preview: {}. One guarded Undo group.",preview.summary());
+                    if let Some((wi,di))=app.current_key(){app.prepared=Some((wi,di,preview));}
+                },
+                Err(e)=>app.edit_report=format!("3D brush refused: {e}"),
+            }
+        },
         Message::CloneDestination(value)=>{
             app.clone_destination=value;app.prepared=None;app.save_preview=None;app.save_phrase.clear();
         }
@@ -1588,6 +1607,13 @@ fn view(app:&App)->Element<'_,Message>{
                 .on_input(Message::FillSeed).width(Length::Fill),
             button("Preview connected 3D fill").on_press(Message::PreviewFill)
         ].spacing(8));
+        body=body.push(row![
+            button("Hollow box").on_press(Message::PreviewBrush(BrushShape::HollowBox)),
+            button("Ellipsoid").on_press(Message::PreviewBrush(BrushShape::Ellipsoid)),
+            button("Ellipsoid shell").on_press(Message::PreviewBrush(BrushShape::EllipsoidShell)),
+            button("Cylinder Y").on_press(Message::PreviewBrush(BrushShape::CylinderY)),
+            button("Cylinder shell Y").on_press(Message::PreviewBrush(BrushShape::CylinderShellY)),
+        ].spacing(6));
         let apply=if app.prepared.is_some() && !app.readonly {
             button("Stage approved preview (memory)").on_press(Message::ApplyEdit)
         } else {button("Stage approved preview (memory)")};

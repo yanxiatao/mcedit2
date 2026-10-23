@@ -71,6 +71,42 @@ impl Bounds {
         usize::try_from(count).map_err(|_| refuse("Selection volume overflows address size"))
     }
 }
+/// Exact original-coordinate 3D edit masks; no chunks or Sections generated.
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+pub enum BrushShape{HollowBox,Ellipsoid,EllipsoidShell,CylinderY,CylinderShellY}
+fn brush_inside(shape:BrushShape,bounds:Bounds,p:Position)->bool{
+    let min=bounds.minimum;let max=bounds.maximum;
+    let (x,y,z)=p;
+    if shape==BrushShape::HollowBox{
+        return x==min[0]||x==max[0]||y==min[1]||y==max[1]
+            ||z==min[2]||z==max[2];
+    }
+    let norm=|index:usize,point:i32|{
+        let span=max[index] as f64-min[index] as f64;
+        if span==0.0{0.0}
+        else{(2.0*point as f64-min[index] as f64-max[index] as f64)/span}
+    };
+    let inside=|x:i32,y:i32,z:i32|{
+        let r=norm(0,x).powi(2)+norm(2,z).powi(2)
+            +if matches!(shape,BrushShape::CylinderY|BrushShape::CylinderShellY){
+                0.0
+            }else{norm(1,y).powi(2)};
+        r<=1.000000001
+    };
+    if !inside(x,y,z){return false;}
+    if matches!(shape,BrushShape::Ellipsoid|BrushShape::CylinderY){return true;}
+    for (dx,dy,dz) in [(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)]{
+        if shape==BrushShape::CylinderShellY&&dy!=0 {
+            if (dy>0&&y==max[1])||(dy<0&&y==min[1]){return true;}
+            continue;
+        }
+        let (nx,ny,nz)=(x+dx,y+dy,z+dz);
+        if nx<min[0]||nx>max[0]||ny<min[1]||ny>max[1]
+            ||nz<min[2]||nz>max[2]||!inside(nx,ny,nz){return true;}
+    }
+    false
+}
+
 /// Two endpoint triples separated by semicolon:
 /// "-4, -63, 0; 4, -63, 3", allowing reversed selections.
 pub fn parse_bounds(input: &str) -> Result<Bounds, WorldError> {
@@ -710,6 +746,15 @@ impl Session {
     /// REFUSED: no auto-created air, chunk or legacy ID registry is assumed.
     pub fn prepare(&self, bounds: Bounds, replacement: &State,
                    only_if: Option<&State>) -> Result<Preview, WorldError> {
+        self.prepare_masked(bounds,replacement,only_if,|_|true)
+    }
+    pub fn prepare_brush(&self,bounds:Bounds,shape:BrushShape,
+        replacement:&State,only_if:Option<&State>)->Result<Preview,WorldError>{
+        self.prepare_masked(bounds,replacement,only_if,|p|brush_inside(shape,bounds,p))
+    }
+    fn prepare_masked(&self,bounds:Bounds,replacement:&State,
+        only_if:Option<&State>,included:impl Fn(Position)->bool
+    )->Result<Preview,WorldError>{
         if bounds.volume()? > MAX_CELLS {
             return Err(refuse("Original block edit batch exceeds limit"));
         }
@@ -721,6 +766,7 @@ impl Session {
             for z in bounds.minimum[2]..=bounds.maximum[2] {
                 for x in bounds.minimum[0]..=bounds.maximum[0] {
                     let position = (x, y, z);
+                    if !included(position){continue;}
                     let key = (x.div_euclid(16), z.div_euclid(16));
                     if !chunks.contains_key(&key) {
                         chunks.insert(key, read_world_chunk(
