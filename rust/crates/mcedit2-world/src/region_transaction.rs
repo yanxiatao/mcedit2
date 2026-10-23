@@ -52,6 +52,33 @@ fn append_atomic_marker(path:&Path,bytes:&[u8])->Result<(),WorldError>{
     file.sync_all()?;
     Ok(())
 }
+/// Atomically replace the current Region file by a fully synced stage.
+/// Windows std::fs::rename cannot replace an existing destination. MoveFileExW
+/// with REPLACE_EXISTING handles that case without removing the destination
+/// first; both paths are in the same original Region directory.
+#[cfg(windows)]
+fn replace_existing(source:&Path,destination:&Path)->Result<(),WorldError>{
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name="Kernel32")]
+    extern "system" {
+        fn MoveFileExW(existing:*const u16,new:*const u16,flags:u32)->i32;
+    }
+    fn wide(path:&Path)->Vec<u16>{
+        path.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+    }
+    let src=wide(source);
+    let dst=wide(destination);
+    // MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
+    let result=unsafe{MoveFileExW(src.as_ptr(),dst.as_ptr(),0x0000_0001|0x0000_0008)};
+    if result==0{return Err(std::io::Error::last_os_error().into());}
+    Ok(())
+}
+#[cfg(not(windows))]
+fn replace_existing(source:&Path,destination:&Path)->Result<(),WorldError>{
+    fs::rename(source,destination)?;
+    Ok(())
+}
+
 fn parent_sync(path:&Path)->Result<(),WorldError>{
     let parent=path.parent().ok_or_else(||refuse("Region has no parent directory"))?;
     #[cfg(unix)]
@@ -172,7 +199,12 @@ pub fn apply_single_region(
         .ok_or_else(||refuse("Region candidate extension is missing"))?;
     let region=expected_region_path(world,dimension,candidate.region_x,
         candidate.region_z,ext)?;
-    if region!=candidate.path {
+    // fs::canonicalize on Windows may add the \\?\ path prefix. The
+    // planner keeps the original user-entered absolute path, so lexical
+    // equality is not portable. Validate both files as non-symlink regular
+    // files, then compare canonical filesystem identities instead.
+    ensure_regular(&candidate.path)?;
+    if fs::canonicalize(&region)?!=fs::canonicalize(&candidate.path)? {
         return Err(refuse("Region candidate references an untrusted/noncanonical path"));
     }
     let original=fs::read(&region)?;
@@ -205,7 +237,7 @@ pub fn apply_single_region(
     if sha(&fs::read(&files.region)?)!=marker.original_sha256 {
         return Err(refuse("Original Region changed during staging; pending marker retained for recovery"));
     }
-    fs::rename(&files.staged,&files.region)?;
+    replace_existing(&files.staged,&files.region)?;
     parent_sync(&files.region)?;
     Ok(RegionWriteReceipt{
         region_path:files.region,backup_path:files.backup,
@@ -262,7 +294,7 @@ pub fn rollback_pending_region(
         }
         // One-file replacement of verified backup; never regenerate original
         // region bytes through NBT decoding.
-        fs::rename(&files.restore,&files.region)?;
+        replace_existing(&files.restore,&files.region)?;
         parent_sync(&files.region)?;
     }
     if sha(&fs::read(&files.region)?)!=marker.original_sha256 {

@@ -329,3 +329,16 @@ build`, `cargo run`, create application bundles/installers, or upload Windows
 executables. End-user builds and packaging happen only when the user runs
 them manually. Any temporary push-based test validation is removed after
 the migration regressions are resolved, leaving `workflow_dispatch` only.
+
+## Next migration batch 1/5 — Windows native Region transaction portability
+
+Windows paths may include an extended-length prefix (`\\?\\`) after
+canonicalization, while an indexed world retains a regular absolute path.
+The writer now refuses symlinks and compares canonical source/candidate
+identities instead of their string representations. It also uses the Win32
+same-directory replace-existing rename operation because Rust's default
+Windows rename does not overwrite an open destination path like POSIX.
+The stage must still be synced and the original immutable backup retained.
+Both apply and rollback use the same platform-correct file replacement.
+Do NOT edit an active Minecraft world: Windows file sharing/locking errors
+are intentionally not bypassed. Cross-region atomicity is still not offered.

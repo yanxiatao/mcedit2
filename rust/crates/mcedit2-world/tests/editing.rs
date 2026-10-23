@@ -803,3 +803,26 @@ fn incomplete_pending_region_write_stage_can_be_recovered_without_modifying_orig
     assert!(receipt.marker_path.exists());
     assert_eq!(fs::read(&backup_path).unwrap(),before);
 }
+
+#[test]
+fn canonical_region_candidate_identity_and_transaction_marker_are_recoverable(){
+    use mcedit2_world::region_transaction::{finalize_single_region,rollback_pending_region};
+    let fixture=NativeWorld::create(true);
+    let original=fixture.bytes_now();
+    let mut editor=Session::new(fixture.metadata(),"minecraft:overworld").unwrap();
+    let target=parse_state("minecraft:gold_block").unwrap();
+    let p=Bounds::new((0,-64,0),(0,-64,0)).unwrap();
+    editor.commit(editor.prepare(p,&target,None).unwrap()).unwrap();
+    let receipt=editor.apply_single_region_save(1024).unwrap();
+    assert_ne!(fixture.bytes_now(),original);
+    assert_eq!(fs::read(&receipt.backup_path).unwrap(),original);
+    assert!(receipt.marker_path.is_file());
+    let recovered=rollback_pending_region(
+        &fixture.metadata(),"minecraft:overworld",0,0,"mca"
+    ).unwrap();
+    assert_eq!(fixture.bytes_now(),original);
+    assert!(recovered.marker_path.is_file());
+    assert!(finalize_single_region(
+        &fixture.metadata(),"minecraft:overworld",0,0,"mca"
+    ).is_err());
+}
