@@ -7,7 +7,8 @@
 //! atomic backups, schema safety and all-version coverage before exposure.
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
-use crate::{patch,region_plan};
+use crate::{patch,region_plan,clipboard};
+use crate::clipboard::BlockClipboard;
 use crate::region_transaction::{self,RegionWriteReceipt};
 use crate::region_plan::NativeRegionCandidate;
 
@@ -728,6 +729,110 @@ impl Session {
             &self.world,&self.dimension,&candidate)?;
         self.discard();
         Ok(receipt)
+    }
+    /// Capture a block-only snapshot of a source selection. Original BE
+    /// coordinates always refuse capture, rather than silently copying a
+    /// machine block while losing its inventory or modded NBT.
+    pub fn capture_clipboard(&self,bounds:Bounds)->Result<BlockClipboard,WorldError>{
+        let volume=bounds.volume()?;
+        let width=u16::try_from(bounds.maximum[0]-bounds.minimum[0]+1)
+            .map_err(|_|refuse("Clipboard X size overflow"))?;
+        let height=u16::try_from(bounds.maximum[1]-bounds.minimum[1]+1)
+            .map_err(|_|refuse("Clipboard Y size overflow"))?;
+        let depth=u16::try_from(bounds.maximum[2]-bounds.minimum[2]+1)
+            .map_err(|_|refuse("Clipboard Z size overflow"))?;
+        let mut chunks=BTreeMap::new();
+        let mut blocks=Vec::with_capacity(volume);
+        let mut numeric:Option<bool>=None;
+        for y in bounds.minimum[1]..=bounds.maximum[1]{
+            for z in bounds.minimum[2]..=bounds.maximum[2]{
+                for x in bounds.minimum[0]..=bounds.maximum[0]{
+                    let pos=(x,y,z);
+                    let chunk=original_chunk(&mut chunks,&self.world,&self.dimension,pos)?;
+                    if chunk.has_block_entity(x,y,z){
+                        return Err(refuse("Clipboard selection contains original Block Entity; block-only copy refused"));
+                    }
+                    let id_numeric=matches!(chunk.layout,Layout::McRegion128|Layout::NumericAnvil112);
+                    if numeric.is_some_and(|found|found!=id_numeric) {
+                        return Err(refuse("Clipboard selection mixes numeric and named chunk schemas"));
+                    }
+                    numeric=Some(id_numeric);
+                    let original=chunk.block(x.rem_euclid(16) as u8,y,z.rem_euclid(16) as u8)
+                        .ok_or_else(||refuse("Clipboard source Section absent"))?;
+                    blocks.push(self.overlay.get(&pos).unwrap_or(original).clone());
+                }
+            }
+        }
+        clipboard::new(&self.world,&self.dimension,numeric.unwrap_or(false),
+            bounds.minimum,[width,height,depth],blocks)
+    }
+    /// Export a portable same-world snapshot without changing the source
+    /// Minecraft world. Existing clipboard files are never overwritten.
+    pub fn export_clipboard(&self,bounds:Bounds,path:&Path)->Result<usize,WorldError>{
+        let copied=self.capture_clipboard(bounds)?;
+        clipboard::save(&self.world,path,&copied)?;
+        Ok(copied.blocks.len())
+    }
+    /// Create one fully-preflighted, reversible paste Preview.
+    /// Pasting never carries Block Entity/entity data and never creates
+    /// absent chunks/Sections. Source is a frozen copied block snapshot.
+    pub fn prepare_paste_clipboard(
+        &self,clip:&BlockClipboard,destination_min:Position,
+    )->Result<Preview,WorldError>{
+        clip.validate(&self.world,&self.dimension)?;
+        let max=(
+            destination_min.0.checked_add(clip.size[0] as i32-1)
+                .ok_or_else(||refuse("Clipboard X paste overflow"))?,
+            destination_min.1.checked_add(clip.size[1] as i32-1)
+                .ok_or_else(||refuse("Clipboard Y paste overflow"))?,
+            destination_min.2.checked_add(clip.size[2] as i32-1)
+                .ok_or_else(||refuse("Clipboard Z paste overflow"))?,
+        );
+        let box_=Bounds::new(destination_min,max)?;
+        if box_.minimum!=[destination_min.0,destination_min.1,destination_min.2] {
+            return Err(refuse("Clipboard destination bounds reversed"));
+        }
+        let mut chunks=BTreeMap::new();
+        let mut changes=Vec::new();
+        let mut index=0usize;
+        for y in destination_min.1..=max.1{
+            for z in destination_min.2..=max.2{
+                for x in destination_min.0..=max.0{
+                    let pos=(x,y,z);
+                    let chunk=original_chunk(&mut chunks,&self.world,&self.dimension,pos)?;
+                    if chunk.has_block_entity(x,y,z){
+                        return Err(refuse("Clipboard paste target contains original Block Entity"));
+                    }
+                    let numeric=matches!(chunk.layout,Layout::McRegion128|Layout::NumericAnvil112);
+                    if numeric!=clip.numeric {
+                        return Err(refuse("Clipboard block identity is incompatible with target layout"));
+                    }
+                    let original=chunk.block(x.rem_euclid(16) as u8,y,z.rem_euclid(16) as u8)
+                        .ok_or_else(||refuse("Clipboard paste target Section absent"))?;
+                    let after=clip.blocks[index].clone();
+                    index+=1;
+                    let before=self.overlay.get(&pos).unwrap_or(original);
+                    if before!=&after{
+                        changes.push(Change{
+                            position:pos,original:original.clone(),
+                            before:before.clone(),after,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(Preview{
+            root:self.world.root.clone(),dimension:self.dimension.clone(),
+            data_version:self.world.data_version,
+            changes,source_checks:Vec::new(),is_copy:true,is_fill:false,
+            examined:index,matched:index,skipped:0,source_chunks:chunks.len(),
+        })
+    }
+    pub fn prepare_paste_clipboard_file(
+        &self,path:&Path,destination_min:Position,
+    )->Result<Preview,WorldError>{
+        let clip=clipboard::load(&self.world,&self.dimension,path)?;
+        self.prepare_paste_clipboard(&clip,destination_min)
     }
     /// Write an external original-NBT-verified edit journal, never a world file.
     pub fn export_patch(&self, path: &Path) -> Result<usize, WorldError> {

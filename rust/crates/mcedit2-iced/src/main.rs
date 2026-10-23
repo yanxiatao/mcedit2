@@ -69,6 +69,8 @@ struct App{
     clone_destination:String,
     fill_seed:String,
     patch_path:String,
+    clipboard_path:String,
+    clipboard_destination:String,
     save_phrase:String,
     recover_region:String,
     recovery_phrase:String,
@@ -87,6 +89,7 @@ enum Message{
     CloneDestination(String), PreviewClone,
     FillSeed(String), PreviewFill,
     PatchPath(String),ExportPatch,ImportPatch,AnalyzeNativePatch,AnalyzeRegionPlan,
+    ClipboardPath(String),ClipboardDestination(String),ExportClipboard,PreviewPasteClipboard,
     PrepareWorldSave,SavePhrase(String),ConfirmWorldSave,
     RecoverRegion(String),RecoveryPhrase(String),FinalizeRegion,RollbackRegion,
     PreviewEdit,ApplyEdit,UndoEdit,RedoEdit,DiscardEdits,Clear
@@ -328,7 +331,8 @@ impl App{
             slice_area:"0, 64, 0; 15, 64, 15".into(),
             edit_target:"minecraft:stone".into(),
             clone_destination:"0, 64, 0".into(),
-            fill_seed:"0, 64, 0".into(),..Default::default()
+            fill_seed:"0, 64, 0".into(),
+            clipboard_destination:"0, 64, 0".into(),..Default::default()
         };
         for path in &args.worlds {
             match inspect_input(path) {
@@ -466,6 +470,45 @@ impl App{
 fn update(app:&mut App,message:Message){
     match message{
         Message::Path(x)=>app.path=x,
+        Message::ClipboardPath(value)=>app.clipboard_path=value,
+        Message::ClipboardDestination(value)=>app.clipboard_destination=value,
+        Message::ExportClipboard=>{
+            app.save_preview=None;
+            app.prepared=None;
+            let path=PathBuf::from(app.clipboard_path.trim());
+            let result=(||->Result<usize,String>{
+                let bounds=parse_bounds(&app.edit_area).map_err(|e|e.to_string())?;
+                let key=app.current_key().ok_or("Select an original Java world")?;
+                app.current_session(key)?
+                    .export_clipboard(bounds,&path).map_err(|e|e.to_string())
+            })();
+            app.edit_report=match result{
+                Ok(n)=>format!("Exported {n} selected block states to a create-new .mcedit2clip file. Block Entities/entities excluded; Minecraft world unchanged."),
+                Err(e)=>format!("Block-only clipboard export refused: {e}"),
+            };
+        },
+        Message::PreviewPasteClipboard=>{
+            app.save_preview=None;
+            app.prepared=None;
+            let path=PathBuf::from(app.clipboard_path.trim());
+            let result=(||->Result<Preview,String>{
+                let destination=parse_xyz(&app.clipboard_destination)
+                    .map_err(|e|e.to_string())?;
+                let key=app.current_key().ok_or("Select an original Java world")?;
+                app.current_session(key)?
+                    .prepare_paste_clipboard_file(&path,destination)
+                    .map_err(|e|e.to_string())
+            })();
+            match result{
+                Ok(preview)=>{
+                    app.edit_report=format!("Clipboard block-only paste PREVIEW: {}. Stage via existing Undo-able apply button.",preview.summary());
+                    if let Some((wi,di))=app.current_key(){
+                        app.prepared=Some((wi,di,preview));
+                    }
+                },
+                Err(e)=>app.edit_report=format!("Clipboard paste refused: {e}"),
+            }
+        },
         Message::PickSlice(x,y,z)=>app.pick_slice(x,y,z),
         Message::MoveSlice(dx,dy,dz)=>app.pan_slice(dx,dy,dz),
         Message::SavePhrase(value)=>app.save_phrase=value,
@@ -777,6 +820,17 @@ fn view(app:&App)->Element<'_,Message>{
         body=body.push(row![
             button("Analyze lossless native NBT preview").on_press(Message::AnalyzeNativePatch),
             button("Analyze append-only Region save plan").on_press(Message::AnalyzeRegionPlan)
+        ].spacing(8));
+        body=body.push(text("Block-only clipboard (same original world/dimension; will not copy machines, BE NBT or entities)"));
+        body=body.push(row![
+            text_input("External .mcedit2clip file",&app.clipboard_path)
+                .on_input(Message::ClipboardPath).width(Length::Fill),
+            button("Copy selection to clipboard file").on_press(Message::ExportClipboard)
+        ].spacing(8));
+        body=body.push(row![
+            text_input("Paste destination X,Y,Z",&app.clipboard_destination)
+                .on_input(Message::ClipboardDestination).width(Length::Fill),
+            button("Preview clipboard paste").on_press(Message::PreviewPasteClipboard)
         ].spacing(8));
         body=body.push(row![
             text_input("External .mcedit2patch path (outside the world)",&app.patch_path)

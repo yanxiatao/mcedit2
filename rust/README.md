@@ -356,3 +356,18 @@ Stale grids are invalidated when the world/dimension changes, or after
 any in-memory mutation/Undo/Redo, so selections cannot silently use a
 previously edited viewport. This is an interactive widget grid, not yet
 a textured chunk mesh or full 3D GPU renderer. No builds or CI triggered.
+
+## Next migration batch 3/5 — portable block-only clipboard
+
+The Rust Session now exports up to 4096 frozen effective block states in
+Y/Z/X order to a versioned `.mcedit2clip` file and previews a later paste
+into a selected destination, staging it as one Undo/Redo transaction.
+Original Block Entities at the source OR destination refuse the operation
+rather than silently removing machine NBT; source chunks and Sections must
+exist, and the file is limited to the SAME original world, dimension and
+DataVersion, retaining original numeric-vs-named block identity. Clipboard
+files are create-new, stored outside the Minecraft world and strictly
+validated on import. iced adds selection export and clipboard paste preview
+controls. The clipboard deliberately excludes Block Entities, entities and
+schematic conversion; standardized `.schematic`/`.schem` formats remain
+separate future adapters. No disk world writes occur during clipboard use.

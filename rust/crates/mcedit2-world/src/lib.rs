@@ -9,6 +9,7 @@ pub mod sections;
 pub mod alpha;
 pub mod block_lookup;
 pub mod editing;
+pub mod clipboard;
 pub mod region_plan;
 pub mod region_transaction;
 mod patch;

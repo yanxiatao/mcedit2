@@ -191,3 +191,10 @@ original block (up to 16x16). Clicking selects a corresponding single-block
 editing region, while normal Block Entity guards still govern preview/commit.
 The full graphical 3D renderer, textured voxel meshes, visual selection
 brushes and all-version GPU lighting are still outstanding.
+
+### Native block-only clipboard
+
+Versioned `.mcedit2clip` provides same-world block-state source capture,
+recoverable clipboard import, safe destination preview and Undo. It is NOT
+a Minecraft schematic file and contains no opaque Block Entity/entity NBT.
+Source or destination Block Entity collisions refuse the entire action.

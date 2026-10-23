@@ -826,3 +826,58 @@ fn canonical_region_candidate_identity_and_transaction_marker_are_recoverable(){
         &fixture.metadata(),"minecraft:overworld",0,0,"mca"
     ).is_err());
 }
+
+#[test]
+fn original_world_block_clipboard_survives_reopen_and_pastes_one_undo_group(){
+    let fixture=NativeWorld::create(true);
+    let unchanged=fixture.bytes_now();
+    let path=std::env::temp_dir().join(format!(
+        "mcedit2-block-clipboard-{}-{}.mcedit2clip",
+        std::process::id(),COUNTER.fetch_add(1,Ordering::Relaxed)
+    ));
+    let mut editor=Session::new(fixture.metadata(),"minecraft:overworld").unwrap();
+    let area=Bounds::new((0,-64,0),(1,-64,1)).unwrap();
+    let state=parse_state("minecraft:oak_log").unwrap();
+    editor.commit(editor.prepare(area,&state,None).unwrap()).unwrap();
+    assert_eq!(editor.export_clipboard(area,&path).unwrap(),4);
+    assert!(editor.export_clipboard(area,&path).is_err(),"must never overwrite existing clipboard");
+    assert_eq!(fixture.bytes_now(),unchanged);
+    let mut reopened=Session::new(fixture.metadata(),"minecraft:overworld").unwrap();
+    let preview=reopened.prepare_paste_clipboard_file(&path,(4,-64,4)).unwrap();
+    assert_eq!(preview.changed(),4);
+    reopened.commit(preview).unwrap();
+    match reopened.visible_block((5,-64,5)).unwrap(){
+        Lookup::Present(block)=>assert_eq!(block.state,state),
+        other=>panic!("Unexpected staged clipboard state: {other:?}"),
+    }
+    assert_eq!(reopened.undo_depth(),1);
+    assert!(reopened.undo().unwrap());
+    assert_eq!(reopened.pending_cells(),0);
+    assert_eq!(fixture.bytes_now(),unchanged);
+    fs::remove_file(path).unwrap();
+}
+#[test]
+fn original_block_only_clipboard_refuses_be_wrong_dimension_and_corrupted_size(){
+    let fixture=NativeWorld::create(true);
+    let path=std::env::temp_dir().join(format!(
+        "mcedit2-block-clipboard-invalid-{}-{}.mcedit2clip",
+        std::process::id(),COUNTER.fetch_add(1,Ordering::Relaxed)
+    ));
+    let mut editor=Session::new(fixture.metadata(),"minecraft:overworld").unwrap();
+    let select=Bounds::new((0,-64,0),(0,-64,0)).unwrap();
+    editor.export_clipboard(select,&path).unwrap();
+    let original=fs::read(&path).unwrap();
+    let mut obj:serde_json::Value=serde_json::from_slice(&original).unwrap();
+    obj["size"]=serde_json::json!([16,16,16]);
+    fs::write(&path,serde_json::to_vec(&obj).unwrap()).unwrap();
+    assert!(editor.prepare_paste_clipboard_file(&path,(1,-64,1)).is_err());
+    obj=serde_json::from_slice(&original).unwrap();
+    obj["dimension"]=serde_json::json!("minecraft:the_end");
+    fs::write(&path,serde_json::to_vec(&obj).unwrap()).unwrap();
+    assert!(editor.prepare_paste_clipboard_file(&path,(1,-64,1)).is_err());
+    assert_eq!(editor.pending_cells(),0);
+    fs::remove_file(path).unwrap();
+    overwrite_region(&fixture,&chunk_with_be("minecraft:stone",(0,-64,0)));
+    let newer=Session::new(fixture.metadata(),"minecraft:overworld").unwrap();
+    assert!(newer.capture_clipboard(select).is_err());
+}
