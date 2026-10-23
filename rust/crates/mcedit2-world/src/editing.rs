@@ -411,6 +411,26 @@ impl Session {
             .map(|b|format!("{b:02x}")).collect::<String>();
         Ok((patched.len(),hash))
     }
+    /// Copy the complete original opaque Block Entity byte payload to an
+    /// external, immutable .mcedit2be file. Never mutates world or overlay.
+    pub fn export_original_be_snapshot(
+        &self,position:Position,path:&Path,
+    )->Result<usize,WorldError>{
+        let snapshot=crate::be_snapshot::capture(
+            &self.world,&self.dimension,position
+        )?;
+        let size=snapshot.raw_compound.len();
+        crate::be_snapshot::save(&self.world,&self.dimension,&snapshot,path)?;
+        Ok(size)
+    }
+    /// Read and verify an external opaque BE snapshot against current world
+    /// source bytes. This is NOT import/paste into any world.
+    pub fn verify_original_be_snapshot(
+        &self,path:&Path,
+    )->Result<(Position,usize),WorldError>{
+        let snap=crate::be_snapshot::verify_file(&self.world,&self.dimension,path)?;
+        Ok(((snap.xyz[0],snap.xyz[1],snap.xyz[2]),snap.raw_compound.len()))
+    }
     /// Group by original chunk; inspect each native NBT at most once.
     /// Entire preview is read-only. Missing original chunks/Sections are
     /// REFUSED: no auto-created air, chunk or legacy ID registry is assumed.

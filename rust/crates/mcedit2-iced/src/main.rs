@@ -78,6 +78,7 @@ struct App{
     edit_filter:String,
     be_scalar_field:String,
     be_scalar_value:String,
+    be_snapshot_path:String,
     clone_destination:String,
     fill_seed:String,
     patch_path:String,
@@ -100,6 +101,7 @@ enum Message{
     Path(String),Open,Select(usize),Coordinates(String),Dimension(usize),
     SurfaceArea(String),InspectSurface,PickSurface(i32,i32,i32),
     BeScalarField(String),BeScalarValue(String),PreviewBeScalar,
+    BeSnapshotPath(String),ExportOriginalBe,VerifyOriginalBe,
     InspectBlock,InspectOriginalBlockEntity,SliceText(String),InspectSlice,PickSlice(i32,i32,i32),MoveSlice(i32,i32,i32),
     VerticalText(String),InspectVertical,PickVertical(usize,usize),
     SelectionText(String),TargetText(String),FilterText(String),
@@ -831,6 +833,32 @@ fn update(app:&mut App,message:Message){
             };
         },
         Message::BeScalarField(value)=>app.be_scalar_field=value,
+        Message::BeSnapshotPath(value)=>app.be_snapshot_path=value,
+        Message::ExportOriginalBe=>{
+            let path=PathBuf::from(app.be_snapshot_path.trim());
+            let result=(||->Result<usize,String>{
+                let point=parse_xyz(&app.query_coordinates).map_err(|e|e.to_string())?;
+                let key=app.current_key().ok_or("Select original world/dimension")?;
+                app.current_session(key)?.export_original_be_snapshot(point,&path)
+                    .map_err(|e|e.to_string())
+            })();
+            app.block_result=match result{
+                Ok(size)=>format!("Exported immutable original Block Entity NBT ({} raw bytes) to external snapshot. World untouched.",size),
+                Err(e)=>format!("Opaque BE snapshot export refused: {e}"),
+            };
+        },
+        Message::VerifyOriginalBe=>{
+            let path=PathBuf::from(app.be_snapshot_path.trim());
+            let result=(||->Result<((i32,i32,i32),usize),String>{
+                let key=app.current_key().ok_or("Select original world/dimension")?;
+                app.current_session(key)?.verify_original_be_snapshot(&path)
+                    .map_err(|e|e.to_string())
+            })();
+            app.block_result=match result{
+                Ok((xyz,size))=>format!("Verified {} exact original NBT bytes at XYZ {:?} against the current source chunk; no data imported or modified.",size,xyz),
+                Err(e)=>format!("Opaque BE snapshot verification refused: {e}"),
+            };
+        },
         Message::BeScalarValue(value)=>app.be_scalar_value=value,
         Message::PreviewBeScalar=>{
             let result=(||->Result<(usize,String),String>{
@@ -1061,6 +1089,12 @@ fn view(app:&App)->Element<'_,Message>{
             text_input("Exact replacement scalar value",&app.be_scalar_value)
                 .on_input(Message::BeScalarValue).width(Length::Fill),
             button("Preview surgical original BE tag edit").on_press(Message::PreviewBeScalar),
+        ].spacing(8));
+        body=body.push(row![
+            text_input("Outside-world .mcedit2be original NBT snapshot",&app.be_snapshot_path)
+                .on_input(Message::BeSnapshotPath).width(Length::Fill),
+            button("Export exact original BE NBT").on_press(Message::ExportOriginalBe),
+            button("Verify BE source unchanged").on_press(Message::VerifyOriginalBe),
         ].spacing(8));
         body=body.push(row![
             text_input("2D X/Z map: X1,Y,Z1; X2,Y,Z2",&app.slice_area)

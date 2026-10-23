@@ -479,3 +479,15 @@ sibling field. iced computes a candidate digest without staging or writing
 ANY disk data. Persistent BE changes, BE relocations and BE Undo are NOT
 available yet; the native Region transaction still rejects any opaque NBT
 change not caused by normal block-state edits.
+
+## Migration batch 4, round 3/5 — immutable opaque BE snapshots
+
+Any original Block Entity's full Compound NBT payload can be exported to
+an external `.mcedit2be` provenance-bound snapshot without normalization.
+The file records the exact original world/dimension/XYZ and both complete
+source-chunk and BE-payload SHA-256 digests. Loading it validates source
+content byte-for-byte against the current original world, refusing stale,
+modified or cross-world snapshots. Create-new file semantics prohibit silent
+overwriting; exporting inside the original world is refused. iced exposes
+export and verify commands. This is a lossless evidence/backup primitive,
+NOT a Block Entity insertion, paste, mutation or world write feature.

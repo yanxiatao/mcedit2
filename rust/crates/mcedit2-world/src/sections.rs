@@ -473,6 +473,28 @@ pub fn patch_original_block_entity_scalar(
     Ok(patched)
 }
 
+/// Borrow the original Block Entity NBT Compound *payload* and clone
+/// it byte-for-byte for an independent opaque snapshot.
+pub fn original_block_entity_bytes(
+    original_nbt:&[u8],position:(i32,i32,i32),
+)->Result<Option<Vec<u8>>>{
+    let decoded=decode_sections(original_nbt)?;
+    if !decoded.block_entities.contains(&position){return Ok(None);}
+    let root=parse_root(original_nbt)?;
+    let source=if root.field("sections").is_some(){
+        &root
+    }else{root.require("Level",10)?};
+    let key=if root.field("sections").is_some(){"block_entities"}else{"TileEntities"};
+    let list=source.require(key,9)?;
+    let item=list.items.iter().find(|node|
+        node.kind==10
+        &&node.field("x").and_then(|tag|tag.i32().ok())==Some(position.0)
+        &&node.field("y").and_then(|tag|tag.i32().ok())==Some(position.1)
+        &&node.field("z").and_then(|tag|tag.i32().ok())==Some(position.2)
+    ).ok_or_else(||error("Original BE list inconsistent with decoded coordinates"))?;
+    Ok(Some(item.raw.to_vec()))
+}
+
 /// A strict original-byte, SAME-PALETTE named-state patch candidate.
 /// This is an IN-MEMORY NBT transform, not a disk writer.
 #[derive(Debug, Clone)]

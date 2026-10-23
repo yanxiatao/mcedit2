@@ -10,6 +10,7 @@ pub mod alpha;
 pub mod block_lookup;
 pub mod editing;
 pub mod surface;
+pub mod be_snapshot;
 pub mod clipboard;
 pub mod schematic;
 pub mod region_plan;

@@ -1053,3 +1053,25 @@ fn surgical_be_scalar_candidate_changes_only_target_and_preserves_other_nbt(){
     assert_eq!(editor.pending_cells(),0);
     assert_eq!(world.bytes_now(),original_file);
 }
+
+#[test]
+fn external_original_be_nbt_snapshot_preserves_modded_compound_and_detects_source_drift(){
+    let world=NativeWorld::create(true);
+    overwrite_region(&world,&chunk_with_be("minecraft:stone",(2,-64,3)));
+    let original=world.bytes_now();
+    let editor=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    let file=std::env::temp_dir().join(format!(
+        "mcedit2-original-be-{}-{}.mcedit2be",
+        std::process::id(),COUNTER.fetch_add(1,Ordering::Relaxed)
+    ));
+    let bytes=editor.export_original_be_snapshot((2,-64,3),&file).unwrap();
+    assert!(bytes>0);
+    let (position,length)=editor.verify_original_be_snapshot(&file).unwrap();
+    assert_eq!(position,(2,-64,3));
+    assert_eq!(length,bytes);
+    assert!(editor.export_original_be_snapshot((2,-64,3),&file).is_err());
+    assert_eq!(world.bytes_now(),original);
+    overwrite_region(&world,&chunk_with_be("minecraft:gold_block",(2,-64,3)));
+    assert!(editor.verify_original_be_snapshot(&file).is_err());
+    fs::remove_file(file).unwrap();
+}
