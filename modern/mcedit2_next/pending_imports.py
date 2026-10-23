@@ -27,6 +27,10 @@ from .entity_import_queue import (
     PendingEntityImport, load_pending_entity,
     preview_entity_mixed_queue, commit_entity_mixed_queue,
 )
+from .live_selection_templates import (
+    capture_live_template, duplicate_live_template, parse_target_xyz,
+    queued_capture_total,
+)
 
 BE_FORMATS = (
     ("MCEdit2 original BE (.nbt)", "original_nbt", "*.nbt"),
@@ -49,6 +53,7 @@ class PendingImport:
     structure: Structure
     origin: tuple[int, int, int]
     version_confirmed: bool
+    world_token: int | None = None
 
 
 def load_pending_import(filename: str, world,
@@ -72,7 +77,7 @@ def load_pending_import(filename: str, world,
     if any(type(v) is not int for v in origin):
         raise ValueError("Origin must be integer XYZ")
     return PendingImport(str(source), structure, tuple(origin),
-                         bool(version_confirmed))
+                         bool(version_confirmed), world_token=id(world))
 
 
 def commit_import_queue(session, entries: tuple[PendingImport, ...]):
@@ -83,6 +88,9 @@ def commit_import_queue(session, entries: tuple[PendingImport, ...]):
         raise ValueError("Too many queued structure imports")
     merged = {}
     for entry in entries:
+        if (entry.world_token is not None and
+                entry.world_token != id(session.world)):
+            raise ValueError("Queued blocks belong to a different open world")
         structure = entry.structure
         if (structure.data_version and structure.data_version != session.world.version
                 and not entry.version_confirmed):
@@ -154,6 +162,14 @@ class PendingImportsDock(QDockWidget):
         add_entities.setObjectName("pending_imports_add_entities")
         add_entities.clicked.connect(self.queue_entity_file)
         top_buttons.addWidget(add_entities)
+        capture = QPushButton("Capture 3D selection (memory)…", widget)
+        capture.setObjectName("pending_imports_capture_live")
+        capture.clicked.connect(self.queue_live_selection)
+        top_buttons.addWidget(capture)
+        duplicate = QPushButton("Duplicate at target XYZ", widget)
+        duplicate.setObjectName("pending_imports_duplicate_live")
+        duplicate.clicked.connect(self.duplicate_selected)
+        top_buttons.addWidget(duplicate)
         remove = QPushButton("Remove selected", widget)
         remove.clicked.connect(self.remove_selected)
         top_buttons.addWidget(remove)
@@ -253,6 +269,80 @@ class PendingImportsDock(QDockWidget):
             if isinstance(entry, PendingBEImport)
             else len(entry.structure.blocks)
             for entry in self.entries)
+
+    def queue_live_selection(self):
+        """Capture selected original cells/BEs/safe entities directly to memory."""
+        if self.editor.world is None or self.editor.session is None or (
+                self.editor.view.selection is None):
+            QMessageBox.information(
+                self, "Native selection template",
+                "Open a world and make a bounded 3D selection first.")
+            return
+        if len(self.entries) >= MAX_IMPORTS:
+            QMessageBox.warning(self, "Pending templates", "Queue limit: 16.")
+            return
+        choices = (
+            "Blocks only (refuse all BE payloads)",
+            "Blocks + all original BEs (no standalone entities)",
+            "Blocks + original BEs + independent item/XP entities",
+        )
+        selected, accepted = QInputDialog.getItem(
+            self, "Capture 3D selection to memory",
+            "Choose exact content, unknown links are never repaired:",
+            list(choices), 1, False)
+        if not accepted:
+            return
+        modes = {
+            choices[0]: "blocks",
+            choices[1]: "be",
+            choices[2]: "entities",
+        }
+        mode = modes.get(selected)
+        if mode is None:
+            return
+        box = self.editor._box()
+        initial = (box.minimum[0] + box.size[0] + 1,
+                   box.minimum[1], box.minimum[2])
+        value, accepted = QInputDialog.getText(
+            self, "Destination for captured template",
+            "Target minimum block coordinate (X, Y, Z):",
+            text=f"{initial[0]}, {initial[1]}, {initial[2]}")
+        if not accepted:
+            return
+        try:
+            target = parse_target_xyz(value)
+            entry = capture_live_template(
+                self.editor.session, box, mode=mode,
+                target_origin=target)
+            if queued_capture_total([*self.entries, entry]) > self.editor.session.max_blocks:
+                raise ValueError("Combined live templates exceed cell budget")
+            self.entries.append(entry)
+            self._refresh(len(self.entries) - 1)
+            self.editor.statusBar().showMessage(
+                f"Captured native selection into in-memory queue: {mode}; "
+                "no disk or world changes")
+        except Exception as exc:
+            QMessageBox.warning(self, "3D selection capture refused", str(exc))
+
+    def duplicate_selected(self):
+        """One source snapshot, multiple explicit independent destinations."""
+        if self.editor.session is None:
+            return
+        row = self.items.currentRow()
+        if not 0 <= row < len(self.entries):
+            return
+        if len(self.entries) >= MAX_IMPORTS:
+            QMessageBox.warning(self, "Pending templates", "Queue limit: 16.")
+            return
+        try:
+            destination = tuple(spin.value() for spin in self.coords)
+            copy = duplicate_live_template(self.entries[row], destination)
+            if queued_capture_total([*self.entries, copy]) > self.editor.session.max_blocks:
+                raise ValueError("Combined templates exceed native cell budget")
+            self.entries.append(copy)
+            self._refresh(len(self.entries) - 1)
+        except Exception as exc:
+            QMessageBox.warning(self, "Template duplicate refused", str(exc))
 
     def queue_entity_file(self):
         """Queue a Java/Sponge file only via explicit entity-aware decoder."""

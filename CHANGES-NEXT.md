@@ -1400,3 +1400,43 @@ available and is not automatically replaced.
   file-format validation, Undo/Redo, Save/reopen and native backups.
 - **One major feature commit**, 4/5 in the current batch. CI deliberately
   deferred until major feature 5 [skip ci]; test outcomes not claimed.
+
+## 0.3.0a94 — Major feature 5/5: live 3D world selection templates and batch clone
+
+- Added a full **in-memory 3D native world selection -> named template ->
+  editable Pending Imports queue -> guarded multi-destination paste** flow.
+  Users no longer need to export and re-import files when copying from
+  an open world. Targets are supplied as explicit XYZ coordinates.
+- Three explicit capture modes: plain blocks only (refuses selections
+  containing any original BE NBT), blocks + original opaque BEs (both
+  pre-1.13 numeric Anvil and modern named Anvil), and blocks + original
+  BEs + standalone item/XP entity NBT (only same-version Java 1.13+
+  where both original storage and entities are safe). No implicit
+  conversion, unknown mob graph or owner reference repair.
+- Native snapshots preserve original BlockState/ID+metadata and opaque
+  mod NBT bytes without an intermediate lossy file. Duplicate selected
+  templates to independent XYZ origins (with unique fresh entity UUIDs
+  at Apply); each queue entry can adjust origin, source-air and original
+  target-air-only masks independently. The strict mixed queue refuses
+  overlapping source block footprints or original BE collisions.
+- Capture, duplicate, preview and cancel never mutate disk or stage
+  world edits. Original world-instance-bound snapshots cannot be
+  pasted in a different open world; even plain-only memory captures
+  carry a world binding. File-originated plain entries also retain
+  the original world-token as a safety improvement.
+- Reuses the native strict multi-file preflight, all-or-nothing
+  block/BE/entity transaction and **one Undo/Redo**, original
+  region backup on Save and fresh UUIDv4 for independently cloned
+  vanilla item/XP entities. Source world records are not removed.
+- Qt6 Pending Imports adds **Capture 3D selection (memory)** with
+  mode and destination dialogs, and **Duplicate at target XYZ**.
+  All file-based pending workflows remain supported, including
+  original plain-only last-wins semantics.
+- Added modern named Anvil, 1.12 numeric original Anvil, standalone
+  item/XP and Qt6 regression tests: multiple destinations, NBT
+  preservation, Save/reopen, Undo/Redo, wrong-world refusal,
+  malformed coordinates, BE/no-BE mode isolation and no staging
+  on cancellation or invalid target.
+- This is **major feature 5 of 5**. The entire five-feature batch
+  (a90..a94) now runs ONE complete six-job CI matrix. Failures
+  are repaired before reporting the batch as verified.

@@ -164,6 +164,9 @@ def plan_mixed_queue(session: EditSession, entries: tuple):
             if not hasattr(entry, "structure") or not hasattr(entry, "version_confirmed"):
                 raise BETransferError("Unknown mixed queue entry")
             transfer = None
+            if (getattr(entry, "world_token", None) is not None
+                    and entry.world_token != id(session.world)):
+                raise BETransferError("Queued blocks belong to a different open world")
             source = entry.structure.blocks
             version = entry.structure.data_version
             if (version and version != session.world.version
