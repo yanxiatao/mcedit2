@@ -1115,3 +1115,24 @@ available and is not automatically replaced.
   original ZIP stayed byte-identical. 1.12.2 numeric Java is intentionally
   refused by this standard route and retains its original-ID-specific
   transfer tool. In-game modded machine/network semantics are unverified.
+
+## 0.3.0a80 — Sponge v2/v3 original Block Entity schematic transfer
+
+- Added a separately confirmed **Sponge .schem v2 and v3 with opaque BE**
+  expert import/export path without weakening the normal block-only importer.
+  Sponge v2 flat BE properties, Sponge v3 nested BE Data Compound, Id and
+  relative Pos TAG_Int_Array[3] are handled distinctly. Unknown modded
+  properties remain original binary NBT tags.
+- Both formats retain exact native block-state identity, verify a known
+  Java 1.13+ DataVersion and reject unknown entity/biome data and unsafe
+  nonzero offsets via the existing strict Sponge decoder.
+- Placement reuses original native Anvil BE-safe preflight, no existing BE
+  overwrite, generated Sections, one Undo/Redo entry and region backups;
+  absolutely no automatic datafixing, UUID/machine-network repair or
+  legacy numeric-to-named conversion.
+- Added Qt6 File menu commands for v2/v3 BE-aware .schem import/export
+  with explicit warnings; disk-backed native synthetic regression for
+  Sponge v2/v3 encode/decode, save/reopen, Undo-after-save and
+  malformed/unsafe data refusal.
+- CI is intentionally deferred while the user batches five feature
+  commits. This is feature commit 1 of 5 and is marked [skip ci].

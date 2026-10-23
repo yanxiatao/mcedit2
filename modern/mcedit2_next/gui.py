@@ -362,6 +362,8 @@ class MainWindow(QMainWindow):
                 lambda checked=False, code=language: self.set_language(code))
         self.add_action(file_menu, "Open world…", "Ctrl+O", self.open_world)
         self.add_action(file_menu, "Import structure (.nbt / .schem / .schematic)…", "", self.import_structure)
+        self.add_action(file_menu, "Import Sponge v2/v3 with BE (.schem; expert)…", "",
+                        self.import_schem_be)
         self.add_action(file_menu, "Import vanilla Java structure with BE (.nbt; expert)…", "",
                         self.import_vanilla_be_structure)
         self.add_action(file_menu, "Import original BE transfer (.nbt; expert)…", "",
@@ -369,6 +371,8 @@ class MainWindow(QMainWindow):
         self.add_action(file_menu, "Queue structures for later placement…", "",
                         self.show_pending_imports)
         self.add_action(file_menu, "Export selected structure (.nbt / .schem / .schematic)…", "", self.export_structure)
+        self.add_action(file_menu, "Export Sponge v2/v3 with BE (.schem; expert)…", "",
+                        self.export_schem_be)
         self.add_action(file_menu, "Export vanilla Java structure with BE (.nbt; expert)…", "",
                         self.export_vanilla_be_structure)
         self.add_action(file_menu, "Export selection with original BE NBT (.nbt; expert)…", "",
@@ -1747,6 +1751,72 @@ class MainWindow(QMainWindow):
                 f"Exported {len(structure.blocks)} block states, without BE/entities")
         except Exception as exc:
             QMessageBox.critical(self, "Export failed", str(exc))
+
+    def export_schem_be(self):
+        """Opt-in Sponge v2/v3 .schem with original opaque Block Entity NBT."""
+        if self.session is None or self.world is None or self.view.selection is None:
+            QMessageBox.information(
+                self, "Sponge BE export",
+                "Open a Java 1.13+ Anvil world and select a bounded region.")
+            return
+        accepted = QMessageBox.warning(
+            self, "Sponge original BE export (expert)",
+            "Export Sponge v2/v3 blocks with original modded Block Entity "
+            "NBT fields. This does NOT transfer standalone entities, biomes, "
+            "machine network identities, UUID links, or controller references. "
+            "Only same-DataVersion Java 1.13+ named Anvil transfers are safe "
+            "enough to attempt. Use an OFFLINE copy. Export?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if accepted != QMessageBox.StandardButton.Yes:
+            return
+        filename, selected = QFileDialog.getSaveFileName(
+            self, "Export Sponge schematic with BE", "",
+            "Sponge v3 BE (*.schem);;Sponge v2 BE (*.schem)")
+        if not filename:
+            return
+        try:
+            from .schem_be import capture_schem_be, save_schem_be
+            transfer = capture_schem_be(
+                self.world, self._box(), self.session.max_blocks)
+            version = 2 if "v2" in selected else 3
+            save_schem_be(filename, transfer, schematic_version=version)
+            self.statusBar().showMessage(
+                f"Exported Sponge v{version} with original BE NBT: {transfer.summary()}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Sponge BE export refused", str(exc))
+
+    def import_schem_be(self):
+        """Explicit BE-aware Sponge import; legacy block-only route unchanged."""
+        if self.session is None or self.world is None:
+            QMessageBox.information(self, "Sponge BE import", "Open a Java world first.")
+            return
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Import Sponge schematic with Block Entities", "",
+            "Sponge v2/v3 schematic (*.schem)")
+        if not filename:
+            return
+        try:
+            from .schem_be import load_schem_be, place_schem_be
+            transfer = load_schem_be(filename)
+            origin = (self._box().minimum if self.view.selection else
+                      (self.view.center_x, self.y_spin.value(),
+                       self.view.center_z))
+            accepted = QMessageBox.warning(
+                self, "Sponge BE placement (expert)",
+                f"Place {transfer.summary()} at {origin}? "
+                "Every original target Section must already exist, "
+                "DataVersion must match exactly, and target BEs cannot "
+                "be overwritten. Modded controller networks, ownership "
+                "references and UUIDs are NOT repaired. Entity/biome "
+                "payloads are refused. Test in an OFFLINE disposable copy.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if accepted == QMessageBox.StandardButton.Yes:
+                self._perform(lambda: place_schem_be(
+                    self.session, transfer, origin))
+        except Exception as exc:
+            QMessageBox.critical(self, "Sponge BE import refused", str(exc))
 
     def export_vanilla_be_structure(self):
         """Export ordinary unmarked Java 1.13+ .nbt with BE compounds."""
