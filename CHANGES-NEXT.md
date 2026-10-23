@@ -1025,3 +1025,25 @@ available and is not automatically replaced.
   modern/legacy atomic transaction regressions and synthetic
   ZIP cross-chunk/overlap/missing-target tests. Unsupported
   mod-specific linkage and full GUI behavior remain unverified.
+
+## 0.3.0a76 — Complete parallel original-world regression in one command
+
+- Introduced a **single integrated EditSession + one Save** scenario
+  mixing multi-BE move, normal block paint, safe dropped-item UUID
+  clone and grouped move of two original entities. One Undo/Redo
+  history stack is fully reversed and replayed before native
+  Save/reopen and byte-exact original multi-region recovery.
+- Same scenario passed on the real **1.12.2** original numeric
+  format (old inline Entity list) and **1.21.1** named format
+  (independent entities/*.mca), preserving original opaque BE
+  and untouched original chunk NBT.
+- Added a **one-command comprehensive six-suite matrix**
+  `scripts/verify_native_matrix.py`, running two original private
+  archives in parallel and collecting all suite results/errors
+  into a consolidated JSON without uploading or editing source ZIPs.
+  The full local 1.12.2 + 1.21.1 matrix passed **12/12**.
+- Added full synthetic integrated-world and matrix orchestrator
+  regressions to default GitHub Actions Python 3 discovery
+  (100 migrated modules/903 tests passed). Long-term
+  GUI migration and Minecraft in-game semantic testing
+  remain separate goals.

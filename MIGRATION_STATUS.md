@@ -3278,3 +3278,76 @@ BE coupled moves, very large selections, all dimension/file
 formats, in-game behavior and complete classic MCEdit2 GUI parity
 are **not** established by this bounded regression. PR #1
 remains Draft on `python3-modern-editor`; `master` unchanged.
+
+## 0.3.0a76 — One-command parallel full native test matrix + combined BE/Entity Save
+
+**Changed the verification workflow from one isolated feature test at a
+time to a comprehensive, reproducible original Java world matrix.** All
+actual user-supplied archives remained in the private local container;
+the PR and GitHub Actions contain ONLY source and synthetic test fixtures.
+
+Added `scripts/verify_native_integrated.py`, a realistic **single
+EditSession, one native Save** regression with these changes staged at
+the same time: a mixed-selection move of multiple original BEs; one
+ordinary native block paint; cloning one original independent dropped
+item with a new UUID; and grouped in-chunk movement of TWO original
+dropped items. The script then undoes all four groups, redoes all four,
+confirms no disk writes before Save, saves once, reopens fresh native
+readers, verifies changed opaque BE/entity NBT byte-for-byte, checks
+unrelated original BEs and unaffected generated chunks, confirms
+exact original multi-file region backups and restores originals.
+
+**Real Java 1.12.2 / DataVersion 1343**: all integrated checks passed;
+5 original BEs moved across 24 changed cells plus one independent
+block edit, two original item Pos updates and one copied item UUID;
+both original BE and entity records share the old terrain chunk
+layout (`Level/Entities`). 634 untouched original generated terrain
+chunks were compared byte-for-byte in the affected regions.
+
+**Real Java 1.21.1 / DataVersion 3955**: all integrated checks passed;
+5 BEs moved across 42 changed cells, one ordinary block edit,
+two item Pos changes and one cloned item with a new UUID;
+entity changes saved to modern independent `entities/*.mca`
+alongside changed terrain region files. 573 untouched generated
+terrain chunks in touched regions retained byte-identical
+decompressed original NBT. Both private source ZIP hashes unchanged.
+
+**Unified test command** (works with any two local Java ZIPs on
+an installed checkout; no uploads):
+```
+PYTHONPATH=modern:. python scripts/verify_native_matrix.py \
+  1.12.2.zip 1.21.1.zip --workers 2 --output results.json
+```
+Added `scripts/verify_native_matrix.py`. It runs SIX categories
+per original ZIP and at most two archives in parallel:
+all generated native chunk audits; one-cell Save/Undo/recovery;
+multi-region Fill/Line; individual BE clone/move; multi-BE mixed
+clone/move/overlap; and this release's fully combined
+BE+block+Entity **single Save**. Every suite gets its own
+disposable extraction; a failed suite does not prevent the
+remaining tests from running, and the final JSON includes
+every check, all errors and an original ZIP byte hash check.
+Per-world suite progress/elapsed time is logged to stderr.
+Nothing is uploaded to CI. Run the script locally where the
+private ZIPs reside.
+
+**Executed the complete matrix against BOTH real private ZIPs:**
+**12/12 tests passed, 0 failed**. The `1.12.2` and `1.21.1`
+files remained byte-identical to their uploaded originals.
+Added `tests/test_native_integrated.py` exercising full
+combined Save with synthetic modern terrain + independent
+entity regions, UUID clone, 2-item group move, undo/redo,
+lossless backup recovery and missing-input refusal.
+Added `tests/test_native_matrix.py` to verify complete
+domain enumeration, per-archive parallel orchestration,
+full failure collection, successful reports and privacy
+of input bytes. GitHub Actions full migrated suite has
+**903 tests across 100 modules passing** on the latest
+feature branch before the final docs/version squash.
+
+**Scope remains intentionally limited:** no Minecraft client
+in-game load, modded BE link/UUID graph repair, old MCRegion
+writes, all historical Minecraft versions, GUI parity on
+real-world OpenGL drivers or automatic re-encoding of modded
+machine data. Existing Draft PR #1 remains open on
+`python3-modern-editor`, with `master` untouched.
