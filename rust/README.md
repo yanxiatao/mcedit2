@@ -371,3 +371,14 @@ validated on import. iced adds selection export and clipboard paste preview
 controls. The clipboard deliberately excludes Block Entities, entities and
 schematic conversion; standardized `.schematic`/`.schem` formats remain
 separate future adapters. No disk world writes occur during clipboard use.
+
+## Next migration batch 4/5 — classic MCEdit schematic importer
+
+Native Rust can now read original GZip-compressed numeric-ID `.schematic`
+Blocks, Data and AddBlocks, preserving metadata and old high-ID nibbles,
+with up to 4096 blocks per transaction. Nonempty TileEntities/Entities/
+TileTicks are refused rather than silently dropped. The iced editor can
+preview a classic structure paste at its clipboard destination and apply
+it using the existing guarded/undoable operation. Only original Alpha
+Materials numeric schematics and numeric destination chunks are supported;
+modern Sponge `.schem` and non-lossy BE structure transfer remain pending.

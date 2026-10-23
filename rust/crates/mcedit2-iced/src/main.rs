@@ -71,6 +71,7 @@ struct App{
     patch_path:String,
     clipboard_path:String,
     clipboard_destination:String,
+    schematic_path:String,
     save_phrase:String,
     recover_region:String,
     recovery_phrase:String,
@@ -90,6 +91,7 @@ enum Message{
     FillSeed(String), PreviewFill,
     PatchPath(String),ExportPatch,ImportPatch,AnalyzeNativePatch,AnalyzeRegionPlan,
     ClipboardPath(String),ClipboardDestination(String),ExportClipboard,PreviewPasteClipboard,
+    SchematicPath(String),PreviewLegacySchematic,
     PrepareWorldSave,SavePhrase(String),ConfirmWorldSave,
     RecoverRegion(String),RecoveryPhrase(String),FinalizeRegion,RollbackRegion,
     PreviewEdit,ApplyEdit,UndoEdit,RedoEdit,DiscardEdits,Clear
@@ -471,6 +473,7 @@ fn update(app:&mut App,message:Message){
     match message{
         Message::Path(x)=>app.path=x,
         Message::ClipboardPath(value)=>app.clipboard_path=value,
+        Message::SchematicPath(value)=>app.schematic_path=value,
         Message::ClipboardDestination(value)=>app.clipboard_destination=value,
         Message::ExportClipboard=>{
             app.save_preview=None;
@@ -486,6 +489,28 @@ fn update(app:&mut App,message:Message){
                 Ok(n)=>format!("Exported {n} selected block states to a create-new .mcedit2clip file. Block Entities/entities excluded; Minecraft world unchanged."),
                 Err(e)=>format!("Block-only clipboard export refused: {e}"),
             };
+        },
+        Message::PreviewLegacySchematic=>{
+            app.save_preview=None;
+            app.prepared=None;
+            let path=PathBuf::from(app.schematic_path.trim());
+            let result=(||->Result<Preview,String>{
+                let destination=parse_xyz(&app.clipboard_destination)
+                    .map_err(|e|e.to_string())?;
+                let key=app.current_key().ok_or("Select an original Java world")?;
+                app.current_session(key)?
+                    .prepare_import_legacy_schematic(&path,destination)
+                    .map_err(|e|e.to_string())
+            })();
+            match result{
+                Ok(preview)=>{
+                    app.edit_report=format!("Legacy schematic block-only preview: {}",preview.summary());
+                    if let Some((wi,di))=app.current_key(){
+                        app.prepared=Some((wi,di,preview));
+                    }
+                },
+                Err(e)=>app.edit_report=format!("Schematic import refused: {e}"),
+            }
         },
         Message::PreviewPasteClipboard=>{
             app.save_preview=None;
@@ -831,6 +856,11 @@ fn view(app:&App)->Element<'_,Message>{
             text_input("Paste destination X,Y,Z",&app.clipboard_destination)
                 .on_input(Message::ClipboardDestination).width(Length::Fill),
             button("Preview clipboard paste").on_press(Message::PreviewPasteClipboard)
+        ].spacing(8));
+        body=body.push(row![
+            text_input("Original MCEdit .schematic path",&app.schematic_path)
+                .on_input(Message::SchematicPath).width(Length::Fill),
+            button("Preview numeric schematic import").on_press(Message::PreviewLegacySchematic)
         ].spacing(8));
         body=body.push(row![
             text_input("External .mcedit2patch path (outside the world)",&app.patch_path)

@@ -7,7 +7,7 @@
 //! atomic backups, schema safety and all-version coverage before exposure.
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
-use crate::{patch,region_plan,clipboard};
+use crate::{patch,region_plan,clipboard,schematic};
 use crate::clipboard::BlockClipboard;
 use crate::region_transaction::{self,RegionWriteReceipt};
 use crate::region_plan::NativeRegionCandidate;
@@ -833,6 +833,14 @@ impl Session {
     )->Result<Preview,WorldError>{
         let clip=clipboard::load(&self.world,&self.dimension,path)?;
         self.prepare_paste_clipboard(&clip,destination_min)
+    }
+    /// Import old numeric MCEdit schematic as a block-only paste preview.
+    /// Nonempty entities, TileEntities and ticks are rejected, not lost.
+    pub fn prepare_import_legacy_schematic(
+        &self,path:&Path,destination_min:Position,
+    )->Result<Preview,WorldError>{
+        let source=schematic::import_legacy(&self.world,&self.dimension,path)?;
+        self.prepare_paste_clipboard(&source,destination_min)
     }
     /// Write an external original-NBT-verified edit journal, never a world file.
     pub fn export_patch(&self, path: &Path) -> Result<usize, WorldError> {

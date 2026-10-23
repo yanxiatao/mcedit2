@@ -152,7 +152,7 @@ impl<'a> Reader<'a> {
         Ok(Tag { kind, raw: &self.buf[start..self.at], fields, items })
     }
 }
-fn parse_root(data: &[u8]) -> Result<Tag<'_>> {
+pub(crate) fn parse_root(data: &[u8]) -> Result<Tag<'_>> {
     if data.len() > 64 * 1024 * 1024 { return Err(error("NBT exceeds 64 MiB")); }
     let mut r = Reader { buf: data, at: 0, nodes: 0 };
     if r.byte()? != 10 { return Err(error("Original root is not a Compound")); }
