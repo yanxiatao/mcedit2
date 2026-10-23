@@ -140,6 +140,58 @@ mod tests {
         assert_eq!(result.block(x as u8,y as i32,z as u8).unwrap().name,"numeric:77");
         assert_eq!(result.block(x as u8,y as i32,z as u8).unwrap().properties[0].1,"4");
     }
+
+    #[test]
+    fn original_numeric_anvil_can_insert_missing_high_id_add_without_rewriting_opaque_nbt(){
+        let blocks=vec![1u8;4096];
+        let data=vec![0u8;2048];
+        let original=old_chunk(vec![
+            tag(3,"xPos",&0i32.to_be_bytes()),
+            tag(3,"zPos",&0i32.to_be_bytes()),
+            tag(9,"Sections",&{
+                let section=compound(vec![tag(1,"Y",&[0]),
+                    ba("Blocks",&blocks),ba("Data",&data),
+                    tag(8,"Opaque",&[0,4,b's',b'a',b'f',b'e'])]);
+                let mut list=vec![10];list.extend(1i32.to_be_bytes());list.extend(section);list
+            })
+        ]);
+        let original_state=State{name:"numeric:1".into(),properties:vec![("data".into(),"0".into())]};
+        let desired=State{name:"numeric:301".into(),properties:vec![("data".into(),"7".into())]};
+        let result=super::super::sections::patch_original_numeric_arrays(&original,&[
+            super::super::sections::InPaletteEdit{
+                local_x:4,y:2,local_z:3,original:original_state,replacement:desired.clone(),
+            }
+        ]).unwrap();
+        let decoded=decode_sections(&result).unwrap();
+        assert_eq!(decoded.block(4,2,3),Some(&desired));
+        assert_eq!(decoded.block(5,2,3).unwrap().name,"numeric:1");
+        assert!(result.windows(b"safe".len()).any(|v|v==b"safe"));
+        assert!(original.len()<result.len()); // only Add TAG was inserted
+    }
+    #[test]
+    fn original_mcregion_byte_patch_preserves_neighbors_and_rejects_12bit_ids(){
+        let original=old_chunk(vec![
+            ba("Blocks",&vec![1u8;32768]),ba("Data",&vec![0;16384]),
+            tag(8,"opaque",&[0,4,b's',b'a',b'f',b'e'])
+        ]);
+        let before=State{name:"numeric:1".into(),properties:vec![("data".into(),"0".into())]};
+        let target=State{name:"numeric:254".into(),properties:vec![("data".into(),"15".into())]};
+        let edit=super::super::sections::InPaletteEdit{
+            local_x:3,y:100,local_z:7,original:before.clone(),replacement:target.clone(),
+        };
+        let result=super::super::sections::patch_original_numeric_arrays(&original,&[edit]).unwrap();
+        let decoded=decode_sections(&result).unwrap();
+        assert_eq!(decoded.block(3,100,7),Some(&target));
+        assert_eq!(decoded.block(3,99,7),Some(&before));
+        assert_eq!(original.len(),result.len());
+        assert!(result.windows(b"safe".len()).any(|v|v==b"safe"));
+        let unsafe_edit=super::super::sections::InPaletteEdit{
+            local_x:3,y:100,local_z:7,original:before,
+            replacement:State{name:"numeric:301".into(),
+                properties:vec![("data".into(),"7".into())]},
+        };
+        assert!(super::super::sections::patch_original_numeric_arrays(&original,&[unsafe_edit]).is_err());
+    }
     #[test]
     fn missing_or_truncated_original_arrays_are_refused(){
         assert!(decode_sections(&old_chunk(vec![ba("Blocks",&[0;100]),ba("Data",&[0;16384])])).is_err());

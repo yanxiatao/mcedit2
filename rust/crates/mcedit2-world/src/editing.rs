@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use crate::patch;
 
 use crate::block_lookup::{parse_xyz, read_world_block, read_world_chunk, Lookup};
-use crate::sections::{decode_sections,patch_named_growing_palette,Chunk,InPaletteEdit,Layout,State};
+use crate::sections::{decode_sections,patch_named_growing_palette,patch_original_numeric_arrays,Chunk,InPaletteEdit,Layout,State};
 use crate::block_lookup::read_world_chunk_bytes;
 use sha2::{Digest,Sha256};
 use crate::{WorldError, WorldSummary};
@@ -683,10 +683,14 @@ impl Session {
                     original:original.clone(),replacement,
                 });
             }
-            let modified=patch_named_growing_palette(&raw,&edits)
-                .map_err(|e|refuse(format!(
-                    "Native original-byte preview cannot safely encode chunk {cx},{cz}: {e}"
-                )))?;
+            let modified=match chunk.layout {
+                Layout::Named113 | Layout::Modern118 =>
+                    patch_named_growing_palette(&raw,&edits),
+                Layout::McRegion128 | Layout::NumericAnvil112 =>
+                    patch_original_numeric_arrays(&raw,&edits),
+            }.map_err(|e|refuse(format!(
+                "Native original-byte preview cannot safely encode chunk {cx},{cz}: {e}"
+            )))?;
             let original_nbt_sha256: String=Sha256::digest(&raw).iter()
                 .map(|v|format!("{v:02x}")).collect();
             result.push(NativeChunkCandidate {

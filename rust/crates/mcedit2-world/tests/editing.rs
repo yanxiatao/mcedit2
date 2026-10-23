@@ -624,7 +624,7 @@ fn original_byte_native_palette_candidate_is_in_memory_and_retains_opaque_data()
     assert_eq!(world.bytes_now(),original);
 }
 #[test]
-fn native_nbt_preview_grows_palette_but_refuses_numeric_without_mutations(){
+fn native_nbt_preview_grows_palette_and_edits_legacy_numeric_without_mutations(){
     let world=NativeWorld::create(true);
     let mut editor=Session::new(world.metadata(),"minecraft:overworld").unwrap();
     let single=Bounds::new((0,-64,0),(0,-64,0)).unwrap();
@@ -639,6 +639,9 @@ fn native_nbt_preview_grows_palette_but_refuses_numeric_without_mutations(){
     let mut old=Session::new(legacy.metadata(),"minecraft:overworld").unwrap();
     let b=Bounds::new((0,64,0),(0,64,0)).unwrap();
     old.commit(old.prepare(b,&parse_state("numeric:301[data=7]").unwrap(),None).unwrap()).unwrap();
-    assert!(old.prepare_native_palette_candidates().is_err());
+    let candidates=old.prepare_native_palette_candidates().unwrap();
+    assert_eq!(candidates.len(),1);
+    assert_eq!(mcedit2_world::sections::decode_sections(&candidates[0].patched_nbt)
+        .unwrap().block(0,64,0).unwrap().name,"numeric:301");
     assert_eq!(legacy.bytes_now(),legacy.original_region);
 }

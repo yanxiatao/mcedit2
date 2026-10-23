@@ -713,6 +713,203 @@ pub fn patch_named_growing_palette(
     Ok(output)
 }
 
+
+/// Decode an original numeric NBT ByteArray without modifying its payload.
+fn byte_array_exact<'a>(tag: &'a Tag<'_>, length: usize) -> Result<&'a [u8]> {
+    if tag.kind != 7 || tag.raw.len() != 4 + length {
+        return Err(error("Original numeric byte array has unexpected length"));
+    }
+    let declared = i32::from_be_bytes(tag.raw[..4].try_into().unwrap());
+    if declared != length as i32 {
+        return Err(error("Original numeric byte array count mismatch"));
+    }
+    Ok(&tag.raw[4..])
+}
+fn numeric_pair(state: &State) -> Result<(u16, u8)> {
+    let id = state.name.strip_prefix("numeric:")
+        .ok_or_else(||error("Numeric chunk requires original numeric:ID state"))?
+        .parse::<u16>().map_err(|_|error("Original numeric ID is invalid"))?;
+    if id > 4095 || state.properties.len()!=1 || state.properties[0].0!="data" {
+        return Err(error("Numeric state must contain exactly data=0..15"));
+    }
+    let meta=state.properties[0].1.parse::<u8>()
+        .map_err(|_|error("Numeric data is not an integer"))?;
+    if meta > 15 {return Err(error("Numeric block metadata exceeds four bits"));}
+    Ok((id,meta))
+}
+fn write_nibble(array: &mut [u8], position: usize, value: u8) -> Result<()> {
+    let byte = array.get_mut(position/2)
+        .ok_or_else(||error("Numeric nibble position out of bounds"))?;
+    if position%2 == 0 { *byte = (*byte & 0xF0) | value; }
+    else { *byte = (*byte & 0x0F) | (value << 4); }
+    Ok(())
+}
+fn span_replacement(nbt:&[u8], tag:&Tag<'_>, bytes:Vec<u8>) -> Result<NbtSurgery> {
+    let (start,end)=payload_span(nbt,tag.raw)?;
+    if bytes.len()!=tag.raw.len(){return Err(error("Original byte array length changed"));}
+    Ok(NbtSurgery{start,end,replacement:bytes})
+}
+/// Apply original 1.12.2 numeric Anvil or MCRegion/Alpha numeric ID edits.
+///
+/// Writes only the original Blocks/Data/Add byte-array PAYLOADS. Existing
+/// optional Add arrays are preserved, and Add is created only if a target
+/// ID requires high bits in an original numeric Anvil Section. MCRegion's
+/// 8-bit IDs cannot be extended. The modified candidate remains IN MEMORY.
+pub fn patch_original_numeric_arrays(
+    original_nbt:&[u8], edits:&[InPaletteEdit],
+)->Result<Vec<u8>>{
+    if edits.is_empty() || edits.len()>BLOCKS*MAX_SECTIONS {
+        return Err(error("Numeric patch batch is empty or over budget"));
+    }
+    let before=decode_sections(original_nbt)?;
+    if !matches!(before.layout,Layout::McRegion128|Layout::NumericAnvil112){
+        return Err(error("Original numeric patch requires numeric Java world storage"));
+    }
+    if before.block_entities.iter().any(|&(x,_,z)|
+        before.x.is_none_or(|cx|x.div_euclid(16)!=cx)
+            ||before.z.is_none_or(|cz|z.div_euclid(16)!=cz)
+    ){return Err(error("Numeric Block Entity original coordinates are ambiguous"));}
+    let root=parse_root(original_nbt)?;
+    let level=root.require("Level",10)?;
+    let mcregion=before.layout==Layout::McRegion128;
+    let sections=if mcregion{None}else{Some(level.require("Sections",9)?)};
+    let mut groups:std::collections::BTreeMap<i8,Vec<&InPaletteEdit>>
+        =std::collections::BTreeMap::new();
+    let mut visited=BTreeSet::new();
+    for edit in edits{
+        if edit.local_x>=16 || edit.local_z>=16{
+            return Err(error("Numeric patch coordinate outside original chunk"));
+        }
+        let sy=i8::try_from(edit.y.div_euclid(16))
+            .map_err(|_|error("Numeric edit Section Y outside signed byte range"))?;
+        if mcregion && !(0..128).contains(&edit.y){
+            return Err(error("MCRegion numeric edits must stay in Y 0..127"));
+        }
+        if !visited.insert((edit.local_x,edit.y,edit.local_z)){
+            return Err(error("Duplicate numeric patch coordinate"));
+        }
+        let original=before.block(edit.local_x,edit.y,edit.local_z);
+        if original!=Some(&edit.original) || edit.original==edit.replacement {
+            return Err(error("Numeric edit source state is stale or unchanged"));
+        }
+        numeric_pair(&edit.original)?;
+        let (id,_) = numeric_pair(&edit.replacement)?;
+        if mcregion && id>255 {
+            return Err(error("MCRegion Blocks array supports only 8-bit IDs"));
+        }
+        if before.block_entities.iter().any(|&(x,y,z)|
+            before.x.is_some_and(|cx|
+                x.div_euclid(16)==cx && x.rem_euclid(16)==edit.local_x as i32)
+                && y==edit.y
+                && before.z.is_some_and(|cz|
+                    z.div_euclid(16)==cz && z.rem_euclid(16)==edit.local_z as i32)
+        ){return Err(error("Numeric patch would replace original Block Entity"));}
+        groups.entry(if mcregion{0}else{sy}).or_default().push(edit);
+    }
+    let mut operations=Vec::<NbtSurgery>::new();
+    for (section_y,group) in groups{
+        let source=if mcregion{level}else{
+            sections.expect("required numeric Sections").items.iter().find(|s|
+                s.field("Y").is_some_and(|tag|tag.byte().ok()==Some(section_y))
+            ).ok_or_else(||error("Original numeric Section is missing"))?
+        };
+        let array_len=if mcregion{32768}else{4096};
+        let nibble_len=if mcregion{16384}else{2048};
+        let blocks_tag=source.require("Blocks",7)?;
+        let data_tag=source.require("Data",7)?;
+        let mut blocks=blocks_tag.raw.to_vec();
+        let mut data=data_tag.raw.to_vec();
+        byte_array_exact(blocks_tag,array_len)?;
+        byte_array_exact(data_tag,nibble_len)?;
+        let add_tag=if mcregion{None}else{source.field("Add")};
+        let mut add=if let Some(tag)=add_tag {
+            byte_array_exact(tag,nibble_len)?;
+            tag.raw.to_vec()
+        }else{
+            let mut empty=(nibble_len as i32).to_be_bytes().to_vec();
+            empty.extend(vec![0u8;nibble_len]);
+            empty
+        };
+        let mut need_add=false;
+        for change in group{
+            let (id,meta)=numeric_pair(&change.replacement)?;
+            let index=if mcregion{
+                (change.local_x as usize*16+change.local_z as usize)*128
+                    +change.y as usize
+            }else{
+                ((change.y.rem_euclid(16) as usize*16
+                    +change.local_z as usize)*16)+change.local_x as usize
+            };
+            *blocks.get_mut(4+index)
+                .ok_or_else(||error("Original numeric Blocks index outside array"))?=id as u8;
+            write_nibble(&mut data[4..],index,meta)?;
+            if !mcregion {
+                let high=(id >> 8) as u8;
+                write_nibble(&mut add[4..],index,high)?;
+                need_add |= high != 0;
+            }
+        }
+        operations.push(span_replacement(original_nbt,blocks_tag,blocks)?);
+        operations.push(span_replacement(original_nbt,data_tag,data)?);
+        if let Some(tag)=add_tag{
+            operations.push(span_replacement(original_nbt,tag,add)?);
+        }else if need_add{
+            let mut entry=vec![7u8];
+            entry.extend_from_slice(&3u16.to_be_bytes());
+            entry.extend_from_slice(b"Add");
+            entry.extend_from_slice(&add);
+            let (_start,end)=payload_span(original_nbt,source.raw)?;
+            if end==0 || original_nbt[end-1]!=0 {
+                return Err(error("Numeric Section Compound has no TAG_End"));
+            }
+            operations.push(NbtSurgery{
+                start:end-1,end:end-1,replacement:entry
+            });
+        }
+    }
+    operations.sort_by_key(|operation|operation.start);
+    for two in operations.windows(2){
+        if two[0].end>two[1].start{
+            return Err(error("Overlapping original numeric NBT spans"));
+        }
+    }
+    let mut output=original_nbt.to_vec();
+    for operation in operations.into_iter().rev(){
+        output.splice(operation.start..operation.end,operation.replacement);
+        if output.len()>64*1024*1024{
+            return Err(error("Patched numeric chunk exceeds 64 MiB NBT limit"));
+        }
+    }
+    let after=decode_sections(&output)?;
+    if before.layout!=after.layout || before.x!=after.x || before.z!=after.z
+        ||before.data_version!=after.data_version
+        ||before.block_entities!=after.block_entities
+        ||before.sections.len()!=after.sections.len(){
+        return Err(error("Numeric NBT patch changed original chunk metadata"));
+    }
+    let expected:std::collections::BTreeMap<(i8,usize),&State>=edits.iter().map(|edit|{
+        let section_y=edit.y.div_euclid(16) as i8;
+        let index=((edit.y.rem_euclid(16) as usize*16
+            +edit.local_z as usize)*16)+edit.local_x as usize;
+        ((section_y,index),&edit.replacement)
+    }).collect();
+    for old in &before.sections {
+        let current=after.sections.iter().find(|section|section.y==old.y)
+            .ok_or_else(||error("Numeric patched Section missing"))?;
+        for index in 0..BLOCKS {
+            let original=old.palette.get(old.indices[index] as usize)
+                .ok_or_else(||error("Original numeric palette index missing"))?;
+            let desired=expected.get(&(old.y,index)).copied().unwrap_or(original);
+            let actual=current.palette.get(current.indices[index] as usize)
+                .ok_or_else(||error("Result numeric palette index missing"))?;
+            if desired!=actual {
+                return Err(error("Unedited original numeric block changed during byte patch"));
+            }
+        }
+    }
+    Ok(output)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

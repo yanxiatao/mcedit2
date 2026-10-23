@@ -148,3 +148,10 @@ single-state palettes without packed data, and re-packs existing block IDs
 without resynthesizing unrelated chunk NBT. Full 4096-cell/Section equality
 checks are performed after encoding. Region sector/sidecar replacement and
 old numeric original-byte writing remain outside this checkpoint.
+
+### Legacy numeric original-byte candidate (round 2/5)
+
+MCRegion and old numeric Anvil now have an in-memory Blocks/Data/Add
+byte-level editing candidate, including optional Add growth for Anvil.
+This does not provide actual region persistence, lighting/heightmap fixes,
+or guarantee compatibility with untested modded save layouts.

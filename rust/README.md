@@ -240,3 +240,14 @@ from 19 commits into this one checkpoint; no automatic CI until five rounds.
 Palette bit-width transitions now explicitly distinguish pre-1.16
 contiguous packing from 1.16+ padded packing; ambiguous legacy transition
 DataVersions refuse a growth plan rather than choosing a layout silently.
+
+## Persistence round 2/5 — legacy numeric NBT byte edits (not built)
+
+Added an in-memory original-byte editor for MCRegion 8-bit Blocks/Data
+and 1.2–1.12.2 Anvil Blocks/Data/optional Add. The 4-bit metadata nibbles
+and 12-bit numeric IDs retain their exact original identity. Anvil can
+insert a missing Add TAG_Byte_Array when needed; MCRegion refuses >255 IDs.
+All Block Entities are guarded, untouched NBT tags are copied verbatim, and
+all 4096 original cells in each Section are verified after re-decoding.
+The Rust editor preview now dispatches numeric vs named byte patchers.
+No Minecraft region file is written; CI remains deferred until round 5.
