@@ -414,13 +414,25 @@ pub fn patch_original_block_entity_scalar(
             .to_be_bytes().to_vec(),
         4=>text.parse::<i64>().map_err(|_|error("Expected signed TAG_Long"))?
             .to_be_bytes().to_vec(),
+        5=>{
+            let number=text.parse::<f32>()
+                .map_err(|_|error("Expected TAG_Float numeric value"))?;
+            if !number.is_finite(){return Err(error("Non-finite NBT Float rejected"));}
+            number.to_bits().to_be_bytes().to_vec()
+        },
+        6=>{
+            let number=text.parse::<f64>()
+                .map_err(|_|error("Expected TAG_Double numeric value"))?;
+            if !number.is_finite(){return Err(error("Non-finite NBT Double rejected"));}
+            number.to_bits().to_be_bytes().to_vec()
+        },
         8=>{
             let size=u16::try_from(text.len())
                 .map_err(|_|error("NBT UTF-8 string too long"))?;
             let mut bytes=size.to_be_bytes().to_vec();
             bytes.extend(text.as_bytes());bytes
         },
-        _=>return Err(error("Only original signed numeric or String scalars can be preview-edited")),
+        _=>return Err(error("Only original numeric or String scalar tags can be preview-edited")),
     };
     if old.raw==replacement {
         return Err(error("Scalar preview does not change original data"));

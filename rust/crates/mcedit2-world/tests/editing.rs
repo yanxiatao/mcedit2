@@ -257,6 +257,8 @@ fn chunk_with_be(state: &str, position: (i32, i32, i32)) -> Vec<u8> {
         tag(3, "y", &position.1.to_be_bytes()),
         tag(3, "z", &position.2.to_be_bytes()),
         tag(8, "UnrecognizedPayload", &nbt_string("KEEP EXACTLY")),
+        tag(5, "MachineHeat", &25.0f32.to_bits().to_be_bytes()),
+        tag(6, "MachinePressure", &1234.5f64.to_bits().to_be_bytes()),
     ]));
     let replacement = tag(9, "block_entities", &entries);
     let at = raw.windows(empty.len()).position(|part| part == empty).unwrap();
@@ -1289,4 +1291,32 @@ fn explicitly_confirmed_existing_be_scalar_region_save_is_recoverable_verbatim()
         ).unwrap().unwrap().original_compound_sha256);
     rollback_pending_region(&world.metadata(),"minecraft:overworld",0,0,"mca").unwrap();
     assert_eq!(world.bytes_now(),unchanged);
+}
+
+#[test]
+fn opaque_be_float_and_double_scalar_edits_preserve_all_other_modded_nbt(){
+    let source=chunk_with_be("minecraft:stone",(2,-64,3));
+    let baseline=mcedit2_world::sections::inspect_original_block_entity(
+        &source,(2,-64,3)
+    ).unwrap().unwrap();
+    let changed=mcedit2_world::sections::patch_original_block_entity_scalar(
+        &source,(2,-64,3),"MachineHeat","27.5"
+    ).unwrap();
+    let changed=mcedit2_world::sections::patch_original_block_entity_scalar(
+        &changed,(2,-64,3),"MachinePressure","4567.25"
+    ).unwrap();
+    let after=mcedit2_world::sections::inspect_original_block_entity(
+        &changed,(2,-64,3)
+    ).unwrap().unwrap();
+    assert_eq!(after.raw_id,baseline.raw_id);
+    assert_eq!(after.original_field_count,baseline.original_field_count);
+    assert_ne!(after.original_compound_sha256,baseline.original_compound_sha256);
+    for bad in ["NaN","+inf","-inf","1e9999"] {
+        assert!(mcedit2_world::sections::patch_original_block_entity_scalar(
+            &source,(2,-64,3),"MachineHeat",bad
+        ).is_err(),"Accepted invalid Float {bad}");
+    }
+    assert!(mcedit2_world::sections::patch_original_block_entity_scalar(
+        &source,(2,-64,3),"MachineHeat","25.0"
+    ).is_err(),"Identical scalar values cannot produce unnecessary edits");
 }

@@ -601,3 +601,11 @@ all relevant old/new version fixtures are validated.
 
 Five FULL migration batches complete. Now run exactly one consolidated
 Linux/Windows **cargo check/test ONLY** validation, never build/packaging.
+
+## Five-round development cycle — Round 1/5
+
+Expanded strictly byte-local original Block Entity scalar surgery to TAG_Float
+and TAG_Double, encoding IEEE 754 big-endian original NBT payload bytes and
+rejecting NaN/infinities, unchanged scalar values and malformed syntax.
+The existing exact-byte siblings, BE positions and block state verification
+still apply. Added modded machine Float/Double regression fixtures.
