@@ -439,6 +439,8 @@ class MainWindow(QMainWindow):
                         self.paste_standalone_entities)
         self.add_action(edit_menu, "Clean loose items / XP orbs in 3D selection (expert)…", "",
                         self.cleanup_entities_in_selection)
+        self.add_action(edit_menu, "Move selected loose items / XP orbs by XYZ (expert)…", "",
+                        self.move_entities_in_selection)
         self.add_action(edit_menu, "Copy with BE NBT (experimental)…", "", self.copy_with_be)
         self.add_action(edit_menu, "Paste with BE NBT (experimental)…", "", self.paste_with_be)
         self.add_action(edit_menu, "Paste at center", "Ctrl+V", self.paste)
@@ -2256,6 +2258,75 @@ class MainWindow(QMainWindow):
                     only_replace_air=self.be_import_target_air_action.isChecked()))
         except Exception as exc:
             QMessageBox.critical(self, "Original BE import refused", str(exc))
+
+    def move_entities_in_selection(self):
+        """Move independent original entities across chunks with original UUID."""
+        if self.session is None or self.world is None or not self.view.selection:
+            QMessageBox.information(
+                self, "3D entity movement",
+                "Open Java Anvil/MCRegion and select a 3D area first.")
+            return
+        names = [
+            "All loose items AND experience orbs",
+            "Only loose items",
+            "Only experience orbs",
+        ]
+        name, ok = QInputDialog.getItem(
+            self, "Move independent original entities",
+            "Entity types to move (other mobs remain untouched):",
+            names, 0, False)
+        if not ok:
+            return
+        modes = {
+            names[0]: "both", names[1]: "items",
+            names[2]: "experience",
+        }
+        mode = modes.get(name)
+        if mode is None:
+            return
+        value, ok = QInputDialog.getText(
+            self, "Native 3D entity translation",
+            "XYZ signed integer offset (X, Y, Z):",
+            text="1, 0, 0")
+        if not ok:
+            return
+        try:
+            from .live_selection_templates import parse_target_xyz
+            from .entity_selection_move import (
+                capture_entity_selection_move,
+                preview_entity_selection_move,
+                commit_entity_selection_move,
+            )
+            offset = parse_target_xyz(value)
+            snapshot = capture_entity_selection_move(
+                self.session, self._box(), filter=mode)
+            preview = preview_entity_selection_move(
+                self.session, snapshot, offset)
+            if preview.total == 0:
+                QMessageBox.information(
+                    self, "3D entity movement",
+                    preview.summary() + "\nNothing eligible to move.")
+                return
+            answer = QMessageBox.warning(
+                self, "Confirm native original UUID-preserving entity movement",
+                preview.summary() +
+                "\n\nOnly independent dropped items and XP orbs are moved. "
+                "Existing destination chunks and entity storage are required; "
+                "no missing chunks are generated. Unlike entity COPYING, "
+                "this moves existing original records, preserving their UUIDs. "
+                "Only Pos NBT is rewritten; all other opaque NBT remains intact. "
+                "No owners, passengers, references or unknown entity types "
+                "are repaired or moved. The entire operation is ONE Undo "
+                "before Save; the native region backup preserves the original "
+                "entity lists after Save. Work on an OFFLINE world copy. "
+                "Apply the exact preflighted move?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer == QMessageBox.StandardButton.Yes:
+                self._perform(lambda: commit_entity_selection_move(
+                    self.session, snapshot, offset))
+        except Exception as exc:
+            QMessageBox.critical(self, "3D entity movement refused", str(exc))
 
     def cleanup_entities_in_selection(self):
         """Guarded native 3D selection item/orb deletion with one Undo."""

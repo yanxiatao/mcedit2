@@ -1474,3 +1474,40 @@ available and is not automatically replaced.
   original-entity cleanup and offscreen Qt6 interactions.
 - **New batch: major feature 1 of 5.** No CI in this commit;
   run one complete CI suite after all 5 major features [skip ci].
+
+## 0.3.0a96 — Major feature 2/5: multi-source 3D entity movement
+
+- Added full **3D selected loose item/XP orb translation** spanning
+  multiple original Java entity source chunks and destination chunks.
+  Unlike cloning, this moves the original entity and preserves its
+  exact existing UUID; only original Pos doubles are rewritten.
+- Exact three-way Qt6 item/XP/both filter and signed XYZ offset dialog,
+  native read-only preview with source/destination counts, same-chunk
+  Pos edits and cross-chunk transfers, guarded confirmation and
+  one Undo/Redo transaction. No linked/mob/custom-entity guessing.
+- 3D capture reuses the strict original entity-cleanup scan: bounded
+  256 scanned chunks, 2048 candidates and 8 MiB of NBT; refuses
+  pending source edits/transfers, unknown linked NBT and changed
+  original entity list bytes. Original world/dimension/version bind
+  the snapshot, with complete revalidation at final Apply.
+- Mixes original same-chunk EntityMove and original cross-chunk
+  EntityTransfer changes in **one EditSession atomic staging group**,
+  requiring every target terrain chunk and entity list to exist.
+  Checks fresh target position, original UUID conflicts, unique
+  source members, 128-transfer budget and aggregate target
+  collection capacity. No new region/chunk generation, DataFixer,
+  UUID regeneration or conversion to a lossy intermediary.
+- Original opaque modded item Compound data and all unrelated
+  entity/block NBT remain unchanged. Save writes original entity
+  regions with full region-file backups; structural entity Undo
+  becomes invalid after Save (restoration is backup-based).
+- Synthetic native disk tests cover two original source chunks
+  with both same-chunk and cross-chunk moves in a single 3D
+  selection, surviving mob NBT, opaque ItemStack byte equality,
+  original UUIDs, Undo/Redo, Save/reopen/backups, XP-only
+  filtering, missing destination, stale snapshot, wrong world,
+  duplicate UUID collision, zero offsets, legacy original .mcr
+  Pos movement, plus Qt6 preview/cancel/refusal.
+- **Major feature 2/5 in this batch**, encompassing backend, Qt6,
+  tests and documentation in a single commit [skip ci]. No CI
+  until five substantive feature commits are complete.
