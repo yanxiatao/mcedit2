@@ -378,6 +378,101 @@ pub fn inspect_original_block_entity(
     }))
 }
 
+
+/// Read-only prototype for precisely editing one existing scalar TAG payload
+/// inside a single original Block Entity. This NEVER saves a world file.
+/// Unknown siblings, other entities, blocks, registry IDs and nested NBT
+/// remain exact original bytes. No deletions, additions or type changes.
+pub fn patch_original_block_entity_scalar(
+    original_nbt:&[u8],position:(i32,i32,i32),field:&str,text:&str,
+)->Result<Vec<u8>>{
+    if field.is_empty()||field.len()>128||text.len()>4096{
+        return Err(error("Block Entity field/value exceeds preview safety budget"));
+    }
+    if matches!(field,"x"|"y"|"z"|"id"|"keepPacked"){
+        return Err(error("Block Entity identity and position tags cannot be changed"));
+    }
+    let before=decode_sections(original_nbt)?;
+    if !before.block_entities.contains(&position){
+        return Err(error("No original Block Entity at selected XYZ"));
+    }
+    let root=parse_root(original_nbt)?;
+    let modern=root.field("sections").is_some();
+    let source=if modern{&root}else{root.require("Level",10)?};
+    let list=source.require(if modern{"block_entities"}else{"TileEntities"},9)?;
+    let entity=list.items.iter().find(|item|{
+        item.field("x").and_then(|t|t.i32().ok())==Some(position.0)
+        &&item.field("y").and_then(|t|t.i32().ok())==Some(position.1)
+        &&item.field("z").and_then(|t|t.i32().ok())==Some(position.2)
+    }).ok_or_else(||error("Original Block Entity missing from compound List"))?;
+    let old=entity.field(field).ok_or_else(||error("Field not present in original Block Entity"))?;
+    let replacement=match old.kind{
+        1=>vec![text.parse::<i8>().map_err(|_|error("Expected signed TAG_Byte"))? as u8],
+        2=>text.parse::<i16>().map_err(|_|error("Expected signed TAG_Short"))?
+            .to_be_bytes().to_vec(),
+        3=>text.parse::<i32>().map_err(|_|error("Expected signed TAG_Int"))?
+            .to_be_bytes().to_vec(),
+        4=>text.parse::<i64>().map_err(|_|error("Expected signed TAG_Long"))?
+            .to_be_bytes().to_vec(),
+        8=>{
+            let size=u16::try_from(text.len())
+                .map_err(|_|error("NBT UTF-8 string too long"))?;
+            let mut bytes=size.to_be_bytes().to_vec();
+            bytes.extend(text.as_bytes());bytes
+        },
+        _=>return Err(error("Only original signed numeric or String scalars can be preview-edited")),
+    };
+    if old.raw==replacement {
+        return Err(error("Scalar preview does not change original data"));
+    }
+    let (start,end)=payload_span(original_nbt,old.raw)?;
+    let mut patched=Vec::with_capacity(original_nbt.len() + replacement.len());
+    patched.extend_from_slice(&original_nbt[..start]);
+    patched.extend_from_slice(&replacement);
+    patched.extend_from_slice(&original_nbt[end..]);
+    if patched.len()>64*1024*1024{
+        return Err(error("Scalar NBT preview exceeds 64 MiB"));
+    }
+    let after=decode_sections(&patched)?;
+    if before.x!=after.x||before.z!=after.z
+        ||before.data_version!=after.data_version
+        ||before.layout!=after.layout||before.block_entities!=after.block_entities
+        ||before.sections.len()!=after.sections.len(){
+        return Err(error("Original chunk structure altered by BE scalar surgery"));
+    }
+    for section in &before.sections {
+        let updated=after.sections.iter().find(|s|s.y==section.y)
+            .ok_or_else(||error("Section disappeared after scalar patch"))?;
+        if updated.indices!=section.indices||updated.palette!=section.palette{
+            return Err(error("BlockStates unexpectedly changed during scalar edit"));
+        }
+    }
+    let new_root=parse_root(&patched)?;
+    let new_source=if modern{&new_root}else{new_root.require("Level",10)?};
+    let new_list=new_source.require(if modern{"block_entities"}else{"TileEntities"},9)?;
+    if new_list.items.len()!=list.items.len(){
+        return Err(error("Block Entity list changed length after scalar preview"));
+    }
+    for (original,updated) in list.items.iter().zip(&new_list.items){
+        if original.raw.as_ptr()==entity.raw.as_ptr(){
+            if original.fields.len()!=updated.fields.len(){
+                return Err(error("Edited BE changed number of existing tags"));
+            }
+            for ((key,old_field),(new_key,new_field)) in
+                original.fields.iter().zip(&updated.fields){
+                if key!=new_key||old_field.kind!=new_field.kind
+                    ||(key!=field&&old_field.raw!=new_field.raw)
+                    ||(key==field&&new_field.raw!=replacement){
+                    return Err(error("BE scalar preview modified an unselected field"));
+                }
+            }
+        }else if original.raw!=updated.raw{
+            return Err(error("BE scalar preview touched a different original Block Entity"));
+        }
+    }
+    Ok(patched)
+}
+
 /// A strict original-byte, SAME-PALETTE named-state patch candidate.
 /// This is an IN-MEMORY NBT transform, not a disk writer.
 #[derive(Debug, Clone)]

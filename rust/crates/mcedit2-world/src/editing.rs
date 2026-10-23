@@ -393,6 +393,24 @@ impl Session {
         crate::sections::inspect_original_block_entity(&raw,position)
             .map_err(|e|refuse(format!("Original Block Entity NBT invalid: {e}")))
     }
+    /// In-memory preview of one existing signed numeric/String tag inside
+    /// an original BE. This is NOT the world's disk-write or Undo path.
+    pub fn prepare_original_be_scalar(
+        &self,position:Position,field:&str,value:&str,
+    )->Result<(usize,String),WorldError>{
+        use sha2::{Digest,Sha256};
+        let cx=position.0.div_euclid(16);
+        let cz=position.2.div_euclid(16);
+        let raw=read_world_chunk_bytes(
+            &self.world,&self.dimension,cx,cz
+        )?.ok_or_else(||refuse("Original Block Entity chunk missing"))?;
+        let patched=crate::sections::patch_original_block_entity_scalar(
+            &raw,position,field,value
+        ).map_err(|e|refuse(format!("BE scalar NBT surgery refused: {e}")))?;
+        let hash=Sha256::digest(&patched).iter()
+            .map(|b|format!("{b:02x}")).collect::<String>();
+        Ok((patched.len(),hash))
+    }
     /// Group by original chunk; inspect each native NBT at most once.
     /// Entire preview is read-only. Missing original chunks/Sections are
     /// REFUSED: no auto-created air, chunk or legacy ID registry is assumed.

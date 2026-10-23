@@ -76,6 +76,8 @@ struct App{
     edit_area:String,
     edit_target:String,
     edit_filter:String,
+    be_scalar_field:String,
+    be_scalar_value:String,
     clone_destination:String,
     fill_seed:String,
     patch_path:String,
@@ -97,6 +99,7 @@ struct App{
 enum Message{
     Path(String),Open,Select(usize),Coordinates(String),Dimension(usize),
     SurfaceArea(String),InspectSurface,PickSurface(i32,i32,i32),
+    BeScalarField(String),BeScalarValue(String),PreviewBeScalar,
     InspectBlock,InspectOriginalBlockEntity,SliceText(String),InspectSlice,PickSlice(i32,i32,i32),MoveSlice(i32,i32,i32),
     VerticalText(String),InspectVertical,PickVertical(usize,usize),
     SelectionText(String),TargetText(String),FilterText(String),
@@ -827,6 +830,26 @@ fn update(app:&mut App,message:Message){
                 }
             };
         },
+        Message::BeScalarField(value)=>app.be_scalar_field=value,
+        Message::BeScalarValue(value)=>app.be_scalar_value=value,
+        Message::PreviewBeScalar=>{
+            let result=(||->Result<(usize,String),String>{
+                let point=parse_xyz(&app.query_coordinates)
+                    .map_err(|e|e.to_string())?;
+                let key=app.current_key().ok_or("Select a world and dimension")?;
+                let field=app.be_scalar_field.clone();
+                let value=app.be_scalar_value.clone();
+                app.current_session(key)?.prepare_original_be_scalar(
+                    point,&field,&value
+                ).map_err(|e|e.to_string())
+            })();
+            app.block_result=match result{
+                Ok((size,digest))=>format!(
+                    "Original Block Entity scalar NBT patch computed IN MEMORY: {} NBT bytes, candidate SHA-256 {}. No world files or Undo states altered. Actual BE saving is NOT enabled.",size,digest
+                ),
+                Err(e)=>format!("Original BE scalar in-memory preview refused: {e}"),
+            };
+        },
         Message::InspectOriginalBlockEntity=>{
             let result=(||->Result<String,String>{
                 let point=parse_xyz(&app.query_coordinates).map_err(|e|e.to_string())?;
@@ -1032,6 +1055,13 @@ fn view(app:&App)->Element<'_,Message>{
         if !app.surface_report.is_empty(){
             body=body.push(text(&app.surface_report));
         }
+        body=body.push(row![
+            text_input("Existing Block Entity scalar field (not id/x/y/z)",&app.be_scalar_field)
+                .on_input(Message::BeScalarField).width(Length::Fill),
+            text_input("Exact replacement scalar value",&app.be_scalar_value)
+                .on_input(Message::BeScalarValue).width(Length::Fill),
+            button("Preview surgical original BE tag edit").on_press(Message::PreviewBeScalar),
+        ].spacing(8));
         body=body.push(row![
             text_input("2D X/Z map: X1,Y,Z1; X2,Y,Z2",&app.slice_area)
                 .on_input(Message::SliceText).width(Length::Fill),

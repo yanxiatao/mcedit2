@@ -1016,3 +1016,40 @@ fn bounded_isometric_voxel_surface_uses_original_height_and_overlay_without_worl
     assert_eq!(changed.voxels[0].state.name,"minecraft:gold_block");
     assert_eq!(world.bytes_now(),original);
 }
+
+#[test]
+fn surgical_be_scalar_candidate_changes_only_target_and_preserves_other_nbt(){
+    use mcedit2_world::sections;
+    let world=NativeWorld::create(true);
+    let original_chunk=chunk_with_be("minecraft:stone",(2,-64,3));
+    overwrite_region(&world,&original_chunk);
+    let original_file=world.bytes_now();
+    let patched=sections::patch_original_block_entity_scalar(
+        &original_chunk,(2,-64,3),"UnrecognizedPayload","KEEP REPLACED EXACTLY"
+    ).unwrap();
+    assert!(patched.windows(b"KEEP REPLACED EXACTLY".len())
+        .any(|x|x==b"KEEP REPLACED EXACTLY"));
+    assert!(!patched.windows(b"KEEP EXACTLY".len())
+        .any(|x|x==b"KEEP EXACTLY"));
+    let original_inspection=sections::inspect_original_block_entity(
+        &original_chunk,(2,-64,3)
+    ).unwrap().unwrap();
+    let updated=sections::inspect_original_block_entity(
+        &patched,(2,-64,3)
+    ).unwrap().unwrap();
+    assert_eq!(updated.raw_id,original_inspection.raw_id);
+    assert_ne!(updated.original_compound_sha256,original_inspection.original_compound_sha256);
+    assert_eq!(updated.original_field_count,original_inspection.original_field_count);
+    assert!(sections::patch_original_block_entity_scalar(
+        &original_chunk,(2,-64,3),"id","mod:replacement"
+    ).is_err());
+    assert!(sections::patch_original_block_entity_scalar(
+        &original_chunk,(2,-64,3),"unknown","any"
+    ).is_err());
+    let editor=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    assert!(editor.prepare_original_be_scalar(
+        (2,-64,3),"UnrecognizedPayload","SECOND"
+    ).is_ok());
+    assert_eq!(editor.pending_cells(),0);
+    assert_eq!(world.bytes_now(),original_file);
+}

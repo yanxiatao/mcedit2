@@ -467,3 +467,15 @@ is frozen for UI consistency and invalidated whenever sessions change.
 This is the initial interactive 3D editor surface, not yet texture-atlas
 rendering, full occlusion-aware terrain meshing, perspective rotation or
 GPU-optimized chunk rendering. No application builds or CI before 5 rounds.
+
+## Migration batch 4, round 2/5 — surgical existing BE scalar NBT edits (preview only)
+
+An original Block Entity can now have one existing TAG_Byte/Short/Int/Long/
+String scalar edited through a byte-range NBT surgery. The edited field must
+already exist; no unknown fields are removed or normalized. `id`, `x`, `y`,
+`z`, `keepPacked`, nested compounds, arrays and entity identity are protected.
+Full reparse checks every original block state, BE position and unchanged
+sibling field. iced computes a candidate digest without staging or writing
+ANY disk data. Persistent BE changes, BE relocations and BE Undo are NOT
+available yet; the native Region transaction still rejects any opaque NBT
+change not caused by normal block-state edits.
