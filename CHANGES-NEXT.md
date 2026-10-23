@@ -1242,3 +1242,14 @@ available and is not automatically replaced.
 - Read-only preview reports total block and BE changes. Native Save/reopen,
   Undo-after-Save tests, and private real 1.21.1 mixed placements verified.
 - CI deferred until feature 5 [skip ci].
+
+## 0.3.0a88 — Qt6 pending import dock: BE-aware mixed queue (4/5)
+
+- The original pending structure dock now queues explicit expert BE files
+  alongside existing block-only files without changing the default loader.
+- Qt6 format picker requires named expert BE codec. Per-entry XYZ and source/
+  destination air-mask controls remain editable before Apply.
+- Mixed BE+plain queues show the complete read-only native plan before
+  confirmation; commit revalidates, stages ONE Undo, and clears only on success.
+- Added Qt6 offscreen GUI regressions for original BE and mixed imports.
+- CI deferred until fifth feature [skip ci].
