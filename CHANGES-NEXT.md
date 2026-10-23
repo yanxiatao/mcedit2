@@ -1511,3 +1511,46 @@ available and is not automatically replaced.
 - **Major feature 2/5 in this batch**, encompassing backend, Qt6,
   tests and documentation in a single commit [skip ci]. No CI
   until five substantive feature commits are complete.
+
+## 0.3.0a97 — Major feature 3/5: complex original NBT tree editing (Qt6)
+
+- Substantially expanded the **native Block Entity NBT structural editor**
+  beyond existing scalar/array edits. Qt6 now supports adding explicitly
+  typed empty Compound, List, Byte Array, Int Array and Long Array fields;
+  original Compound member name-only renaming; exact opaque field
+  duplication; adding empty or byte-identical copied members to
+  TAG_List<TAG_Compound>; and guarded removal of selected Compound List
+  members. Existing scalar field/list editing and packed-array resizing
+  remain available through the same NBT tree.
+- Uses the original Java NBT scanner's byte-span replacements, preserving
+  exact original unknown sibling Compound fields, raw packed arrays and
+  payload types without serializing to an external library or applying
+  a world-version conversion. Typed empty NBT Lists retain their original
+  chosen element kind (1–12) even when count is zero.
+- Renaming rewrites only the selected field's original UTF-8 name header,
+  leaving its value bytes unmodified. Duplication copies the complete
+  original typed payload byte-for-byte under an explicit unused field
+  name; Compound List insertion adjusts only the original typed list
+  element count and the inserted original or empty Compound payload.
+  Deletion verifies byte identity of every surviving list member.
+- Protects original identity, UUID, location and known relationship
+  field names; refuses overwrites, invalid byte encodings, wrong
+  container kinds, malformed paths, duplicate Compound names,
+  non-Compound lists, exceeded NBT size and element budgets and
+  ambiguous indices. Mod-specific identity/owner graph changes are
+  **NOT inferred, normalized or repaired**: expert user confirmation
+  is required before destructive/copy operations.
+- Reuses existing native EditSession BEPayloadEdit for one Undo/Redo per
+  intentional operation and NativeAnvilWorld validation of unmodified
+  original Block Entity id and x/y/z. Works with original named,
+  numeric/legacy Anvil and MCRegion records without DataFixer.
+- New Qt6 NBT tree buttons and explicit dialogs for complex containers,
+  rename, opaque copy and Compound List insertion/removal; entity NBT
+  viewer stays read-only, retaining its existing safety boundary.
+- Added native-byte tests for container types, nested opaque modded
+  data, exact binary roundtrip, duplicate/rename inverses, Compound
+  List copy/empty member add/remove, protected fields, invalid inputs,
+  modern Java Anvil save/reopen/backups, MCRegion original save, Undo/
+  Redo and offscreen Qt6 dialog operations.
+- **Major feature 3/5, one complete feature commit**, CI deferred
+  until the batch's fifth major feature [skip ci].

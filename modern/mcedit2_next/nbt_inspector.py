@@ -1,8 +1,9 @@
-"""Native Java NBT tree with optional guarded scalar editing.
+"""Native Java NBT tree with guarded original-byte scalar/container editing.
 
-Default mode remains strictly read-only (also used for entity inspection).
-The BE editing option changes only selected scalar payload bytes via the
-original-format backend, not by serializing an entire nested compound.
+Entity mode remains strictly read-only. Block Entity expert mode can edit
+original typed scalars, packed arrays, Compounds and Compound Lists, with
+protected identity/coordinates and native session undo; never normalizes
+unknown modded sibling data or invents cross-version schemas.
 """
 from __future__ import annotations
 
@@ -50,6 +51,28 @@ class NBTInspectorDialog(QDialog):
             edit.clicked.connect(self.edit_selected_scalar)
             layout.addWidget(edit)
         if on_structure_edit is not None:
+            add_container = QPushButton("Add Compound/List/Array container…", self)
+            add_container.setObjectName("nbt_add_container")
+            add_container.clicked.connect(self.add_complex_container)
+            layout.addWidget(add_container)
+            rename = QPushButton("Rename selected NBT Compound field…", self)
+            rename.setObjectName("nbt_rename_field")
+            rename.clicked.connect(self.rename_named_field)
+            layout.addWidget(rename)
+            duplicate = QPushButton("Duplicate selected opaque field…", self)
+            duplicate.setObjectName("nbt_duplicate_field")
+            duplicate.clicked.connect(self.duplicate_named_field)
+            layout.addWidget(duplicate)
+            compound_insert = QPushButton(
+                "Insert / copy element in selected Compound List…", self)
+            compound_insert.setObjectName("nbt_insert_compound_list")
+            compound_insert.clicked.connect(self.insert_compound_list)
+            layout.addWidget(compound_insert)
+            compound_remove = QPushButton(
+                "Delete one selected Compound List element…", self)
+            compound_remove.setObjectName("nbt_delete_compound_list")
+            compound_remove.clicked.connect(self.remove_compound_list)
+            layout.addWidget(compound_remove)
             add = QPushButton("Add scalar to selected Compound…", self)
             add.clicked.connect(self.add_compound_scalar)
             layout.addWidget(add)
@@ -202,6 +225,170 @@ class NBTInspectorDialog(QDialog):
                 self._display(payload)
         except Exception as exc:
             QMessageBox.warning(self, "NBT edit refused", str(exc))
+
+    def add_complex_container(self):
+        """Create one empty typed native NBT container without rewriting peers."""
+        try:
+            path, kind = self._selection()
+            if kind != 10:
+                raise ValueError("Select the Compound that will contain the new field")
+            name, ok = QInputDialog.getText(
+                self, "New NBT container", "New original field name:")
+            if not ok:
+                return
+            choices = [
+                "Compound", "List", "Byte Array", "Int Array", "Long Array",
+            ]
+            kind_label, ok = QInputDialog.getItem(
+                self, "Native NBT container", "Empty container type:",
+                choices, 0, False)
+            if not ok:
+                return
+            kinds = dict(zip(choices, (10, 9, 7, 11, 12)))
+            requested = kinds[kind_label]
+            kwargs = {"name": name, "kind": requested}
+            if requested == 9:
+                labels = [NAMES[i] for i in range(1, 13)]
+                selected, ok = QInputDialog.getItem(
+                    self, "Typed empty NBT List",
+                    "Original NBT element type (retained when list is empty):",
+                    labels, 9, False)
+                if not ok:
+                    return
+                kwargs["index"] = labels.index(selected) + 1
+            self._structural("add_container", path, **kwargs)
+        except Exception as exc:
+            QMessageBox.warning(self, "NBT container insertion refused", str(exc))
+
+    def rename_named_field(self):
+        """Change only one Compound name header, preserve opaque field bytes."""
+        try:
+            path, kind = self._selection()
+            if not path or type(path[-1]) is not str:
+                raise ValueError("Select a named child of a Compound")
+            name, ok = QInputDialog.getText(
+                self, "Rename original NBT field",
+                "New name (not id/x/y/z, UUID or protected references):",
+                text=path[-1])
+            if not ok or name == path[-1]:
+                return
+            decision = QMessageBox.question(
+                self, "Confirm NBT field rename",
+                "This may change the meaning of modded data. "
+                "Only the selected field's NAME bytes will change. Continue?",
+                QMessageBox.StandardButton.Yes |
+                QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if decision == QMessageBox.StandardButton.Yes:
+                self._structural("rename_field", path, name=name)
+        except Exception as exc:
+            QMessageBox.warning(self, "NBT rename refused", str(exc))
+
+    def duplicate_named_field(self):
+        """Exact native duplication of one unprotected original Compound member."""
+        try:
+            path, kind = self._selection()
+            if not path or type(path[-1]) is not str:
+                raise ValueError("Select an original named NBT Compound member")
+            new_name, ok = QInputDialog.getText(
+                self, "Duplicate original NBT field",
+                "Name for exact opaque-field copy:")
+            if not ok:
+                return
+            decision = QMessageBox.question(
+                self, "Confirm duplication of opaque NBT data",
+                "The duplicate may contain mod-specific absolute references, "
+                "IDs or inventory data. No linked references will be repaired. "
+                "The original field is not modified. Continue?",
+                QMessageBox.StandardButton.Yes |
+                QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if decision == QMessageBox.StandardButton.Yes:
+                self._structural("duplicate_field", path, name=new_name)
+        except Exception as exc:
+            QMessageBox.warning(self, "NBT copy refused", str(exc))
+
+    def insert_compound_list(self):
+        """Insert empty typed Compound or exact copy of an existing element."""
+        try:
+            path, kind = self._selection()
+            if kind != 9:
+                raise ValueError("Select an existing typed Compound List")
+            count, element_kind = list_info(self._raw_payload, tuple(path))
+            if element_kind != 10:
+                raise ValueError("Select a TAG_List with Compound element type")
+            position, ok = QInputDialog.getInt(
+                self, "Insert original Compound List element",
+                f"Insertion index (0–{count}):",
+                count, 0, count)
+            if not ok:
+                return
+            options = ["Empty Compound", "Exact copy of an original member"]
+            operation, ok = QInputDialog.getItem(
+                self, "Compound List element contents", "Insertion mode:",
+                options, 0, False)
+            if not ok:
+                return
+            kwargs = {"index": position}
+            if operation == options[1]:
+                if count == 0:
+                    raise ValueError("The original Compound List has no source member")
+                original_index, ok = QInputDialog.getInt(
+                    self, "Copy original Compound List member",
+                    f"Original source index (0–{count - 1}):",
+                    0, 0, count - 1)
+                if not ok:
+                    return
+                kwargs["value"] = original_index
+                decision = QMessageBox.question(
+                    self, "Confirm exact opaque Compound copy",
+                    "Nested modded NBT may contain identities and relationships "
+                    "that are NOT fixed by duplication. Copy its bytes as-is?",
+                    QMessageBox.StandardButton.Yes |
+                    QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No)
+                if decision != QMessageBox.StandardButton.Yes:
+                    return
+            self._structural("insert_compound_list", path, **kwargs)
+        except Exception as exc:
+            QMessageBox.warning(self, "Compound List insertion refused", str(exc))
+
+    def remove_compound_list(self):
+        """Explicit destructive edit, preserving every original survivor byte."""
+        try:
+            path, kind = self._selection()
+            if kind == 9:
+                target_path = tuple(path)
+                count, item_kind = list_info(self._raw_payload, target_path)
+                if item_kind != 10 or not count:
+                    raise ValueError("Select a nonempty List of Compounds")
+                position, ok = QInputDialog.getInt(
+                    self, "Remove original Compound List member",
+                    f"Element index (0–{count - 1}):",
+                    count - 1, 0, count - 1)
+                if not ok:
+                    return
+            elif kind == 10 and path and type(path[-1]) is int:
+                target_path = tuple(path[:-1])
+                count, item_kind = list_info(self._raw_payload, target_path)
+                if item_kind != 10:
+                    raise ValueError("Selected item is not a Compound List member")
+                position = path[-1]
+            else:
+                raise ValueError("Select a Compound List or an element of it")
+            decision = QMessageBox.question(
+                self, "Confirm permanent NBT list-member removal",
+                f"Remove original Compound List element {position}? "
+                "Only this entry will be removed; modded references are "
+                "NOT automatically repaired.",
+                QMessageBox.StandardButton.Yes |
+                QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if decision == QMessageBox.StandardButton.Yes:
+                self._structural("delete_compound_list",
+                                 target_path, index=position)
+        except Exception as exc:
+            QMessageBox.warning(self, "Compound List deletion refused", str(exc))
 
     def add_compound_scalar(self):
         try:

@@ -1,9 +1,10 @@
 """Surgical NBT structure editing for existing Block Entity records.
 
-Only explicit compound-field insertion/removal and scalar-list insertion/
-removal are supported. Unknown tags and sibling data remain byte-identical.
-This is not a schema converter. The caller must explicitly opt into edits
-which may have mod-specific semantic consequences.
+Supports scalar tags, typed empty containers, compound/list member copying,
+renaming, packed array editing and Compound List member insertion/removal.
+Unknown tags and untouched siblings remain byte-identical. No DataFixer or
+mod-specific semantic conversion. The caller explicitly opts into edits
+which may have mod-specific ownership, identity or reference consequences.
 """
 from __future__ import annotations
 
@@ -219,4 +220,171 @@ def edit_structure(payload: bytes, operation: str, path: tuple,
         return insert_packed_array_item(payload, path, index, value)
     if operation == "delete_array":
         return delete_packed_array_item(payload, path, index)
+    if operation == "add_container":
+        return add_container_field(payload, path, name, kind, element_kind=index)
+    if operation == "rename_field":
+        return rename_compound_field(payload, path, name)
+    if operation == "duplicate_field":
+        return duplicate_compound_field(payload, path, name)
+    if operation == "insert_compound_list":
+        return insert_compound_list_item(payload, path, index, source_index=value)
+    if operation == "delete_compound_list":
+        return delete_compound_list_item(payload, path, index)
     raise UnsafeFormat("Unknown NBT structural operation")
+
+
+
+# Complex containers (Compound/List/arrays) and original-byte copies.
+# These operations extend the original scalar-only editor, never
+# reserialize unknown NBT payloads or normalize mod data.
+
+CONTAINER_KINDS = frozenset((7, 9, 10, 11, 12))
+
+
+def add_container_field(payload: bytes, path: tuple, name: str,
+                        kind: int, *, element_kind: int | None = None) -> bytes:
+    """Create one empty named Compound/List/packed-array inside a Compound.
+
+    For a typed empty List, element_kind is preserved in its original
+    TAG_List header (the scanner accepts 1..12 even at length zero).
+    """
+    _field_name(name)
+    if type(kind) is not int or kind not in CONTAINER_KINDS:
+        raise UnsafeFormat("Only Compound/List/packed Array containers supported")
+    if kind == 9:
+        if type(element_kind) is not int or not 1 <= element_kind <= 12:
+            raise UnsafeFormat("Empty List requires an explicit element NBT type")
+        encoded = bytes((element_kind,)) + struct.pack(">i", 0)
+    elif element_kind is not None:
+        raise UnsafeFormat("Element type is only valid for TAG_List")
+    elif kind == 10:
+        encoded = b"\x00"
+    else:
+        encoded = struct.pack(">i", 0)
+    raw = nbt.make_tag(10, "", payload)
+    parent = _container(raw, path)
+    if parent.kind != 10 or parent.child(name) is not None:
+        raise UnsafeFormat("New container requires a Compound and unused name")
+    addition = nbt.make_tag(kind, name, encoded)
+    if len(raw) + len(addition) > nbt.MAX_NBT_BYTES:
+        raise UnsafeFormat("NBT container insertion exceeds size limit")
+    changed = nbt.replace_spans(raw, [
+        (parent.end - 1, parent.end - 1, addition)])
+    _validate(changed, 10, path)
+    result = _container(changed, path).require(name, kind)
+    if nbt.bytes_of(changed, result) != addition:
+        raise UnsafeFormat("Empty NBT container failed original-byte roundtrip")
+    return changed[3:]
+
+
+def rename_compound_field(payload: bytes, path: tuple,
+                          new_name: str) -> bytes:
+    """Rewrite *only* original Compound field header name bytes."""
+    if not path or type(path[-1]) is not str:
+        raise UnsafeFormat("Rename requires one original named Compound member")
+    _field_name(path[-1])
+    _field_name(new_name)
+    raw = nbt.make_tag(10, "", payload)
+    parent = _container(raw, path[:-1])
+    if parent.kind != 10:
+        raise UnsafeFormat("Rename target must belong to a Compound")
+    tag = parent.child(path[-1])
+    if tag is None:
+        raise UnsafeFormat("Rename target does not exist")
+    if tag.name == new_name:
+        return payload
+    if parent.child(new_name) is not None:
+        raise UnsafeFormat("Rename would duplicate an existing NBT name")
+    old_value = raw[tag.payload_start:tag.end]
+    changed = nbt.replace_spans(raw, [
+        (tag.start + 1, tag.payload_start, nbt.encode_string(new_name))])
+    new_tag = _container(changed, path[:-1]).require(new_name, tag.kind)
+    if changed[new_tag.payload_start:new_tag.end] != old_value:
+        raise UnsafeFormat("Rename unexpectedly modified original field payload")
+    _validate(changed, 10, path[:-1])
+    return changed[3:]
+
+
+def duplicate_compound_field(payload: bytes, path: tuple,
+                             new_name: str) -> bytes:
+    """Copy one unprotected existing typed field, retaining opaque payload."""
+    if not path or type(path[-1]) is not str:
+        raise UnsafeFormat("Duplicate requires a named Compound field")
+    _field_name(path[-1])
+    _field_name(new_name)
+    raw = nbt.make_tag(10, "", payload)
+    parent = _container(raw, path[:-1])
+    if parent.kind != 10:
+        raise UnsafeFormat("Duplicate must target an original Compound member")
+    tag = parent.child(path[-1])
+    if tag is None or parent.child(new_name) is not None:
+        raise UnsafeFormat("Source missing or duplicate new Compound field name")
+    copied = nbt.make_tag(tag.kind, new_name, raw[tag.payload_start:tag.end])
+    if len(raw) + len(copied) > nbt.MAX_NBT_BYTES:
+        raise UnsafeFormat("Duplicated original field exceeds size limit")
+    changed = nbt.replace_spans(raw, [
+        (parent.end - 1, parent.end - 1, copied)])
+    inserted = _container(changed, path[:-1]).require(new_name, tag.kind)
+    if nbt.bytes_of(changed, inserted) != copied:
+        raise UnsafeFormat("Duplicated original field was changed unexpectedly")
+    _validate(changed, 10, path[:-1])
+    return changed[3:]
+
+
+def insert_compound_list_item(payload: bytes, path: tuple, index: int,
+                              *, source_index: int | None = None) -> bytes:
+    """Insert an empty or exact copied Compound into a typed Compound List."""
+    raw = nbt.make_tag(10, "", payload)
+    parent = _container(raw, path)
+    if parent.kind != 9 or raw[parent.payload_start] != 10:
+        raise UnsafeFormat("Select a TAG_List of Compounds (element kind 10)")
+    count = len(parent.children)
+    if type(index) is not int or not 0 <= index <= count:
+        raise UnsafeFormat("Compound List insertion index outside bounds")
+    if count >= nbt.MAX_COLLECTION_ITEMS:
+        raise UnsafeFormat("Compound List exceeds native element count limit")
+    if source_index is None:
+        member = b"\x00"  # An empty Compound element, one TAG_End.
+    elif type(source_index) is int and 0 <= source_index < count:
+        member = nbt.bytes_of(raw, parent.children[source_index])
+    else:
+        raise UnsafeFormat("Compound List clone requires original source index")
+    if len(raw) + len(member) > nbt.MAX_NBT_BYTES:
+        raise UnsafeFormat("Compound List would exceed original NBT budget")
+    at = parent.children[index].start if index < count else parent.end
+    changed = nbt.replace_spans(raw, [
+        (parent.payload_start + 1, parent.payload_start + 5,
+         struct.pack(">i", count + 1)),
+        (at, at, member),
+    ])
+    after = _container(changed, path)
+    if (len(after.children) != count + 1 or
+            after.children[index].kind != 10 or
+            nbt.bytes_of(changed, after.children[index]) != member):
+        raise UnsafeFormat("Inserted Compound List member failed roundtrip")
+    return changed[3:]
+
+
+def delete_compound_list_item(payload: bytes, path: tuple,
+                              index: int) -> bytes:
+    """Delete exactly one original Compound List element, keeping siblings."""
+    raw = nbt.make_tag(10, "", payload)
+    parent = _container(raw, path)
+    if parent.kind != 9 or raw[parent.payload_start] != 10:
+        raise UnsafeFormat("Select a TAG_List of Compounds")
+    count = len(parent.children)
+    if type(index) is not int or not 0 <= index < count:
+        raise UnsafeFormat("Compound List deletion index outside bounds")
+    selected = parent.children[index]
+    survivors = [nbt.bytes_of(raw, child)
+                 for i, child in enumerate(parent.children) if i != index]
+    changed = nbt.replace_spans(raw, [
+        (parent.payload_start + 1, parent.payload_start + 5,
+         struct.pack(">i", count - 1)),
+        (selected.start, selected.end, b""),
+    ])
+    after = _container(changed, path)
+    if (len(after.children) != count - 1 or
+            [nbt.bytes_of(changed, child) for child in after.children] != survivors):
+        raise UnsafeFormat("Compound List deletion modified surviving NBT")
+    return changed[3:]
