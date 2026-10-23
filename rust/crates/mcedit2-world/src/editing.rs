@@ -1339,6 +1339,20 @@ impl Session {
             &self.world,&self.dimension,&candidates,&proofs,timestamp
         )
     }
+    /// Cross-Region planning is strictly read-only: every source Region
+    /// must match its original SHA before an external manifest is created.
+    pub fn prepare_region_batch_report(&self,timestamp:u32)
+        ->Result<crate::region_report::RegionDryRun,WorldError>{
+        crate::region_report::prepare(self,timestamp)
+    }
+    pub fn export_region_batch_report(&self,timestamp:u32,path:&Path)
+        ->Result<usize,WorldError>{
+        crate::region_report::export(self,timestamp,path)
+    }
+    pub fn verify_region_batch_report(&self,path:&Path)
+        ->Result<usize,WorldError>{
+        crate::region_report::verify(self,path)
+    }
     pub fn prepare_native_region_candidates(
         &self, timestamp: u32,
     ) -> Result<Vec<NativeRegionCandidate>, WorldError> {

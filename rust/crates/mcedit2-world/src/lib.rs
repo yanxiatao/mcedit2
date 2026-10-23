@@ -14,6 +14,7 @@ pub mod plugins;
 pub mod be_snapshot;
 pub mod be_journal;
 pub mod be_operations;
+pub mod region_report;
 pub mod clipboard;
 pub mod schematic;
 pub mod region_plan;

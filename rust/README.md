@@ -629,3 +629,15 @@ every operation with original source SHA and byte-preserving NBT checks;
 only on full success does it adopt the new in-memory overlay. A later bad
 operation leaves no partial changes; each accepted edit retains its BE Undo.
 The iced GUI provides separate preview/stage controls. No disk writes.
+
+## Round 4/5 — source-verified multi-Region dry-run manifests
+
+Added strict external `.mcedit2regionplan.json` preflight reports: the
+entire original Region source path/digest, edited chunk count, BE scalar
+proof count, full candidate SHA-256, size and timestamp for every affected
+Region. The planner rereads each original file and refuses symlinks,
+path escapes, duplicates and concurrent mutations. Export is create-new,
+outside the Minecraft world, and verification reconstructs the full plan
+at its stored timestamp. No multi-Region disk commit has been enabled;
+reports make the non-atomic boundary explicit. Regression covers change
+detection and no disk writes.

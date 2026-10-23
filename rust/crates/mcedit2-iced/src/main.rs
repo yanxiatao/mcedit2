@@ -84,6 +84,7 @@ struct App{
     be_journal_path:String,
     be_batch_path:String,
     plugin_manifest_path:String,
+    region_batch_path:String,
     clone_destination:String,
     fill_seed:String,
     patch_path:String,
@@ -124,6 +125,7 @@ enum Message{
     SchematicPath(String),PreviewLegacySchematic,ExportLegacySchematic,
     SpongePath(String),PreviewSpongeV2,ExportSpongeV2,
     PreviewBeRegion,PrepareWorldSave,SavePhrase(String),ConfirmWorldSave,
+    RegionBatchPath(String),PreviewRegionBatch,ExportRegionBatch,VerifyRegionBatch,
     PrepareBeSave,BeSavePhrase(String),ConfirmBeSave,
     RecoverRegion(String),RecoveryPhrase(String),FinalizeRegion,RollbackRegion,
     PreviewEdit,ApplyEdit,UndoEdit,RedoEdit,DiscardEdits,Clear
@@ -960,6 +962,47 @@ fn update(app:&mut App,message:Message){
         Message::BeSnapshotPath(value)=>app.be_snapshot_path=value,
         Message::BeJournalPath(value)=>app.be_journal_path=value,
         Message::BeBatchPath(value)=>app.be_batch_path=value,
+        Message::RegionBatchPath(value)=>app.region_batch_path=value,
+        Message::PreviewRegionBatch=>{
+            let result=(||->Result<_,String>{
+                let key=app.current_key().ok_or("Select original world")?;
+                let time=u32::try_from(SystemTime::now()
+                    .duration_since(UNIX_EPOCH).map_err(|_|"System clock before UNIX epoch")?.as_secs())
+                    .map_err(|_|"Region timestamp cannot represent system clock")?;
+                app.current_session(key)?.prepare_region_batch_report(time)
+                    .map_err(|e|e.to_string())
+            })();
+            app.edit_report=match result{
+                Ok(report)=>format!("Verified {} original Region candidates across this dimension, {} BE scalar proof steps. READ-ONLY: multi-Region save is not atomic or available.",report.regions.len(),report.regions.iter().map(|r|r.be_scalar_steps).sum::<usize>()),
+                Err(e)=>format!("Region batch preflight refused: {e}"),
+            };
+        },
+        Message::ExportRegionBatch=>{
+            let path=PathBuf::from(app.region_batch_path.trim());
+            let result=(||->Result<usize,String>{
+                let key=app.current_key().ok_or("Select original world")?;
+                let time=u32::try_from(SystemTime::now()
+                    .duration_since(UNIX_EPOCH).map_err(|_|"Invalid system time")?.as_secs())
+                    .map_err(|_|"Invalid Region timestamp")?;
+                app.current_session(key)?.export_region_batch_report(time,&path)
+                    .map_err(|e|e.to_string())
+            })();
+            app.edit_report=match result{
+                Ok(n)=>format!("Wrote create-new original-byte dry-run manifest for {n} Region files; no Minecraft files changed."),
+                Err(e)=>format!("Region batch export refused: {e}"),
+            };
+        },
+        Message::VerifyRegionBatch=>{
+            let path=PathBuf::from(app.region_batch_path.trim());
+            let result=app.current_key().ok_or_else(||"Select original world".to_string())
+                .and_then(|key|app.current_session(key))
+                .and_then(|session|session.verify_region_batch_report(&path)
+                    .map_err(|e|e.to_string()));
+            app.edit_report=match result{
+                Ok(n)=>format!("Verified {n} exact Region candidates against original world bytes and current overlay; no disk writes."),
+                Err(e)=>format!("Region manifest verification refused: {e}"),
+            };
+        },
         Message::PreviewBeBatch=>{
             let file=PathBuf::from(app.be_batch_path.trim());
             let result=app.current_key().ok_or_else(||"Select a world".to_string())
@@ -1538,6 +1581,13 @@ fn view(app:&App)->Element<'_,Message>{
                 .on_input(Message::SpongePath).width(Length::Fill),
             button("Export selection to Sponge v2").on_press(Message::ExportSpongeV2),
             button("Preview Sponge v2 paste").on_press(Message::PreviewSpongeV2),
+        ].spacing(8));
+        body=body.push(row![
+            text_input("External .mcedit2regionplan.json",&app.region_batch_path)
+                .on_input(Message::RegionBatchPath).width(Length::Fill),
+            button("Preflight all Regions").on_press(Message::PreviewRegionBatch),
+            button("Export Region plan").on_press(Message::ExportRegionBatch),
+            button("Verify plan").on_press(Message::VerifyRegionBatch),
         ].spacing(8));
         body=body.push(row![
             text_input("Declarative .mcedit2plugin.json file",&app.plugin_manifest_path)

@@ -1387,3 +1387,27 @@ fn declarative_modded_be_batch_is_all_or_nothing_without_world_writes(){
     assert_eq!(world.bytes_now(),saved);
     fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn region_batch_manifest_detects_stale_source_and_unmodified_world(){
+    let world=NativeWorld::create(true);
+    let unchanged=world.bytes_now();
+    let path=std::env::temp_dir().join(format!(
+        "mcedit2-regions-{}-{}.mcedit2regionplan.json",
+        std::process::id(),COUNTER.fetch_add(1,Ordering::Relaxed)
+    ));
+    let mut editor=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    let area=Bounds::new((0,-64,0),(1,-64,1)).unwrap();
+    let preview=editor.prepare(area,&parse_state("minecraft:gold_block").unwrap(),None).unwrap();
+    editor.commit(preview).unwrap();
+    let report=editor.prepare_region_batch_report(99).unwrap();
+    assert_eq!(report.regions.len(),1);
+    assert_eq!(report.regions[0].edited_chunks,1);
+    assert_eq!(editor.export_region_batch_report(99,&path).unwrap(),1);
+    assert_eq!(editor.verify_region_batch_report(&path).unwrap(),1);
+    assert!(editor.export_region_batch_report(99,&path).is_err());
+    assert_eq!(world.bytes_now(),unchanged);
+    overwrite_region(&world,&modern_chunk("minecraft:stone"));
+    assert!(editor.verify_region_batch_report(&path).is_err());
+    fs::remove_file(path).unwrap();
+}
