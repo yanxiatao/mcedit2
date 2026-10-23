@@ -6,7 +6,7 @@ use isometric::IsometricSurface;
 use iced::{Element,Length,Theme};
 use mcedit2_world::{compatibility_label,inspect_input,launch,WorldSummary};
 use mcedit2_world::block_lookup::{parse_xyz,read_world_block};
-use mcedit2_world::editing::{parse_bounds,parse_state,Bounds,Preview,Session,Slice,SliceCell,VerticalSlice};
+use mcedit2_world::editing::{parse_bounds,parse_state,BeScalarPreview,Bounds,Preview,Session,Slice,SliceCell,VerticalSlice};
 use mcedit2_world::region_plan::NativeRegionCandidate;
 use mcedit2_world::clipboard::HorizontalTransform;
 use mcedit2_world::region_transaction::{apply_single_region,finalize_single_region,rollback_pending_region};
@@ -92,6 +92,7 @@ struct App{
     recover_region:String,
     recovery_phrase:String,
     save_preview:Option<SaveIntent>,
+    be_prepared:Option<(usize,usize,BeScalarPreview)>,
     edit_report:String,
     sessions:BTreeMap<(usize,usize),Session>,
     prepared:Option<(usize,usize,Preview)>,
@@ -103,6 +104,7 @@ enum Message{
     Path(String),Open,Select(usize),Coordinates(String),Dimension(usize),
     SurfaceArea(String),InspectSurface,InspectVolume,PickSurface(i32,i32,i32),RotateSurface,
     BeScalarField(String),BeScalarValue(String),PreviewBeScalar,
+    StageBeScalar,UndoBeScalar,RedoBeScalar,InspectStagedBe,
     BeSnapshotPath(String),ExportOriginalBe,VerifyOriginalBe,
     PluginManifestPath(String),PreviewPlugin,
     InspectBlock,InspectOriginalBlockEntity,SliceText(String),InspectSlice,PickSlice(i32,i32,i32),MoveSlice(i32,i32,i32),
@@ -170,6 +172,7 @@ impl App{
         }
         self.query_coordinates=format!("{x}, {y}, {z}");
         self.edit_area=format!("{x},{y},{z};{x},{y},{z}");
+        self.be_prepared=None;
         self.save_preview=None;self.prepared=None;
         self.surface_report=format!(
             "Selected exact original 3D voxel ({x},{y},{z}). Edits still require normal guarded preview and Apply."
@@ -210,6 +213,7 @@ impl App{
         let Some((x,y,z))=plane.coordinate(row,col) else{return};
         self.edit_area=format!("{x},{y},{z};{x},{y},{z}");
         self.query_coordinates=format!("{x}, {y}, {z}");
+        self.be_prepared=None;
         self.save_preview=None;
         self.prepared=None;
         self.block_result=format!("Selected vertical plane original block at ({x},{y},{z}); inspect the source Block Entity before editing.");
@@ -290,6 +294,7 @@ impl App{
         };
         self.query_coordinates=format!("{x}, {y}, {z}");
         self.edit_area=format!("{x},{y},{z};{x},{y},{z}");
+        self.be_prepared=None;
         self.prepared=None;
         self.save_preview=None;
         self.save_phrase.clear();
@@ -308,6 +313,7 @@ impl App{
         self.slice_grid=None;
         self.vertical_grid=None;
         self.surface=None;
+        self.be_prepared=None;
     }
     fn current_world_context(&self)->Result<(usize,usize,WorldSummary,String),String>{
         let (wi,di)=self.current_key().ok_or("Select an original world and dimension")?;
@@ -774,6 +780,7 @@ fn update(app:&mut App,message:Message){
         Message::FinalizeRegion=>app.recover_region(false),
         Message::RollbackRegion=>app.recover_region(true),
         Message::Open=>{
+            app.be_prepared=None;
             app.surface=None;
             app.save_preview=None;
             app.slice_grid=None;
@@ -795,6 +802,7 @@ fn update(app:&mut App,message:Message){
             }
         }
         Message::Select(index)=>{
+            app.be_prepared=None;
             app.surface=None;
             app.save_preview=None;
             app.slice_grid=None;
@@ -807,8 +815,9 @@ fn update(app:&mut App,message:Message){
                 app.edit_report.clear();
             }
         }
-        Message::Coordinates(value)=>app.query_coordinates=value,
+        Message::Coordinates(value)=>{app.query_coordinates=value;app.be_prepared=None;},
         Message::Dimension(index)=>{
+            app.be_prepared=None;
             app.surface=None;
             app.save_preview=None;
             app.slice_grid=None;
@@ -844,7 +853,7 @@ fn update(app:&mut App,message:Message){
                 }
             };
         },
-        Message::BeScalarField(value)=>app.be_scalar_field=value,
+        Message::BeScalarField(value)=>{app.be_scalar_field=value;app.be_prepared=None;},
         Message::BeSnapshotPath(value)=>app.be_snapshot_path=value,
         Message::PluginManifestPath(value)=>app.plugin_manifest_path=value,
         Message::PreviewPlugin=>{
@@ -891,24 +900,90 @@ fn update(app:&mut App,message:Message){
                 Err(e)=>format!("Opaque BE snapshot verification refused: {e}"),
             };
         },
-        Message::BeScalarValue(value)=>app.be_scalar_value=value,
+        Message::BeScalarValue(value)=>{app.be_scalar_value=value;app.be_prepared=None;},
         Message::PreviewBeScalar=>{
-            let result=(||->Result<(usize,String),String>{
-                let point=parse_xyz(&app.query_coordinates)
-                    .map_err(|e|e.to_string())?;
-                let key=app.current_key().ok_or("Select a world and dimension")?;
+            app.be_prepared=None;
+            let outcome=(||->Result<_,String>{
+                let point=parse_xyz(&app.query_coordinates).map_err(|e|e.to_string())?;
+                let key=app.current_key().ok_or("Select original world and dimension")?;
                 let field=app.be_scalar_field.clone();
                 let value=app.be_scalar_value.clone();
-                app.current_session(key)?.prepare_original_be_scalar(
-                    point,&field,&value
-                ).map_err(|e|e.to_string())
+                let proposal=app.current_session(key)?.prepare_be_edit(point,&field,&value)
+                    .map_err(|e|e.to_string())?;
+                Ok((key.0,key.1,proposal))
             })();
-            app.block_result=match result{
-                Ok((size,digest))=>format!(
-                    "Original Block Entity scalar NBT patch computed IN MEMORY: {} NBT bytes, candidate SHA-256 {}. No world files or Undo states altered. Actual BE saving is NOT enabled.",size,digest
-                ),
-                Err(e)=>format!("Original BE scalar in-memory preview refused: {e}"),
-            };
+            match outcome{
+                Ok((wi,di,preview))=>{
+                    app.block_result=format!(
+                        "Verified BE scalar proposal: {} NBT bytes, SHA-256 {}. STAGE is memory-only; Region saving blocked while BE edits remain.",
+                        preview.patched_nbt.len(),
+                        preview.sha256()
+                    );
+                    app.be_prepared=Some((wi,di,preview));
+                },
+                Err(e)=>app.block_result=format!("BE preview refused: {e}"),
+            }
+        },
+        Message::StageBeScalar=>{
+            if app.readonly{app.block_result="-view forbids BE staging.".into();}
+            else {
+                let outcome=app.be_prepared.take()
+                    .ok_or("Preview original BE scalar change first".to_owned())
+                    .and_then(|(wi,di,prepared)|{
+                        if app.current_key()!=Some((wi,di)){
+                            return Err("Changed dimension/world since BE preview".into());
+                        }
+                        app.current_session((wi,di))?.commit_be_edit(prepared)
+                            .map_err(|e|e.to_string())
+                    });
+                app.block_result=match outcome{
+                    Ok(())=>"BE NBT staged with separate Undo; Minecraft world unchanged and disk save BLOCKED.".into(),
+                    Err(e)=>format!("BE stage refused: {e}"),
+                };
+                app.save_preview=None;app.surface=None;app.slice_grid=None;app.vertical_grid=None;
+            }
+        },
+        Message::UndoBeScalar=>{
+            app.be_prepared=None;
+            app.save_preview=None;
+            if app.readonly{app.block_result="-view forbids BE Undo.".into();}
+            else{
+                let r=app.current_key().ok_or("Select original world".to_owned())
+                    .and_then(|k|app.current_session(k))
+                    .and_then(|s|s.undo_be_edit().map_err(|e|e.to_string()));
+                app.block_result=match r{
+                    Ok(true)=>"BE scalar Undo completed in memory.".into(),
+                    Ok(false)=>"No BE scalar Undo history.".into(),
+                    Err(e)=>format!("BE Undo refused: {e}"),
+                };
+                app.surface=None;app.slice_grid=None;app.vertical_grid=None;
+            }
+        },
+        Message::RedoBeScalar=>{
+            app.be_prepared=None;
+            app.save_preview=None;
+            if app.readonly{app.block_result="-view forbids BE Redo.".into();}
+            else{
+                let r=app.current_key().ok_or("Select original world".to_owned())
+                    .and_then(|k|app.current_session(k))
+                    .and_then(|s|s.redo_be_edit().map_err(|e|e.to_string()));
+                app.block_result=match r{
+                    Ok(true)=>"BE scalar Redo completed in memory.".into(),
+                    Ok(false)=>"No BE scalar Redo history.".into(),
+                    Err(e)=>format!("BE Redo refused: {e}"),
+                };
+                app.surface=None;app.slice_grid=None;app.vertical_grid=None;
+            }
+        },
+        Message::InspectStagedBe=>{
+            let r=(||->Result<String,String>{
+                let p=parse_xyz(&app.query_coordinates).map_err(|e|e.to_string())?;
+                let k=app.current_key().ok_or("Select original world")?;
+                Ok(app.current_session(k)?.inspect_staged_be(p)
+                    .map_err(|e|e.to_string())?.map_or_else(
+                        ||"No original/staged BE found.".into(),|be|be.report()))
+            })();
+            app.block_result=r.unwrap_or_else(|e|format!("BE inspection refused: {e}"));
         },
         Message::InspectOriginalBlockEntity=>{
             let result=(||->Result<String,String>{
@@ -1018,6 +1093,7 @@ fn update(app:&mut App,message:Message){
         Message::UndoEdit=>app.history(false),
         Message::RedoEdit=>app.history(true),
         Message::DiscardEdits=>{
+            app.be_prepared=None;
             app.surface=None;
             app.save_preview=None;
             app.slice_grid=None;
@@ -1031,6 +1107,7 @@ fn update(app:&mut App,message:Message){
             app.edit_report="Discarded all staged edits for this world/dimension; original disk untouched.".into();
         }
         Message::Clear=>{
+            app.be_prepared=None;
             app.surface=None;
             app.save_preview=None;
             app.slice_grid=None;
@@ -1125,7 +1202,13 @@ fn view(app:&App)->Element<'_,Message>{
                 .on_input(Message::BeScalarField).width(Length::Fill),
             text_input("Exact replacement scalar value",&app.be_scalar_value)
                 .on_input(Message::BeScalarValue).width(Length::Fill),
-            button("Preview surgical original BE tag edit").on_press(Message::PreviewBeScalar),
+            button("Preview BE scalar").on_press(Message::PreviewBeScalar),
+            button("Stage BE in memory").on_press(Message::StageBeScalar),
+        ].spacing(8));
+        body=body.push(row![
+            button("Undo BE").on_press(Message::UndoBeScalar),
+            button("Redo BE").on_press(Message::RedoBeScalar),
+            button("Inspect staged BE").on_press(Message::InspectStagedBe),
         ].spacing(8));
         body=body.push(row![
             text_input("Outside-world .mcedit2be original NBT snapshot",&app.be_snapshot_path)

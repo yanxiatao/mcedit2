@@ -326,6 +326,24 @@ pub struct NativeChunkCandidate {
     pub patched_nbt: Vec<u8>,
 }
 
+/// Original-source-authenticated in-memory NBT change (never a disk write).
+#[derive(Debug,Clone)]
+pub struct BeScalarPreview{
+    root:PathBuf,dimension:String,chunk:ChunkPos,
+    source_sha:String,before_sha:String,position:Position,
+    field:String,value:String,pub patched_nbt:Vec<u8>,
+}
+impl BeScalarPreview{
+    pub fn sha256(&self)->String{nbt_sha(&self.patched_nbt)}
+}
+#[derive(Debug,Clone)]
+struct BeHistory{
+    chunk:ChunkPos,source_sha:String,before:Option<Vec<u8>>,after:Vec<u8>,
+}
+fn nbt_sha(raw:&[u8])->String{
+    Sha256::digest(raw).iter().map(|v|format!("{v:02x}")).collect()
+}
+
 /// Strict 3D original block-state transaction overlay. Nothing is saved.
 #[derive(Debug, Clone)]
 pub struct Session {
@@ -334,6 +352,9 @@ pub struct Session {
     overlay: BTreeMap<Position, State>,
     undo: Vec<Vec<Change>>,
     redo: Vec<Vec<Change>>,
+    be_overlay:BTreeMap<ChunkPos,Vec<u8>>,
+    be_source:BTreeMap<ChunkPos,String>,
+    be_undo:Vec<BeHistory>,be_redo:Vec<BeHistory>,
 }
 impl Session {
     pub fn new(world: WorldSummary, dimension: impl Into<String>) -> Result<Self, WorldError> {
@@ -341,7 +362,11 @@ impl Session {
         if !world.dimensions.iter().any(|d| d.name == dimension) {
             return Err(refuse("Native edit session dimension is not part of selected world"));
         }
-        Ok(Self { world, dimension, overlay: BTreeMap::new(), undo: Vec::new(), redo: Vec::new() })
+        Ok(Self {
+            world,dimension,overlay:BTreeMap::new(),undo:Vec::new(),redo:Vec::new(),
+            be_overlay:BTreeMap::new(),be_source:BTreeMap::new(),
+            be_undo:Vec::new(),be_redo:Vec::new(),
+        })
     }
     pub fn original_world(&self) -> &WorldSummary { &self.world }
     /// Reuse an already strictly decoded source chunk instead of reopening
@@ -354,7 +379,10 @@ impl Session {
     pub fn pending_cells(&self) -> usize { self.overlay.len() }
     pub fn undo_depth(&self) -> usize { self.undo.len() }
     pub fn redo_depth(&self) -> usize { self.redo.len() }
-    pub fn has_pending_changes(&self) -> bool { !self.overlay.is_empty() }
+    pub fn has_pending_changes(&self) -> bool {
+        !self.overlay.is_empty()||!self.be_overlay.is_empty()
+    }
+    pub fn pending_be_chunks(&self)->usize{self.be_overlay.len()}
     /// Reads actual original world NBT only when there is no staged overlay.
     /// Inspect a small original-world 3D voxel surface without writing data.
     pub fn inspect_surface(
@@ -422,6 +450,124 @@ impl Session {
         let hash=Sha256::digest(&patched).iter()
             .map(|b|format!("{b:02x}")).collect::<String>();
         Ok((patched.len(),hash))
+    }
+    /// Prepare a bounded scalar replacement against ORIGINAL or already
+    /// staged BE NBT. Unknown modded sibling bytes must remain verbatim.
+    pub fn prepare_be_edit(
+        &self,position:Position,field:&str,value:&str
+    )->Result<BeScalarPreview,WorldError>{
+        let chunk=(position.0.div_euclid(16),position.2.div_euclid(16));
+        let original=read_world_chunk_bytes(
+            &self.world,&self.dimension,chunk.0,chunk.1
+        )?.ok_or_else(||refuse("Original BE chunk absent"))?;
+        if original.len()>2*1024*1024{return Err(refuse("BE NBT exceeds 2 MiB editing budget"));}
+        let source_sha=nbt_sha(&original);
+        if self.be_source.get(&chunk).is_some_and(|digest|digest!=&source_sha){
+            return Err(refuse("Original chunk changed since first BE staging"));
+        }
+        let before=self.be_overlay.get(&chunk).unwrap_or(&original);
+        let patched_nbt=crate::sections::patch_original_block_entity_scalar(
+            before,position,field,value
+        ).map_err(|e|refuse(format!("BE NBT surgery failed: {e}")))?;
+        if patched_nbt.len()>2*1024*1024{
+            return Err(refuse("Patched BE chunk exceeds 2 MiB budget"));
+        }
+        Ok(BeScalarPreview{
+            root:self.world.root.clone(),dimension:self.dimension.clone(),
+            chunk,source_sha,before_sha:nbt_sha(before),
+            position,field:field.into(),value:value.into(),patched_nbt,
+        })
+    }
+    /// Atomic memory-only NBT staging with exact replay and SHA checks.
+    pub fn commit_be_edit(&mut self,preview:BeScalarPreview)->Result<(),WorldError>{
+        if preview.root!=self.world.root||preview.dimension!=self.dimension{
+            return Err(refuse("BE edit belongs to another world/dimension"));
+        }
+        let original=read_world_chunk_bytes(
+            &self.world,&self.dimension,preview.chunk.0,preview.chunk.1
+        )?.ok_or_else(||refuse("Original BE chunk missing"))?;
+        let source_sha=nbt_sha(&original);
+        if source_sha!=preview.source_sha
+            ||self.be_source.get(&preview.chunk).is_some_and(|v|v!=&source_sha){
+            return Err(refuse("Original BE NBT changed since preview"));
+        }
+        if !self.be_overlay.contains_key(&preview.chunk)&&self.be_overlay.len()>=8{
+            return Err(refuse("BE edits limited to eight source chunks"));
+        }
+        let current=self.be_overlay.get(&preview.chunk).unwrap_or(&original);
+        if nbt_sha(current)!=preview.before_sha{
+            return Err(refuse("Staged BE changed since preview"));
+        }
+        let verified=crate::sections::patch_original_block_entity_scalar(
+            current,preview.position,&preview.field,&preview.value
+        ).map_err(|e|refuse(format!("BE replay refused: {e}")))?;
+        if verified!=preview.patched_nbt{
+            return Err(refuse("BE candidate differs from original-byte replay"));
+        }
+        let history=BeHistory{
+            chunk:preview.chunk,source_sha:source_sha.clone(),
+            before:self.be_overlay.get(&preview.chunk).cloned(),
+            after:preview.patched_nbt.clone(),
+        };
+        self.be_overlay.insert(preview.chunk,preview.patched_nbt);
+        self.be_source.insert(preview.chunk,source_sha);
+        self.be_undo.push(history);
+        if self.be_undo.len()>24{self.be_undo.remove(0);}
+        self.be_redo.clear();
+        Ok(())
+    }
+    fn check_be_history(&self,change:&BeHistory,expect:&[u8])->Result<(),WorldError>{
+        let original=read_world_chunk_bytes(
+            &self.world,&self.dimension,change.chunk.0,change.chunk.1
+        )?.ok_or_else(||refuse("Original BE chunk missing"))?;
+        if nbt_sha(&original)!=change.source_sha
+            ||self.be_overlay.get(&change.chunk).map(Vec::as_slice)!=Some(expect){
+            return Err(refuse("BE history refuses changed source or stale overlay"));
+        }
+        Ok(())
+    }
+    pub fn undo_be_edit(&mut self)->Result<bool,WorldError>{
+        let Some(group)=self.be_undo.last()else{return Ok(false)};
+        self.check_be_history(group,&group.after)?;
+        let group=self.be_undo.pop().unwrap();
+        if let Some(before)=&group.before{
+            self.be_overlay.insert(group.chunk,before.clone());
+        }else{
+            self.be_overlay.remove(&group.chunk);
+            self.be_source.remove(&group.chunk);
+        }
+        self.be_redo.push(group);
+        Ok(true)
+    }
+    pub fn redo_be_edit(&mut self)->Result<bool,WorldError>{
+        let Some(group)=self.be_redo.last()else{return Ok(false)};
+        let original=read_world_chunk_bytes(
+            &self.world,&self.dimension,group.chunk.0,group.chunk.1
+        )?.ok_or_else(||refuse("Original BE chunk missing"))?;
+        if nbt_sha(&original)!=group.source_sha
+            ||self.be_overlay.get(&group.chunk).cloned()!=group.before{
+            return Err(refuse("BE redo refuses changed source or stale overlay"));
+        }
+        let group=self.be_redo.pop().unwrap();
+        self.be_overlay.insert(group.chunk,group.after.clone());
+        self.be_source.insert(group.chunk,group.source_sha.clone());
+        self.be_undo.push(group);
+        Ok(true)
+    }
+    pub fn inspect_staged_be(
+        &self,position:Position
+    )->Result<Option<crate::sections::OriginalBlockEntity>,WorldError>{
+        let chunk=(position.0.div_euclid(16),position.2.div_euclid(16));
+        if let Some(raw)=self.be_overlay.get(&chunk){
+            let current=read_world_chunk_bytes(
+                &self.world,&self.dimension,chunk.0,chunk.1
+            )?.ok_or_else(||refuse("Original BE chunk missing"))?;
+            if self.be_source.get(&chunk)!=Some(&nbt_sha(&current)){
+                return Err(refuse("Staged BE inspector refuses changed original source"));
+            }
+            crate::sections::inspect_original_block_entity(raw,position)
+                .map_err(|e|refuse(format!("Staged NBT invalid: {e}")))
+        }else{self.inspect_original_block_entity(position)}
     }
     /// Copy the complete original opaque Block Entity byte payload to an
     /// external, immutable .mcedit2be file. Never mutates world or overlay.
@@ -945,6 +1091,9 @@ impl Session {
     pub fn prepare_native_palette_candidates(
         &self,
     ) -> Result<Vec<NativeChunkCandidate>, WorldError> {
+        if !self.be_overlay.is_empty(){
+            return Err(refuse("BE NBT staged: block-only Region writer is deliberately DISABLED; undo or discard BE edits first"));
+        }
         if self.overlay.is_empty() {
             return Err(refuse("No staged block edits for native NBT preview"));
         }
@@ -1171,6 +1320,9 @@ impl Session {
     }
     /// Write an external original-NBT-verified edit journal, never a world file.
     pub fn export_patch(&self, path: &Path) -> Result<usize, WorldError> {
+        if !self.be_overlay.is_empty(){
+            return Err(refuse("Block-only journal cannot preserve staged BE NBT"));
+        }
         if self.overlay.is_empty() {return Err(refuse("No pending blocks to export"));}
         let bytes=patch::encode(&self.world,&self.dimension,&self.overlay)?;
         patch::save(path,&self.world,&bytes)?;
@@ -1178,7 +1330,7 @@ impl Session {
     }
     /// Import one fully preflighted original-world journal as a single Undo.
     pub fn import_patch(&mut self, path: &Path) -> Result<usize, WorldError> {
-        if !self.overlay.is_empty() {
+        if self.has_pending_changes() {
             return Err(refuse("Export or discard existing edits before importing"));
         }
         let bytes=patch::load(path)?;
@@ -1221,6 +1373,10 @@ impl Session {
     }
     /// Explicit discard only; no world files are written.
     pub fn discard(&mut self) {
+        self.be_overlay.clear();
+        self.be_source.clear();
+        self.be_undo.clear();
+        self.be_redo.clear();
         self.overlay.clear();
         self.undo.clear();
         self.redo.clear();

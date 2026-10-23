@@ -1134,3 +1134,45 @@ fn native_multilayer_original_exposed_volume_culls_hidden_blocks_and_shows_real_
     assert!(session.inspect_exposed_volume(0,0,-64,-32,3,3).is_err());
     assert_eq!(world.bytes_now(),original);
 }
+
+#[test]
+fn original_be_scalar_memory_staging_is_undoable_and_never_disk_writable(){
+    let world=NativeWorld::create(true);
+    overwrite_region(&world,&chunk_with_be("minecraft:stone",(2,-64,3)));
+    let untouched=world.bytes_now();
+    let mut editor=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    let candidate=editor.prepare_be_edit(
+        (2,-64,3),"UnrecognizedPayload","FIRST STAGED"
+    ).unwrap();
+    editor.commit_be_edit(candidate).unwrap();
+    assert_eq!(editor.pending_be_chunks(),1);
+    assert!(editor.has_pending_changes());
+    assert!(editor.prepare_native_region_candidates(123).is_err());
+    assert!(editor.export_patch(&journal_path()).is_err());
+    assert_ne!(
+        editor.inspect_staged_be((2,-64,3)).unwrap().unwrap().original_compound_sha256,
+        editor.inspect_original_block_entity((2,-64,3)).unwrap().unwrap().original_compound_sha256
+    );
+    assert!(editor.undo_be_edit().unwrap());
+    assert_eq!(editor.pending_be_chunks(),0);
+    assert!(editor.redo_be_edit().unwrap());
+    assert_eq!(editor.pending_be_chunks(),1);
+    editor.discard();
+    assert!(!editor.has_pending_changes());
+    assert_eq!(world.bytes_now(),untouched);
+}
+#[test]
+fn be_scalar_stale_preview_and_changed_disk_are_rejected(){
+    let world=NativeWorld::create(true);
+    overwrite_region(&world,&chunk_with_be("minecraft:stone",(2,-64,3)));
+    let mut editor=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    let first=editor.prepare_be_edit((2,-64,3),"UnrecognizedPayload","ONE").unwrap();
+    editor.commit_be_edit(first).unwrap();
+    let stale=editor.prepare_be_edit((2,-64,3),"UnrecognizedPayload","TWO").unwrap();
+    let next=editor.prepare_be_edit((2,-64,3),"UnrecognizedPayload","THREE").unwrap();
+    editor.commit_be_edit(next).unwrap();
+    assert!(editor.commit_be_edit(stale).is_err());
+    overwrite_region(&world,&chunk_with_be("minecraft:gold_block",(2,-64,3)));
+    assert!(editor.undo_be_edit().is_err());
+    assert_eq!(editor.pending_be_chunks(),1);
+}

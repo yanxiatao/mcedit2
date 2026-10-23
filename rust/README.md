@@ -536,3 +536,20 @@ an untextured bounded view, not a GPU mesh renderer.
 Scheduling correction: only run one compile/test-only CI after FIVE FULL
 migration batches. This is batch ONE of the new cycle, not five subrounds.
 No CI/build/package is triggered by this source-only commit.
+
+## Five-batch migration cycle — Batch 2: opaque BE scalar staging
+
+An existing original signed/String scalar can now be preflighted and staged
+in a bounded independent in-memory NBT overlay with separate BE Undo/Redo.
+The original chunk SHA and exact effective source are verified again before
+a byte-identical scalar replay is accepted. Stale previews or changed
+original disk bytes are refused. The editor exposes clear BE-specific
+Stage, Undo, Redo and inspect controls, distinct from block-state Undo.
+All legacy block-only Region disk writes and journal exports are DISABLED
+while any BE NBT remains staged, so unsupported serialization cannot
+silently drop a modded BE edit. No new GitHub CI run (batch TWO of five).
+
+Batch-2 hardening: click-picking any X/Z, vertical or isometric voxel
+invalidates a prepared BE scalar edit; previews display real candidate
+SHA-256 instead of a placeholder. Inspecting staged BE bytes also verifies
+that the complete original chunk has not changed independently.
