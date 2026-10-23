@@ -583,3 +583,21 @@ unchanged. No proof, a wrong field/value, extra opaque byte changes or a
 nonexistent chunk is rejected. **The disk transaction explicitly refuses
 any candidate containing BE operations**; this stage only validates
 complete save previews, not BE writes. No CI (batch FOUR of five).
+
+## Five-batch migration cycle — Batch 5: explicit verified BE single-Region save
+
+BE-only and combined block/BE modifications now have a distinct protected
+single-Region transaction. The UI requires a fresh full-byte-identical
+Region preview and the exact `SAVE_BE_NBT` typed confirmation, separate
+from the existing block-only `SAVE`. The native Region transaction still
+verifies the entire original file/append-only chunk sectors and replays
+ALL BE scalar changes byte-for-byte. It writes a synced immutable ORIGINAL
+backup, a pending marker, and a synced staged replacement, followed by
+an atomic original Region path replacement. FINALIZE or ROLLBACK remains
+required before re-opening the world; recovery restores ORIGINAL bytes.
+BE move/paste, nested-Compound or inventory editing, and multi-Region
+atomic writing remain unsupported. Use disposable copied worlds until
+all relevant old/new version fixtures are validated.
+
+Five FULL migration batches complete. Now run exactly one consolidated
+Linux/Windows **cargo check/test ONLY** validation, never build/packaging.

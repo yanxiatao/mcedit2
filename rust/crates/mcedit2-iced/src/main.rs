@@ -9,7 +9,7 @@ use mcedit2_world::block_lookup::{parse_xyz,read_world_block};
 use mcedit2_world::editing::{parse_bounds,parse_state,BeScalarPreview,Bounds,Preview,Session,Slice,SliceCell,VerticalSlice};
 use mcedit2_world::region_plan::NativeRegionCandidate;
 use mcedit2_world::clipboard::HorizontalTransform;
-use mcedit2_world::region_transaction::{apply_single_region,finalize_single_region,rollback_pending_region};
+use mcedit2_world::region_transaction::{apply_single_region,apply_authenticated_be_single_region,finalize_single_region,rollback_pending_region};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{SystemTime,UNIX_EPOCH};
@@ -20,6 +20,7 @@ struct SaveIntent {
     key:(usize,usize),
     timestamp:u32,
     candidate:NativeRegionCandidate,
+    be_mode:bool,
 }
 fn parse_region_name(name:&str)->Result<(i32,i32,&str),String>{
     let mut parts=name.trim().split('.');
@@ -93,6 +94,7 @@ struct App{
     recover_region:String,
     recovery_phrase:String,
     save_preview:Option<SaveIntent>,
+    be_save_phrase:String,
     be_prepared:Option<(usize,usize,BeScalarPreview)>,
     edit_report:String,
     sessions:BTreeMap<(usize,usize),Session>,
@@ -120,6 +122,7 @@ enum Message{
     SchematicPath(String),PreviewLegacySchematic,ExportLegacySchematic,
     SpongePath(String),PreviewSpongeV2,ExportSpongeV2,
     PreviewBeRegion,PrepareWorldSave,SavePhrase(String),ConfirmWorldSave,
+    PrepareBeSave,BeSavePhrase(String),ConfirmBeSave,
     RecoverRegion(String),RecoveryPhrase(String),FinalizeRegion,RollbackRegion,
     PreviewEdit,ApplyEdit,UndoEdit,RedoEdit,DiscardEdits,Clear
 }
@@ -363,11 +366,100 @@ impl App{
                 candidate.path.display(),candidate.modified_chunks,
                 candidate.original_bytes,candidate.planned_bytes,
             );
-            Ok((SaveIntent{key:(wi,di),timestamp,candidate},label))
+            Ok((SaveIntent{key:(wi,di),timestamp,candidate,be_mode:false},label))
         })();
         match result {
             Ok((intent,label))=>{self.save_preview=Some(intent);self.edit_report=label;},
             Err(e)=>self.edit_report=format!("Disk save preflight refused: {e}"),
+        }
+    }
+    fn prepare_be_save(&mut self){
+        self.save_preview=None;
+        self.save_phrase.clear();
+        self.be_save_phrase.clear();
+        self.be_prepared=None;
+        if self.readonly{
+            self.edit_report="-view forbids BE disk saves.".into();
+            return;
+        }
+        let result=(||->Result<(SaveIntent,String),String>{
+            let (wi,di,world,_)=self.current_world_context()?;
+            if self.sessions.iter().any(|((index,d),session)|
+                self.worlds.get(*index).is_some_and(|other|other.root==world.root)
+                &&(*index,*d)!=(wi,di)&&session.has_pending_changes()
+            ){
+                return Err("Another world/dimension has staged edits; BE save requires exclusive original world ownership".into());
+            }
+            let timestamp=u32::try_from(SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_|"System clock before epoch")?.as_secs())
+                .map_err(|_|"System clock cannot be represented as Region timestamp")?;
+            let mut plans=self.current_session((wi,di))?
+                .preview_be_region_candidates(timestamp).map_err(|e|e.to_string())?;
+            if plans.len()!=1{
+                return Err("BE save supports exactly one original Region; split or checkpoint multiple-Region edits".into());
+            }
+            let candidate=plans.pop().ok_or("Missing BE candidate")?;
+            if candidate.be_replay.is_empty(){
+                return Err("BE save requires one or more exact scalar proofs".into());
+            }
+            let msg=format!(
+                "HIGH-RISK verified BE save: {}. {} original scalar proofs, {} replaced chunks, {} -> {} bytes. The original world MUST be closed and backed up. This writes ONE Region only, retaining an immutable original backup and a pending rollback marker. Type SAVE_BE_NBT exactly; use FINALIZE or ROLLBACK afterward.",
+                candidate.path.display(),candidate.be_replay.len(),
+                candidate.modified_chunks,candidate.original_bytes,
+                candidate.planned_bytes
+            );
+            Ok((SaveIntent{key:(wi,di),timestamp,candidate,be_mode:true},msg))
+        })();
+        match result{
+            Ok((intent,msg))=>{self.save_preview=Some(intent);self.edit_report=msg;},
+            Err(e)=>self.edit_report=format!("BE save preflight refused: {e}"),
+        }
+    }
+    fn confirm_be_save(&mut self){
+        if self.readonly||self.be_save_phrase!="SAVE_BE_NBT"{
+            self.edit_report="BE disk save requires exact SAVE_BE_NBT confirmation and non-read-only mode.".into();
+            return;
+        }
+        let Some(intent)=self.save_preview.take()else{
+            self.edit_report="Prepare a fresh BE Region disk save preview first.".into();
+            return;
+        };
+        self.be_save_phrase.clear();
+        if !intent.be_mode||intent.candidate.be_replay.is_empty()
+            ||self.current_key()!=Some(intent.key){
+            self.edit_report="Wrong save mode or original world changed; BE save refused.".into();
+            return;
+        }
+        let result=(||->Result<_,String>{
+            let (wi,di,world,dimension)=self.current_world_context()?;
+            let current=self.current_session((wi,di))?
+                .preview_be_region_candidates(intent.timestamp).map_err(|e|e.to_string())?;
+            if current.len()!=1
+                ||current[0].path!=intent.candidate.path
+                ||current[0].original_region_sha256!=intent.candidate.original_region_sha256
+                ||current[0].image!=intent.candidate.image{
+                return Err("BE NBT, source world or staged blocks changed since preview; regenerate it".into());
+            }
+            let receipt=apply_authenticated_be_single_region(
+                &world,&dimension,&intent.candidate,"SAVE_BE_NBT"
+            ).map_err(|e|e.to_string())?;
+            Ok((world.root,receipt))
+        })();
+        match result{
+            Ok((root,receipt))=>{
+                self.clear_cached_world(&root);
+                self.edit_report=format!(
+                    "Authenticated BE Region written: {}. Immutable original backup {}. PENDING marker {}. MUST FINALIZE or ROLLBACK before reopening/editing the world.",
+                    receipt.region_path.display(),receipt.backup_path.display(),
+                    receipt.marker_path.display()
+                );
+            },
+            Err(e)=>{
+                self.edit_report=format!(
+                    "BE Region save refused/failed: {e}. If pending marker exists, resolve via FINALIZE/ROLLBACK before retrying."
+                );
+            }
         }
     }
     fn confirm_save(&mut self) {
@@ -380,6 +472,10 @@ impl App{
             return;
         };
         self.save_phrase.clear();
+        if intent.be_mode||!intent.candidate.be_replay.is_empty(){
+            self.edit_report="Normal SAVE refuses original BE scalar changes; use SAVE_BE_NBT.".into();
+            return;
+        }
         if self.current_key()!=Some(intent.key){
             self.edit_report="Selected world changed since save preview. Refused.".into();
             return;
@@ -775,6 +871,9 @@ fn update(app:&mut App,message:Message){
         Message::PickSlice(x,y,z)=>app.pick_slice(x,y,z),
         Message::MoveSlice(dx,dy,dz)=>app.pan_slice(dx,dy,dz),
         Message::SavePhrase(value)=>app.save_phrase=value,
+        Message::BeSavePhrase(value)=>app.be_save_phrase=value,
+        Message::PrepareBeSave=>app.prepare_be_save(),
+        Message::ConfirmBeSave=>app.confirm_be_save(),
         Message::RecoverRegion(value)=>app.recover_region=value,
         Message::RecoveryPhrase(value)=>app.recovery_phrase=value,
         Message::PrepareWorldSave=>app.prepare_save(),
@@ -860,7 +959,7 @@ fn update(app:&mut App,message:Message){
         Message::BeJournalPath(value)=>app.be_journal_path=value,
         Message::ExportBeJournal=>{
             let file=PathBuf::from(app.be_journal_path.trim());
-            let result=app.current_key().ok_or("Select an original world")
+            let result=app.current_key().ok_or_else(||"Select an original world".to_string())
                 .and_then(|key|app.current_session(key))
                 .and_then(|editor|editor.export_be_journal(&file).map_err(|e|e.to_string()));
             app.edit_report=match result{
@@ -873,7 +972,7 @@ fn update(app:&mut App,message:Message){
             else{
                 app.be_prepared=None;app.prepared=None;app.save_preview=None;
                 let file=PathBuf::from(app.be_journal_path.trim());
-                let result=app.current_key().ok_or("Select an original world")
+                let result=app.current_key().ok_or_else(||"Select an original world".to_string())
                     .and_then(|key|app.current_session(key))
                     .and_then(|editor|editor.import_be_journal(&file).map_err(|e|e.to_string()));
                 app.edit_report=match result{
@@ -1005,11 +1104,11 @@ fn update(app:&mut App,message:Message){
         },
         Message::PreviewBeRegion=>{
             app.save_preview=None;
-            let result=app.current_key().ok_or("Select original world").and_then(|key|
+            let result=app.current_key().ok_or_else(||"Select original world".to_string()).and_then(|key|
                 app.current_session(key)
             ).and_then(|editor|editor.preview_be_region_candidates(0).map_err(|e|e.to_string()));
             app.edit_report=match result{
-                Ok(regions)=>format!("BE-AUTHENTICATED IN-MEMORY Region preview: {} affected Region files; {} total bytes in candidates. Actual Minecraft disk saving is disabled for BE edits.",regions.len(),
+                Ok(regions)=>format!("BE-AUTHENTICATED IN-MEMORY Region preview: {} affected Region files; {} total bytes in candidates. Disk saving requires the separate fresh SAVE_BE_NBT transaction and backup confirmation.",regions.len(),
                     regions.iter().map(|r|r.planned_bytes).sum::<usize>()),
                 Err(e)=>format!("BE-aware Region preview refused: {e}"),
             };
@@ -1132,6 +1231,7 @@ fn update(app:&mut App,message:Message){
         Message::UndoEdit=>app.history(false),
         Message::RedoEdit=>app.history(true),
         Message::DiscardEdits=>{
+            app.be_save_phrase.clear();
             app.be_prepared=None;
             app.surface=None;
             app.save_preview=None;
@@ -1146,6 +1246,7 @@ fn update(app:&mut App,message:Message){
             app.edit_report="Discarded all staged edits for this world/dimension; original disk untouched.".into();
         }
         Message::Clear=>{
+            app.be_save_phrase.clear();
             app.be_prepared=None;
             app.surface=None;
             app.save_preview=None;
@@ -1249,6 +1350,13 @@ fn view(app:&App)->Element<'_,Message>{
             button("Redo BE").on_press(Message::RedoBeScalar),
             button("Inspect staged BE").on_press(Message::InspectStagedBe),
             button("Verify BE Region (memory only)").on_press(Message::PreviewBeRegion),
+        ].spacing(8));
+        body=body.push(text("Experimental BE-aware single-Region SAVE — EXACT existing scalar tags only; closed world, backup, pending recovery REQUIRED."));
+        body=body.push(row![
+            button("Preview BE save (single Region)").on_press(Message::PrepareBeSave),
+            text_input("Type SAVE_BE_NBT to write",&app.be_save_phrase)
+                .on_input(Message::BeSavePhrase).width(Length::Fill),
+            button("Confirm BE Region save").on_press(Message::ConfirmBeSave),
         ].spacing(8));
         body=body.push(row![
             text_input("Outside-world BE edit .mcedit2bejournal.json",&app.be_journal_path)

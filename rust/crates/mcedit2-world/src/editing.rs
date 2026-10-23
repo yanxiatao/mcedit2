@@ -1232,6 +1232,27 @@ impl Session {
         }
         Ok(result)
     }
+    /// Save exactly ONE BE-containing Region using all pre-existing
+    /// transactional guarantees: original SHA preflight, append-only
+    /// validation, immutable backup, atomic per-file replacement and
+    /// durable pending marker. No multi-Region atomic saves.
+    pub fn apply_authenticated_be_single_region_save(
+        &mut self,timestamp:u32,confirmation:&str,
+    )->Result<RegionWriteReceipt,WorldError>{
+        if confirmation!="SAVE_BE_NBT"{
+            return Err(refuse("Exact SAVE_BE_NBT confirmation required"));
+        }
+        let mut plans=self.preview_be_region_candidates(timestamp)?;
+        if plans.len()!=1{
+            return Err(refuse("BE disk save requires exactly ONE original Region file"));
+        }
+        let candidate=plans.pop().ok_or_else(||refuse("Missing verified BE Region"))?;
+        let receipt=region_transaction::apply_authenticated_be_single_region(
+            &self.world,&self.dimension,&candidate,confirmation
+        )?;
+        self.discard();
+        Ok(receipt)
+    }
     /// Preview complete append-only MCA/MCR images for staged block edits.
     /// Never replaces original region data, never writes any file.
     /// BE-aware original Region candidate: STRICT memory-only preflight.

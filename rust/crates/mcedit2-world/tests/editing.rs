@@ -1259,3 +1259,34 @@ fn be_only_and_combined_block_be_region_candidates_preserve_opaque_data(){
     assert_eq!(mixed[0].be_replay.len(),1);
     assert_eq!(world.bytes_now(),unchanged);
 }
+
+#[test]
+fn explicitly_confirmed_existing_be_scalar_region_save_is_recoverable_verbatim(){
+    use mcedit2_world::region_transaction::rollback_pending_region;
+    let world=NativeWorld::create(true);
+    overwrite_region(&world,&chunk_with_be("minecraft:stone",(2,-64,3)));
+    let unchanged=world.bytes_now();
+    let mut editor=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    let be=editor.prepare_be_edit(
+        (2,-64,3),"UnrecognizedPayload","SAVED WITH FULL NBT PROOF"
+    ).unwrap();
+    editor.commit_be_edit(be).unwrap();
+    assert!(editor.apply_authenticated_be_single_region_save(56,"SAVE").is_err());
+    assert_eq!(world.bytes_now(),unchanged);
+    let receipt=editor.apply_authenticated_be_single_region_save(
+        56,"SAVE_BE_NBT"
+    ).unwrap();
+    assert_ne!(world.bytes_now(),unchanged);
+    assert_eq!(fs::read(&receipt.backup_path).unwrap(),unchanged);
+    assert!(receipt.marker_path.is_file());
+    let readback=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    let updated=readback.inspect_original_block_entity((2,-64,3))
+        .unwrap().unwrap();
+    assert_eq!(updated.raw_id.as_deref(),Some("mod:precious_machine"));
+    assert_ne!(updated.original_compound_sha256,
+        mcedit2_world::sections::inspect_original_block_entity(
+            &chunk_with_be("minecraft:stone",(2,-64,3)),(2,-64,3)
+        ).unwrap().unwrap().original_compound_sha256);
+    rollback_pending_region(&world.metadata(),"minecraft:overworld",0,0,"mca").unwrap();
+    assert_eq!(world.bytes_now(),unchanged);
+}
