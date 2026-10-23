@@ -60,6 +60,7 @@ fn shifted_slice(bounds:Bounds,dx:i32,dy:i32,dz:i32)->Result<String,String>{
 struct App{
     path:String,
     surface_area:String,
+    surface_camera:u8,
     surface:Option<(usize,usize,SurfaceView)>,
     surface_report:String,
     slice_grid:Option<(usize,usize,Slice)>,
@@ -99,7 +100,7 @@ struct App{
 #[derive(Debug,Clone)]
 enum Message{
     Path(String),Open,Select(usize),Coordinates(String),Dimension(usize),
-    SurfaceArea(String),InspectSurface,PickSurface(i32,i32,i32),
+    SurfaceArea(String),InspectSurface,PickSurface(i32,i32,i32),RotateSurface,
     BeScalarField(String),BeScalarValue(String),PreviewBeScalar,
     BeSnapshotPath(String),ExportOriginalBe,VerifyOriginalBe,
     InspectBlock,InspectOriginalBlockEntity,SliceText(String),InspectSlice,PickSlice(i32,i32,i32),MoveSlice(i32,i32,i32),
@@ -615,6 +616,7 @@ fn update(app:&mut App,message:Message){
         Message::SurfaceArea(value)=>{app.surface_area=value;app.surface=None;},
         Message::InspectSurface=>app.inspect_surface(),
         Message::PickSurface(x,y,z)=>app.pick_surface(x,y,z),
+        Message::RotateSurface=>app.surface_camera=(app.surface_camera+1)%4,
         Message::ClipboardPath(value)=>app.clipboard_path=value,
         Message::SchematicPath(value)=>app.schematic_path=value,
         Message::SpongePath(value)=>app.sponge_path=value,
@@ -1076,7 +1078,11 @@ fn view(app:&App)->Element<'_,Message>{
         ].spacing(8));
         if let Some((wi,di,view))=&app.surface{
             if app.current_key()==Some((*wi,*di)){
-                body=body.push(canvas(IsometricSurface{surface:view.clone()})
+                body=body.push(button(format!("Rotate 3D camera 90° (view {})",app.surface_camera))
+                    .on_press(Message::RotateSurface));
+                body=body.push(canvas(IsometricSurface{
+                    surface:view.clone(),camera_quarters:app.surface_camera
+                })
                     .width(Length::Fill).height(Length::Fixed(440.0)));
             }
         }

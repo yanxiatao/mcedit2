@@ -7,7 +7,7 @@ use mcedit2_world::surface::{SurfaceView,SurfaceVoxel};
 use crate::Message;
 
 #[derive(Debug,Clone)]
-pub struct IsometricSurface {pub surface:SurfaceView}
+pub struct IsometricSurface {pub surface:SurfaceView,pub camera_quarters:u8}
 fn color(block:&SurfaceVoxel)->Color{
     if block.original_block_entity{return Color::from_rgb(0.98,0.60,0.19);}
     let mut hash=0x811c9dc5u32;
@@ -30,10 +30,21 @@ fn polygon(frame:&mut Frame,points:&[Point],shade:Color){
     });
     frame.fill(&path,shade);
 }
-fn center(voxel:&SurfaceVoxel,view:&SurfaceView,size:iced::Size)->Point{
+fn rotated(voxel:&SurfaceVoxel,view:&SurfaceView,camera:u8)->(f32,f32){
+    let x=(voxel.x-view.x) as f32;
+    let z=(voxel.z-view.z) as f32;
+    let width=(view.width-1) as f32;
+    let depth=(view.depth-1) as f32;
+    match camera%4{
+        0=>(x,z),
+        1=>(depth-z,x),
+        2=>(width-x,depth-z),
+        _=>(z,width-x),
+    }
+}
+fn center(voxel:&SurfaceVoxel,view:&SurfaceView,camera:u8,size:iced::Size)->Point{
     // Orthographic isometric XYZ projection with natural vertical heights.
-    let px=(voxel.x-view.x) as f32;
-    let pz=(voxel.z-view.z) as f32;
+    let (px,pz)=rotated(voxel,view,camera);
     let py=(voxel.y-view.y_min) as f32;
     Point::new(
         size.width/2.0+(px-pz)*12.0,
@@ -60,10 +71,21 @@ fn contained(point:Point,vertices:&[Point])->bool {
     count%2==1
 }
 impl IsometricSurface {
+    fn ordered(&self)->Vec<&SurfaceVoxel>{
+        let mut entries=self.surface.voxels.iter().collect::<Vec<_>>();
+        entries.sort_by(|a,b|{
+            let (ax,az)=rotated(a,&self.surface,self.camera_quarters);
+            let (bx,bz)=rotated(b,&self.surface,self.camera_quarters);
+            (ax+az).total_cmp(&(bx+bz))
+        });
+        entries
+    }
     fn pick(&self,point:Point,size:iced::Size)->Option<(i32,i32,i32)> {
         // Reverse painter's order so the nearest visible top face wins.
-        self.surface.voxels.iter().rev().find_map(|voxel|{
-            let diamond=top_diamond(center(voxel,&self.surface,size));
+        self.ordered().into_iter().rev().find_map(|voxel|{
+            let diamond=top_diamond(center(
+                voxel,&self.surface,self.camera_quarters,size
+            ));
             if contained(point,&diamond){Some((voxel.x,voxel.y,voxel.z))}
             else{None}
         })
@@ -74,8 +96,8 @@ impl canvas::Program<Message> for IsometricSurface {
     fn draw(&self,_state:&(),renderer:&Renderer,_theme:&Theme,
         bounds:Rectangle,_cursor:mouse::Cursor)->Vec<canvas::Geometry>{
         let mut frame=Frame::new(renderer,bounds.size());
-        for voxel in &self.surface.voxels{
-            let center=center(voxel,&self.surface,bounds.size());
+        for voxel in self.ordered(){
+            let center=center(voxel,&self.surface,self.camera_quarters,bounds.size());
             let top=top_diamond(center);
             let shade=color(voxel);
             let down=Point::new(0.0,12.0);
@@ -124,7 +146,13 @@ mod tests {
         let view=SurfaceView{x:2,z:3,y_min:-64,y_max:-49,width:1,depth:1,
             voxels:vec![voxel.clone()],missing_columns:0,source_chunks:1};
         let s=iced::Size::new(700.0,420.0);
-        let c=center(&voxel,&view,s);
-        assert_eq!(IsometricSurface{surface:view}.pick(Point::new(c.x,c.y-6.0),s),Some((2,-63,3)));
+        for quarter in 0..4{
+            let c=center(&voxel,&view,quarter,s);
+            assert_eq!(
+                IsometricSurface{surface:view.clone(),camera_quarters:quarter}
+                    .pick(Point::new(c.x,c.y-6.0),s),
+                Some((2,-63,3))
+            );
+        }
     }
 }

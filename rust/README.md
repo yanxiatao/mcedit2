@@ -491,3 +491,13 @@ modified or cross-world snapshots. Create-new file semantics prohibit silent
 overwriting; exporting inside the original world is refused. iced exposes
 export and verify commands. This is a lossless evidence/backup primitive,
 NOT a Block Entity insertion, paste, mutation or world write feature.
+
+## Migration batch 4, round 4/5 — four-direction 3D camera
+
+The iced isometric surface camera rotates in quarter-turns around the
+vertical world axis while keeping exact original XYZ selection. Each view
+sorts polygons in its own painter order, and click picking reverses that
+same order so the nearest visible surface wins. The camera never changes
+source NBT or edit positions. Rotated terrain is still an untextured
+highest-block-per-column preview, not a complete interior/hidden-face
+3D mesh renderer.
