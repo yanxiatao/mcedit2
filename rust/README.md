@@ -641,3 +641,14 @@ outside the Minecraft world, and verification reconstructs the full plan
 at its stored timestamp. No multi-Region disk commit has been enabled;
 reports make the non-atomic boundary explicit. Regression covers change
 detection and no disk writes.
+
+## Round 5/5 — bounded nested original BE field-tree inspector
+
+Original Block Entities now expose a read-only nested NBT Compound tree,
+including canonical slash paths, tag types, raw payload byte counts and
+immediate child counts. Up to 256 fields and eight Compound ancestor levels
+are inspected; ambiguous or unsafe field names are not marked editable.
+This makes the new nested scalar surgery discoverable in the GUI without
+rewriting original modded arrays, inventories or sibling payloads.
+All five rounds are now complete; one check/test-only Linux/Windows CI
+may run. Packaging and binary builds remain manual only.

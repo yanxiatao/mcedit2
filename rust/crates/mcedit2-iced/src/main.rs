@@ -109,7 +109,7 @@ enum Message{
     Path(String),Open,Select(usize),Coordinates(String),Dimension(usize),
     SurfaceArea(String),InspectSurface,InspectVolume,PickSurface(i32,i32,i32),RotateSurface,
     BeScalarField(String),BeScalarValue(String),PreviewBeScalar,
-    StageBeScalar,UndoBeScalar,RedoBeScalar,InspectStagedBe,
+    StageBeScalar,UndoBeScalar,RedoBeScalar,InspectStagedBe,InspectBeTree,
     BeSnapshotPath(String),ExportOriginalBe,VerifyOriginalBe,
     BeJournalPath(String),ExportBeJournal,ImportBeJournal,
     BeBatchPath(String),PreviewBeBatch,StageBeBatch,
@@ -1196,6 +1196,25 @@ fn update(app:&mut App,message:Message){
             })();
             app.block_result=r.unwrap_or_else(|e|format!("BE inspection refused: {e}"));
         },
+        Message::InspectBeTree=>{
+            let result=(||->Result<String,String>{
+                let pos=parse_xyz(&app.query_coordinates).map_err(|e|e.to_string())?;
+                let key=app.current_key().ok_or("Select an original world")?;
+                let tree=app.current_session(key)?.inspect_original_be_tree(pos)
+                    .map_err(|e|e.to_string())?;
+                if tree.is_empty(){return Ok("No original BE NBT at this XYZ.".into());}
+                let mut message=format!("Original modded BE tree: {} visible nested paths (read only). Safely editable scalar paths marked EDIT; no arrays/list elements are edited.\n",tree.len());
+                for item in tree{
+                    message.push_str(&format!(
+                        "{} kind={} bytes={} children={} [{}]\n",
+                        item.path,item.kind,item.payload_bytes,item.immediate_children,
+                        if item.safely_editable_scalar{"EDIT"}else{"READ ONLY"}
+                    ));
+                }
+                Ok(message)
+            })();
+            app.block_result=result.unwrap_or_else(|e|format!("BE tree refused: {e}"));
+        },
         Message::InspectOriginalBlockEntity=>{
             let result=(||->Result<String,String>{
                 let point=parse_xyz(&app.query_coordinates).map_err(|e|e.to_string())?;
@@ -1422,6 +1441,7 @@ fn view(app:&App)->Element<'_,Message>{
             button("Undo BE").on_press(Message::UndoBeScalar),
             button("Redo BE").on_press(Message::RedoBeScalar),
             button("Inspect staged BE").on_press(Message::InspectStagedBe),
+            button("Inspect original nested NBT tree").on_press(Message::InspectBeTree),
             button("Verify BE Region (memory only)").on_press(Message::PreviewBeRegion),
         ].spacing(8));
         body=body.push(text("Experimental BE-aware single-Region SAVE — EXACT existing scalar tags only; closed world, backup, pending recovery REQUIRED."));

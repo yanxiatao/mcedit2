@@ -1407,7 +1407,35 @@ fn region_batch_manifest_detects_stale_source_and_unmodified_world(){
     assert_eq!(editor.verify_region_batch_report(&path).unwrap(),1);
     assert!(editor.export_region_batch_report(99,&path).is_err());
     assert_eq!(world.bytes_now(),unchanged);
-    overwrite_region(&world,&modern_chunk("minecraft:stone"));
+    // Replace source with genuinely different chunk NBT. Rewriting an
+    // identical stone fixture would NOT constitute external source drift.
+    overwrite_region(&world,&modern_chunk("minecraft:gold_block"));
+    assert_ne!(world.bytes_now(),unchanged);
     assert!(editor.verify_region_batch_report(&path).is_err());
     fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn original_modded_be_tree_lists_nested_scalar_paths_without_mutating_data(){
+    let source=chunk_with_be("minecraft:stone",(2,-64,3));
+    let entries=mcedit2_world::sections::inspect_original_be_tree(
+        &source,(2,-64,3)
+    ).unwrap();
+    let leaf=entries.iter().find(|x|
+        x.path=="ModdedCompound/Inner/BurnTime"
+    ).unwrap();
+    assert_eq!(leaf.kind,3);
+    assert!(leaf.safely_editable_scalar);
+    let sibling=entries.iter().find(|x|
+        x.path=="ModdedCompound/Inner/UnknownNested"
+    ).unwrap();
+    assert!(sibling.safely_editable_scalar);
+    assert!(!entries.iter().find(|x|x.path=="id").unwrap()
+        .safely_editable_scalar);
+    assert!(!entries.iter().find(|x|x.path=="ModdedCompound").unwrap()
+        .safely_editable_scalar);
+    let absent=mcedit2_world::sections::inspect_original_be_tree(
+        &source,(4,-64,3)
+    ).unwrap();
+    assert!(absent.is_empty());
 }

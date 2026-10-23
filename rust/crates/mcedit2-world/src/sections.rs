@@ -379,6 +379,63 @@ pub fn inspect_original_block_entity(
 }
 
 
+/// An original bounded nested NBT path. Slash-delimited path fields are
+/// informational; only a scalar path through real Compound ancestors can
+/// be passed to the surgical editor. No NBT bytes are normalized.
+#[derive(Debug,Clone,PartialEq,Eq)]
+pub struct OriginalBePath{
+    pub path:String,
+    pub kind:u8,
+    pub payload_bytes:usize,
+    pub immediate_children:usize,
+    pub safely_editable_scalar:bool,
+}
+fn flatten_original_be(
+    node:&Tag<'_>,prefix:&str,depth:usize,
+    safe_parent:bool,out:&mut Vec<OriginalBePath>,
+){
+    for (key,child) in &node.fields{
+        if out.len()>=256{return;}
+        let clean=!key.is_empty()&&!key.contains('/')
+            &&key.len()<=64
+            &&!matches!(key.as_str(),"x"|"y"|"z"|"id"|"keepPacked");
+        let name=if prefix.is_empty(){key.clone()}
+            else{format!("{prefix}/{key}")};
+        let editable=safe_parent&&clean&&depth<8
+            &&matches!(child.kind,1|2|3|4|5|6|8);
+        out.push(OriginalBePath{
+            path:name.clone(),kind:child.kind,
+            payload_bytes:child.raw.len(),
+            immediate_children:if child.kind==10{child.fields.len()}
+                else if child.kind==9{child.items.len()}else{0},
+            safely_editable_scalar:editable,
+        });
+        if child.kind==10 && depth<7{
+            flatten_original_be(child,&name,depth+1,safe_parent&&clean,out);
+        }
+    }
+}
+pub fn inspect_original_be_tree(
+    original_nbt:&[u8],position:(i32,i32,i32)
+)->Result<Vec<OriginalBePath>>{
+    if inspect_original_block_entity(original_nbt,position)?.is_none(){
+        return Ok(Vec::new());
+    }
+    let root=parse_root(original_nbt)?;
+    let modern=root.field("sections").is_some();
+    let source=if modern{&root}else{root.require("Level",10)?};
+    let list=source.require(if modern{"block_entities"}else{"TileEntities"},9)?;
+    let entity=list.items.iter().find(|t|
+        t.kind==10
+        &&t.field("x").and_then(|x|x.i32().ok())==Some(position.0)
+        &&t.field("y").and_then(|y|y.i32().ok())==Some(position.1)
+        &&t.field("z").and_then(|z|z.i32().ok())==Some(position.2)
+    ).ok_or_else(||error("BE field tree position is inconsistent"))?;
+    let mut out=Vec::new();
+    flatten_original_be(entity,"",0,true,&mut out);
+    Ok(out)
+}
+
 /// Read-only prototype for precisely editing one existing scalar TAG payload
 /// inside a single original Block Entity. This NEVER saves a world file.
 /// Unknown siblings, other entities, blocks, registry IDs and nested NBT

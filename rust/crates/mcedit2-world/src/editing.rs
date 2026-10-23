@@ -434,6 +434,22 @@ impl Session {
         crate::sections::inspect_original_block_entity(&raw,position)
             .map_err(|e|refuse(format!("Original Block Entity NBT invalid: {e}")))
     }
+    /// Inspect an original BE nested field tree, bounded to 256 entries
+    /// and 8 Compound ancestors; actual source chunk remains unchanged.
+    pub fn inspect_original_be_tree(
+        &self,position:Position
+    )->Result<Vec<crate::sections::OriginalBePath>,WorldError>{
+        let (cx,cz)=(position.0.div_euclid(16),position.2.div_euclid(16));
+        let raw=read_world_chunk_bytes(&self.world,&self.dimension,cx,cz)?
+            .ok_or_else(||refuse("Original BE source chunk is absent"))?;
+        let chunk=decode_sections(&raw)
+            .map_err(|e|refuse(format!("BE source NBT rejected: {e}")))?;
+        if chunk.x.is_some_and(|x|x!=cx)||chunk.z.is_some_and(|z|z!=cz){
+            return Err(refuse("Original BE field tree source chunk position mismatch"));
+        }
+        crate::sections::inspect_original_be_tree(&raw,position)
+            .map_err(|e|refuse(format!("BE field tree parse refused: {e}")))
+    }
     /// In-memory preview of one existing signed numeric/String tag inside
     /// an original BE. This is NOT the world's disk-write or Undo path.
     pub fn prepare_original_be_scalar(
