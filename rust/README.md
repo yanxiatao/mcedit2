@@ -408,3 +408,15 @@ Block Entity editing, movement or copying: source and destination BE blocks
 remain protected during all existing editing operations. Malformed original
 NBT fails closed rather than yielding a misleading empty object. No build,
 packaging or GitHub Actions run occurs until five feature rounds complete.
+
+## Migration batch 3, round 2/5 — clipboard spatial transforms
+
+Block-only clipboard paste supports 90/180/270-degree X/Z rotation plus
+mirrors about X or Z. Known `facing`, `axis`, and 0..15 `rotation` fields
+rotate along with the placement; simple invariant `waterlogged`, `lit`,
+`powered` remain unchanged. Unrecognized modded state properties and all
+legacy numeric block metadata refuse spatial transforms rather than being
+incorrectly converted. The native Y/Z/X ordering, dimensions, original
+source provenance and existing BE collision/Undo checks remain intact.
+Iced provides immediate transform preview buttons, all still requiring
+explicit normal stage confirmation. No CI or application builds this round.

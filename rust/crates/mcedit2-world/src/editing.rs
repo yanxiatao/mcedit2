@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use crate::{patch,region_plan,clipboard,schematic};
-use crate::clipboard::BlockClipboard;
+use crate::clipboard::{BlockClipboard,HorizontalTransform};
 use crate::region_transaction::{self,RegionWriteReceipt};
 use crate::region_plan::NativeRegionCandidate;
 
@@ -844,6 +844,15 @@ impl Session {
             changes,source_checks:Vec::new(),is_copy:true,is_fill:false,
             examined:index,matched:index,skipped:0,source_chunks:chunks.len(),
         })
+    }
+    /// Rotation and mirrors are applied BEFORE normal destination checks,
+    /// so modified BE targets and missing Sections still fail atomically.
+    pub fn prepare_paste_clipboard_file_transformed(
+        &self,path:&Path,destination_min:Position,orientation:HorizontalTransform,
+    )->Result<Preview,WorldError>{
+        let source=clipboard::load(&self.world,&self.dimension,path)?;
+        let rotated=source.transformed(orientation)?;
+        self.prepare_paste_clipboard(&rotated,destination_min)
     }
     pub fn prepare_paste_clipboard_file(
         &self,path:&Path,destination_min:Position,

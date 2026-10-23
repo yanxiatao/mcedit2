@@ -5,6 +5,7 @@ use mcedit2_world::{compatibility_label,inspect_input,launch,WorldSummary};
 use mcedit2_world::block_lookup::{parse_xyz,read_world_block};
 use mcedit2_world::editing::{parse_bounds,parse_state,Bounds,Preview,Session,Slice,SliceCell};
 use mcedit2_world::region_plan::NativeRegionCandidate;
+use mcedit2_world::clipboard::HorizontalTransform;
 use mcedit2_world::region_transaction::{apply_single_region,finalize_single_region,rollback_pending_region};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -92,6 +93,7 @@ enum Message{
     FillSeed(String), PreviewFill,
     PatchPath(String),ExportPatch,ImportPatch,AnalyzeNativePatch,AnalyzeRegionPlan,
     ClipboardPath(String),ClipboardDestination(String),ExportClipboard,PreviewPasteClipboard,
+    PreviewTransformedClipboard(HorizontalTransform),
     SchematicPath(String),PreviewLegacySchematic,
     SpongePath(String),PreviewSpongeV2,ExportSpongeV2,
     PrepareWorldSave,SavePhrase(String),ConfirmWorldSave,
@@ -550,6 +552,29 @@ fn update(app:&mut App,message:Message){
                 Err(e)=>app.edit_report=format!("Schematic import refused: {e}"),
             }
         },
+        Message::PreviewTransformedClipboard(operation)=>{
+            app.save_preview=None;
+            app.prepared=None;
+            let path=PathBuf::from(app.clipboard_path.trim());
+            let result=(||->Result<Preview,String>{
+                let target=parse_xyz(&app.clipboard_destination)
+                    .map_err(|e|e.to_string())?;
+                let key=app.current_key().ok_or("Select a world and dimension")?;
+                app.current_session(key)?
+                    .prepare_paste_clipboard_file_transformed(&path,target,operation)
+                    .map_err(|e|e.to_string())
+            })();
+            match result{
+                Ok(preview)=>{
+                    app.edit_report=format!("Safe {:?} clipboard paste preview: {}",
+                        operation,preview.summary());
+                    if let Some((wi,di))=app.current_key(){
+                        app.prepared=Some((wi,di,preview));
+                    }
+                },
+                Err(e)=>app.edit_report=format!("Clipboard transformation refused: {e}"),
+            }
+        },
         Message::PreviewPasteClipboard=>{
             app.save_preview=None;
             app.prepared=None;
@@ -910,6 +935,13 @@ fn view(app:&App)->Element<'_,Message>{
                 .on_input(Message::ClipboardDestination).width(Length::Fill),
             button("Preview clipboard paste").on_press(Message::PreviewPasteClipboard)
         ].spacing(8));
+        body=body.push(row![
+            button("Rotate 90°").on_press(Message::PreviewTransformedClipboard(HorizontalTransform::Rotate90)),
+            button("Rotate 180°").on_press(Message::PreviewTransformedClipboard(HorizontalTransform::Rotate180)),
+            button("Rotate 270°").on_press(Message::PreviewTransformedClipboard(HorizontalTransform::Rotate270)),
+            button("Mirror X").on_press(Message::PreviewTransformedClipboard(HorizontalTransform::MirrorX)),
+            button("Mirror Z").on_press(Message::PreviewTransformedClipboard(HorizontalTransform::MirrorZ)),
+        ].spacing(6));
         body=body.push(row![
             text_input("Original MCEdit .schematic path",&app.schematic_path)
                 .on_input(Message::SchematicPath).width(Length::Fill),
