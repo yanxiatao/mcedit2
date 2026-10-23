@@ -4,10 +4,32 @@ use iced::{Element,Length,Theme};
 use mcedit2_world::{compatibility_label,inspect_input,launch,WorldSummary};
 use mcedit2_world::block_lookup::{parse_xyz,read_world_block};
 use mcedit2_world::editing::{parse_bounds,parse_state,Preview,Session};
+use mcedit2_world::region_plan::NativeRegionCandidate;
+use mcedit2_world::region_transaction::{apply_single_region,finalize_single_region,rollback_pending_region};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{SystemTime,UNIX_EPOCH};
 
+/// Snapshot of the exact single-Region image explicitly approved in the UI.
+/// No file is ever changed merely by generating this preview.
+struct SaveIntent {
+    key:(usize,usize),
+    timestamp:u32,
+    candidate:NativeRegionCandidate,
+}
+fn parse_region_name(name:&str)->Result<(i32,i32,&str),String>{
+    let mut parts=name.trim().split('.');
+    if parts.next()!=Some("r"){return Err("Use r.X.Z.mca or r.X.Z.mcr".into());}
+    let rx=parts.next().ok_or("Missing Region X")?.parse::<i32>()
+        .map_err(|_|"Region X must be a signed integer")?;
+    let rz=parts.next().ok_or("Missing Region Z")?.parse::<i32>()
+        .map_err(|_|"Region Z must be a signed integer")?;
+    let ext=parts.next().ok_or("Missing Region extension")?;
+    if !matches!(ext,"mca"|"mcr")||parts.next().is_some(){
+        return Err("Only original r.X.Z.mca or r.X.Z.mcr filenames are accepted".into());
+    }
+    Ok((rx,rz,ext))
+}
 #[derive(Default)]
 struct App{
     path:String,
@@ -24,6 +46,10 @@ struct App{
     clone_destination:String,
     fill_seed:String,
     patch_path:String,
+    save_phrase:String,
+    recover_region:String,
+    recovery_phrase:String,
+    save_preview:Option<SaveIntent>,
     edit_report:String,
     sessions:BTreeMap<(usize,usize),Session>,
     prepared:Option<(usize,usize,Preview)>,
@@ -38,9 +64,157 @@ enum Message{
     CloneDestination(String), PreviewClone,
     FillSeed(String), PreviewFill,
     PatchPath(String),ExportPatch,ImportPatch,AnalyzeNativePatch,AnalyzeRegionPlan,
+    PrepareWorldSave,SavePhrase(String),ConfirmWorldSave,
+    RecoverRegion(String),RecoveryPhrase(String),FinalizeRegion,RollbackRegion,
     PreviewEdit,ApplyEdit,UndoEdit,RedoEdit,DiscardEdits,Clear
 }
 impl App{
+    fn clear_cached_world(&mut self, root:&std::path::Path) {
+        self.prepared=None;
+        self.save_preview=None;
+        self.save_phrase.clear();
+        self.sessions.retain(|(world_index,_),_|
+            self.worlds.get(*world_index)
+                .is_some_and(|world|world.root!=root)
+        );
+        self.block_result.clear();
+        self.slice_result.clear();
+    }
+    fn current_world_context(&self)->Result<(usize,usize,WorldSummary,String),String>{
+        let (wi,di)=self.current_key().ok_or("Select an original world and dimension")?;
+        let world=self.worlds.get(wi).ok_or("Selected world disappeared")?.clone();
+        let dimension=world.dimensions.get(di)
+            .ok_or("Selected dimension disappeared")?.name.clone();
+        Ok((wi,di,world,dimension))
+    }
+    fn prepare_save(&mut self){
+        self.save_preview=None;
+        self.save_phrase.clear();
+        self.prepared=None;
+        if self.readonly {
+            self.edit_report="-view forbids writing Minecraft world files.".into();
+            return;
+        }
+        let result=(||->Result<(SaveIntent,String),String>{
+            let (wi,di,world,_)=self.current_world_context()?;
+            if self.sessions.iter().any(|((index,_),session)|
+                self.worlds.get(*index).is_some_and(|other|
+                    other.root==world.root) && *index!=wi && session.has_pending_changes()
+            ){
+                return Err("Another window entry for this world has staged edits; close/discard duplicates before saving".into());
+            }
+            if self.sessions.iter().any(|((index,d),session)|
+                self.worlds.get(*index).is_some_and(|other|
+                    other.root==world.root) && (*index,*d)!=(wi,di)
+                    && session.has_pending_changes()
+            ){
+                return Err("Another dimension has pending edits; export a journal first".into());
+            }
+            let now=SystemTime::now().duration_since(UNIX_EPOCH)
+                .map_err(|_|"System time precedes UNIX epoch")?;
+            let timestamp=u32::try_from(now.as_secs())
+                .map_err(|_|"System clock cannot be stored in a Region timestamp")?;
+            let mut plans=self.current_session((wi,di))?
+                .prepare_native_region_candidates(timestamp)
+                .map_err(|e|e.to_string())?;
+            if plans.len()!=1 {
+                return Err("Saving edits in more than ONE region is refused; export a journal or split edits".into());
+            }
+            let candidate=plans.pop().ok_or("No Region candidate")?;
+            let label=format!(
+                "CHECK ORIGINAL REGION: {}. {} edited chunk(s); {} original bytes -> {} proposed bytes. This WILL REPLACE the named Region FILE after immutable backup. Close Minecraft and other editors. Type SAVE to confirm. No files have been changed.",
+                candidate.path.display(),candidate.modified_chunks,
+                candidate.original_bytes,candidate.planned_bytes,
+            );
+            Ok((SaveIntent{key:(wi,di),timestamp,candidate},label))
+        })();
+        match result {
+            Ok((intent,label))=>{self.save_preview=Some(intent);self.edit_report=label;},
+            Err(e)=>self.edit_report=format!("Disk save preflight refused: {e}"),
+        }
+    }
+    fn confirm_save(&mut self) {
+        if self.readonly || self.save_phrase!="SAVE"{
+            self.edit_report="Saving requires explicit SAVE confirmation and non-read-only mode.".into();
+            return;
+        }
+        let Some(intent)=self.save_preview.take() else {
+            self.edit_report="Prepare a fresh one-Region save preview first.".into();
+            return;
+        };
+        self.save_phrase.clear();
+        if self.current_key()!=Some(intent.key){
+            self.edit_report="Selected world changed since save preview. Refused.".into();
+            return;
+        }
+        let result=(||->Result<_,String>{
+            let (wi,di,world,dimension)=self.current_world_context()?;
+            let current=self.current_session((wi,di))?
+                .prepare_native_region_candidates(intent.timestamp)
+                .map_err(|e|e.to_string())?;
+            if current.len()!=1
+                || current[0].path!=intent.candidate.path
+                || current[0].original_region_sha256!=intent.candidate.original_region_sha256
+                || current[0].image!=intent.candidate.image {
+                return Err("World or staged blocks changed since preview; generate a new preview".into());
+            }
+            // No arbitrary image is accepted: the transaction independently
+            // verifies exact NBT block-only replay, original sector bytes,
+            // source world root, original file hash and backup state.
+            let receipt=apply_single_region(&world,&dimension,&intent.candidate)
+                .map_err(|e|e.to_string())?;
+            Ok((world.root,receipt))
+        })();
+        match result {
+            Ok((root,receipt))=>{
+                self.clear_cached_world(&root);
+                self.edit_report=format!(
+                    "Single Region atomically replaced: {}. ORIGINAL backup: {}. PENDING recovery marker: {}. The write is NOT finalized. Enter the Region name below and FINALIZE or ROLLBACK. Do not open Minecraft until resolved.",
+                    receipt.region_path.display(),receipt.backup_path.display(),
+                    receipt.marker_path.display());
+            }
+            Err(e)=>self.edit_report=format!(
+                "Disk save refused/failed: {e}. If an .mcedit2.pending.json marker exists, resolve it with the recovery controls BEFORE further edits."),
+        }
+    }
+    fn recover_region(&mut self,rollback:bool){
+        self.save_preview=None;
+        self.save_phrase.clear();
+        self.prepared=None;
+        let confirmation=if rollback{"ROLLBACK"}else{"FINALIZE"};
+        if self.readonly || self.recovery_phrase!=confirmation {
+            self.edit_report=format!("Enter {confirmation} exactly; -view forbids recovery writes.");
+            return;
+        }
+        let result=(||->Result<_,String>{
+            let (_,_,world,dimension)=self.current_world_context()?;
+            if self.sessions.iter().any(|((index,_),session)|
+                self.worlds.get(*index).is_some_and(|other|
+                    other.root==world.root) && session.has_pending_changes()
+            ){
+                return Err("World has staged edits; export/discard them before resolving a disk transaction".into());
+            }
+            let (rx,rz,ext)=parse_region_name(&self.recover_region)?;
+            let receipt=if rollback{
+                rollback_pending_region(&world,&dimension,rx,rz,ext)
+            }else{
+                finalize_single_region(&world,&dimension,rx,rz,ext)
+            }.map_err(|e|e.to_string())?;
+            Ok((world.root,receipt))
+        })();
+        self.recovery_phrase.clear();
+        match result {
+            Ok((root,receipt))=>{
+                self.clear_cached_world(&root);
+                self.edit_report=format!(
+                    "{}: {}. Immutable original backup retained: {}. Transaction record: {}",
+                    if rollback{"RESTORED ORIGINAL"}else{"FINALIZED WRITE"},
+                    receipt.region_path.display(),receipt.backup_path.display(),
+                    receipt.marker_path.display());
+            },
+            Err(e)=>self.edit_report=format!("Transaction resolution refused: {e}"),
+        }
+    }
     fn boot(args:launch::Arguments)->Self{
         let mut app=App{
             debug:args.debug,log:args.log,verbosity:args.verbosity,
@@ -82,6 +256,7 @@ impl App{
         self.sessions.get_mut(&key).ok_or_else(||"Missing editor session".into())
     }
     fn prepare_batch(&mut self){
+        self.save_preview=None;
         self.prepared=None;
         let Some(key)=self.current_key() else {
             self.edit_report="Open a Java world and select a dimension first.".into();return;
@@ -103,6 +278,7 @@ impl App{
         }
     }
     fn prepare_clone(&mut self){
+        self.save_preview=None;
         self.prepared=None;
         let Some(key)=self.current_key() else {
             self.edit_report="Open a Java world and select a dimension first.".into();return;
@@ -122,6 +298,7 @@ impl App{
         }
     }
     fn prepare_fill(&mut self){
+        self.save_preview=None;
         self.prepared=None;
         let Some(key)=self.current_key() else {
             self.edit_report="Open an original Java world first.".into();return;
@@ -142,6 +319,7 @@ impl App{
         }
     }
     fn apply_batch(&mut self){
+        self.save_preview=None;
         if self.readonly {
             self.edit_report="-view disallows editor changes, including the in-memory overlay.".into();
             return;
@@ -163,6 +341,7 @@ impl App{
         };
     }
     fn history(&mut self, redo:bool){
+        self.save_preview=None;
         self.prepared=None;
         let Some(key)=self.current_key() else{return};
         let result=self.current_session(key).and_then(|editor|{
@@ -180,7 +359,15 @@ impl App{
 fn update(app:&mut App,message:Message){
     match message{
         Message::Path(x)=>app.path=x,
+        Message::SavePhrase(value)=>app.save_phrase=value,
+        Message::RecoverRegion(value)=>app.recover_region=value,
+        Message::RecoveryPhrase(value)=>app.recovery_phrase=value,
+        Message::PrepareWorldSave=>app.prepare_save(),
+        Message::ConfirmWorldSave=>app.confirm_save(),
+        Message::FinalizeRegion=>app.recover_region(false),
+        Message::RollbackRegion=>app.recover_region(true),
         Message::Open=>{
+            app.save_preview=None;
             if app.path.trim().is_empty(){
                 app.messages.push("Enter a Java world folder or level.dat path".into());
             } else {
@@ -198,6 +385,7 @@ fn update(app:&mut App,message:Message){
             }
         }
         Message::Select(index)=>{
+            app.save_preview=None;
             if index<app.worlds.len(){
                 app.current=Some(index);
                 app.dimension_index=0;
@@ -208,6 +396,7 @@ fn update(app:&mut App,message:Message){
         }
         Message::Coordinates(value)=>app.query_coordinates=value,
         Message::Dimension(index)=>{
+            app.save_preview=None;
             if app.current.and_then(|i|app.worlds.get(i))
                 .is_some_and(|w|index<w.dimensions.len()){
                 app.dimension_index=index;
@@ -255,9 +444,15 @@ fn update(app:&mut App,message:Message){
                 }
             };
         },
-        Message::SelectionText(value)=>{app.edit_area=value;app.prepared=None;}
-        Message::TargetText(value)=>{app.edit_target=value;app.prepared=None;}
-        Message::FilterText(value)=>{app.edit_filter=value;app.prepared=None;}
+        Message::SelectionText(value)=>{
+            app.edit_area=value;app.prepared=None;app.save_preview=None;app.save_phrase.clear();
+        }
+        Message::TargetText(value)=>{
+            app.edit_target=value;app.prepared=None;app.save_preview=None;app.save_phrase.clear();
+        }
+        Message::FilterText(value)=>{
+            app.edit_filter=value;app.prepared=None;app.save_preview=None;app.save_phrase.clear();
+        }
         Message::AnalyzeRegionPlan=>{
             let timestamp=SystemTime::now().duration_since(UNIX_EPOCH)
                 .ok().and_then(|d|u32::try_from(d.as_secs()).ok());
@@ -300,6 +495,7 @@ fn update(app:&mut App,message:Message){
             };
         },
         Message::ImportPatch=>{
+            app.save_preview=None;
             app.prepared=None;
             if app.readonly {
                 app.edit_report="-view prohibits importing staged edits.".into();
@@ -315,15 +511,20 @@ fn update(app:&mut App,message:Message){
                 };
             }
         },
-        Message::FillSeed(value)=>{app.fill_seed=value;app.prepared=None;}
+        Message::FillSeed(value)=>{
+            app.fill_seed=value;app.prepared=None;app.save_preview=None;app.save_phrase.clear();
+        }
         Message::PreviewFill=>app.prepare_fill(),
-        Message::CloneDestination(value)=>{app.clone_destination=value;app.prepared=None;}
+        Message::CloneDestination(value)=>{
+            app.clone_destination=value;app.prepared=None;app.save_preview=None;app.save_phrase.clear();
+        }
         Message::PreviewClone=>app.prepare_clone(),
         Message::PreviewEdit=>app.prepare_batch(),
         Message::ApplyEdit=>app.apply_batch(),
         Message::UndoEdit=>app.history(false),
         Message::RedoEdit=>app.history(true),
         Message::DiscardEdits=>{
+            app.save_preview=None;
             app.prepared=None;
             if let Some(key)=app.current_key(){
                 if let Some(editor)=app.sessions.get_mut(&key){
@@ -333,6 +534,9 @@ fn update(app:&mut App,message:Message){
             app.edit_report="Discarded all staged edits for this world/dimension; original disk untouched.".into();
         }
         Message::Clear=>{
+            app.save_preview=None;
+            app.recovery_phrase.clear();
+            app.save_phrase.clear();
             app.path.clear();app.worlds.clear();
             app.sessions.clear();app.prepared=None;app.edit_report.clear();
             app.current=None;app.dimension_index=0;
@@ -353,7 +557,7 @@ fn view(app:&App)->Element<'_,Message>{
         text("MCEdit2 — Rust + iced").size(26),
         text("Original Java, Anvil, MCRegion, modern and snapshot world inspection"),
         controls,
-        text("Current milestone: original world files READ ONLY; edit previews and Undo/Redo are IN MEMORY.")
+        text("Edits are staged IN MEMORY. Experimental, manually confirmed single-Region saves require immutable backups and unresolved transactions must be finalized or rolled back.")
     ].spacing(14);
     if app.debug||app.log||app.verbosity>0||app.readonly{
         body=body.push(text(format!(
@@ -450,6 +654,43 @@ fn view(app:&App)->Element<'_,Message>{
                 button("Import verified journal")
             }
         ].spacing(8));
+        if !app.readonly {
+            body=body.push(text("EXPERIMENTAL SINGLE-REGION DISK SAVE — make a separate world copy first. Minecraft must be closed.").size(16));
+            body=body.push(button("Prepare one-Region disk-save preview")
+                .on_press(Message::PrepareWorldSave));
+            if let Some(intent)=app.save_preview.as_ref() {
+                body=body.push(text(format!(
+                    "Source: {} | edited chunks: {} | {} -> {} bytes | original SHA-256 {}",
+                    intent.candidate.path.display(),intent.candidate.modified_chunks,
+                    intent.candidate.original_bytes,intent.candidate.planned_bytes,
+                    intent.candidate.original_region_sha256,
+                )));
+                body=body.push(row![
+                    text_input("Type SAVE to write a verified single Region",&app.save_phrase)
+                        .on_input(Message::SavePhrase).width(Length::Fill),
+                    if app.save_phrase=="SAVE" {
+                        button("Replace Region and keep backup").on_press(Message::ConfirmWorldSave)
+                    }else{
+                        button("Replace Region and keep backup")
+                    }
+                ].spacing(8));
+            }
+            body=body.push(text("Transaction recovery: for a pending Region, enter its exact filename (e.g. r.-1.0.mca) and type FINALIZE or ROLLBACK. Backups are retained."));
+            body=body.push(row![
+                text_input("Pending r.X.Z.mca or r.X.Z.mcr",&app.recover_region)
+                    .on_input(Message::RecoverRegion).width(Length::Fill),
+                text_input("FINALIZE or ROLLBACK",&app.recovery_phrase)
+                    .on_input(Message::RecoveryPhrase).width(Length::Fill),
+            ].spacing(8));
+            body=body.push(row![
+                if app.recovery_phrase=="FINALIZE" {
+                    button("Finalize verified Region").on_press(Message::FinalizeRegion)
+                }else{button("Finalize verified Region")},
+                if app.recovery_phrase=="ROLLBACK" {
+                    button("Restore original Region").on_press(Message::RollbackRegion)
+                }else{button("Restore original Region")}
+            ].spacing(8));
+        }
         let stats=app.current_key().and_then(|key|app.sessions.get(&key));
         if let Some(session)=stats{
             body=body.push(text(format!(
@@ -483,4 +724,19 @@ fn main()->iced::Result{
     }
     iced::application(move||App::boot(args.clone()),update,view)
         .title("MCEdit2 — Rust + iced").theme(Theme::Dark).run()
+}
+
+#[cfg(test)]
+mod tests{
+    use super::parse_region_name;
+    #[test]
+    fn original_region_name_parser_accepts_signed_coords_and_refuses_extra_paths(){
+        assert_eq!(parse_region_name("r.-1.2.mca").unwrap(),(-1,2,"mca"));
+        assert_eq!(parse_region_name("r.0.-9.mcr").unwrap(),(0,-9,"mcr"));
+        for value in ["../r.0.0.mca","r.0.0.mca.tmp","r.a.0.mca",
+            "r.0.0.mcc","r.0.0.mca/evil","r.0.0.mca\\other","r.0.0",
+            "r.2147483648.0.mca"]{
+            assert!(parse_region_name(value).is_err(),"{value}");
+        }
+    }
 }

@@ -638,11 +638,14 @@ fn native_nbt_preview_grows_palette_and_edits_legacy_numeric_without_mutations()
     let legacy=NativeWorld::create(false);
     let mut old=Session::new(legacy.metadata(),"minecraft:overworld").unwrap();
     let b=Bounds::new((0,64,0),(0,64,0)).unwrap();
-    old.commit(old.prepare(b,&parse_state("numeric:301[data=7]").unwrap(),None).unwrap()).unwrap();
+    // MCRegion uses 8-bit numeric IDs; the positive path must use <= 255.
+    // The separate region_image_plan_rejects_unrepresentable_* regression
+    // explicitly tests that a 12-bit ID (301) is refused.
+    old.commit(old.prepare(b,&parse_state("numeric:201[data=7]").unwrap(),None).unwrap()).unwrap();
     let candidates=old.prepare_native_palette_candidates().unwrap();
     assert_eq!(candidates.len(),1);
     assert_eq!(mcedit2_world::sections::decode_sections(&candidates[0].patched_nbt)
-        .unwrap().block(0,64,0).unwrap().name,"numeric:301");
+        .unwrap().block(0,64,0).unwrap().name,"numeric:201");
     assert_eq!(legacy.bytes_now(),legacy.original_region);
 }
 

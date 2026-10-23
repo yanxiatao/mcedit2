@@ -298,3 +298,34 @@ NBT to each proposed replacement. This prevents a modified candidate from
 rewriting unrelated modded NBT. The pending marker is now fsynced before
 the write-stage so interrupted pre-rename work is recoverable. Recovery
 archives valid abandoned stage bytes rather than deleting them.
+
+## Persistence round 5/5 — guarded iced save, manual finalization and recovery
+
+The desktop now has a strictly opt-in **single Region** disk-save preview,
+requiring the literal confirmation `SAVE`. It recomputes the full in-memory
+Region image at confirmation to reject altered edits/source data. The
+underlying transaction independently verifies its backup, unchanged original
+source SHA-256, all untouched bytes and original Block Entity protections.
+The GUI then displays the immutable original backup and pending recovery
+record, requiring explicit `FINALIZE` or `ROLLBACK` for the selected
+`r.X.Z.mca` / `r.X.Z.mcr`. The latter restores exact original bytes.
+
+Recovery is also accessible after restarting the application when a pending
+transaction is present. Every recovery requires naming the specific Region;
+`-view` disables all on-disk mutation controls. Any successful write or
+recovery invalidates cached edit sessions for the entire world. Other open
+sessions with staged edits block potentially conflicting write/recovery.
+Alpha chunk files, external sidecars, multiple regions, concurrent Minecraft
+processes and cross-file transactional safety remain unsupported. Test only
+on disposable copies of worlds until the consolidated CI has passed and
+real-world fixtures are checked. The fifth round commit triggers the single
+planned cross-platform CI batch; all subsequent errors require remediation.
+
+## CI policy (October 2026)
+
+GitHub Actions is **compile checks and automated tests only** on Linux
+and Windows: `cargo check` and `cargo test`. It does not execute `cargo
+build`, `cargo run`, create application bundles/installers, or upload Windows
+executables. End-user builds and packaging happen only when the user runs
+them manually. Any temporary push-based test validation is removed after
+the migration regressions are resolved, leaving `workflow_dispatch` only.

@@ -174,3 +174,12 @@ present in the Rust core API. The GUI deliberately cannot save worlds.
 No claims are made for multi-region atomicity, external .mcc, Alpha
 chunk writing, fully recalculated lighting/heightmaps, or live Minecraft
 worlds. Run round-5 CI and tests before any operational use.
+
+### Round 5: guarded experimental desktop Region persistence
+
+Iced supports explicitly confirmed one-Region native disk save and manual
+pending-marker finalization/rollback. Both operations preserve immutable
+backups, and the editor refuses `-view` writes. This is experimental,
+NOT full MCEdit2 editing compatibility: it cannot write Alpha chunk files,
+external `.mcc` references, more than one Region atomically, or arbitrary
+Block Entities/entities/biomes. Testing is required before live use.

@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{Read,Write};
-use std::path::{Path,PathBuf};
+use std::path::PathBuf;
 use flate2::{Compression,read::{GzDecoder,ZlibDecoder},write::{GzEncoder,ZlibEncoder}};
 use sha2::{Digest,Sha256};
 use crate::editing::NativeChunkCandidate;
@@ -440,7 +440,7 @@ mod tests {
         sections.extend(compound(vec![
             tag(1,"Y",&[0]),
             tag(10,"block_states",&compound(vec![tag(9,"palette",&palette)])),
-            tag(8,"OpaqueModdedTag",&strdata("leave this original"));
+            tag(8,"OpaqueModdedTag",&strdata("leave this original")),
         ]));
         tag(10,"",&compound(vec![
             tag(3,"xPos",&cx.to_be_bytes()),tag(3,"zPos",&0i32.to_be_bytes()),
