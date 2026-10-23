@@ -20,12 +20,14 @@ from mcedit2_next.structure_be import (
 from mcedit2_next.structure_io import Structure, StructureError, decode_structure
 from test_legacy_be_transfer import DST, SRC, original_world
 
+AIR_DST = (2, 0, 0)  # Native numeric air in the existing right-hand chunk
+
 
 class LegacyStructureTransferTests(unittest.TestCase):
     def test_opaque_numeric_mod_be_roundtrip_undo_after_save(self):
         with tempfile.TemporaryDirectory() as folder:
             world, files = original_world(folder)
-            source, target = world.get_cell(*SRC), world.get_cell(*DST)
+            source, target = world.get_cell(*SRC), world.get_cell(*AIR_DST)
             self.assertEqual(legacy_anvil.id_meta(source.block), (511, 13))
             self.assertEqual(legacy_anvil.id_meta(target.block), (0, 0))
             original_regions = {f: f.read_bytes() for f in files}
@@ -38,29 +40,29 @@ class LegacyStructureTransferTests(unittest.TestCase):
             save_be_transfer(path, transfer)
             self.assertEqual(load_be_transfer(path), transfer)
             session = EditSession(world)
-            self.assertEqual(place_be_transfer(session, transfer, DST), 1)
-            relocated = relocate_payload(source.block_entity, SRC, DST)
-            self.assertEqual(world.get_block_entity_raw(*DST), relocated)
+            self.assertEqual(place_be_transfer(session, transfer, AIR_DST), 1)
+            relocated = relocate_payload(source.block_entity, SRC, AIR_DST)
+            self.assertEqual(world.get_block_entity_raw(*AIR_DST), relocated)
             self.assertEqual(world.get_cell(*SRC), source)
             self.assertEqual(len(session.undo_stack), 1)
             self.assertEqual({f: f.read_bytes() for f in files}, original_regions)
             self.assertTrue(session.undo())
-            self.assertEqual(world.get_cell(*DST), target)
+            self.assertEqual(world.get_cell(*AIR_DST), target)
             self.assertTrue(session.redo())
             session.save()
             self.assertEqual(
                 (world.last_backup / "region/r.0.0.mca").read_bytes(),
                 original_regions[files[1]])
             reopened = NativeAnvilWorld(folder)
-            self.assertEqual(reopened.get_block_entity_raw(*DST), relocated)
-            self.assertEqual(legacy_anvil.id_meta(reopened.get_block(*DST)),
+            self.assertEqual(reopened.get_block_entity_raw(*AIR_DST), relocated)
+            self.assertEqual(legacy_anvil.id_meta(reopened.get_block(*AIR_DST)),
                              (511, 13))
             reopened.close()
             self.assertTrue(session.undo())
             session.save()
             reopened = NativeAnvilWorld(folder)
             self.assertEqual(reopened.get_cell(*SRC), source)
-            self.assertEqual(reopened.get_cell(*DST), target)
+            self.assertEqual(reopened.get_cell(*AIR_DST), target)
             reopened.close()
             world.close()
 
@@ -77,10 +79,10 @@ class LegacyStructureTransferTests(unittest.TestCase):
                     with self.assertRaisesRegex(BETransferError, "Destination"):
                         place_be_transfer(editor, transfer, DST)
                 else:
-                    world.set_block(*DST, make_block("minecraft:stone"))
+                    world.set_block(*AIR_DST, make_block("minecraft:stone"))
                     previous = dict(world._edits)
                     with self.assertRaisesRegex(BETransferError, "original numeric air"):
-                        place_be_transfer(editor, transfer, DST)
+                        place_be_transfer(editor, transfer, AIR_DST)
                     self.assertEqual(world._edits, previous)
                 self.assertFalse(editor.undo_stack)
                 self.assertFalse(world._be_edits)
