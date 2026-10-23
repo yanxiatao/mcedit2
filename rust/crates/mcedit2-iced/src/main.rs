@@ -101,7 +101,7 @@ struct App{
 #[derive(Debug,Clone)]
 enum Message{
     Path(String),Open,Select(usize),Coordinates(String),Dimension(usize),
-    SurfaceArea(String),InspectSurface,PickSurface(i32,i32,i32),RotateSurface,
+    SurfaceArea(String),InspectSurface,InspectVolume,PickSurface(i32,i32,i32),RotateSurface,
     BeScalarField(String),BeScalarValue(String),PreviewBeScalar,
     BeSnapshotPath(String),ExportOriginalBe,VerifyOriginalBe,
     PluginManifestPath(String),PreviewPlugin,
@@ -120,7 +120,7 @@ enum Message{
     PreviewEdit,ApplyEdit,UndoEdit,RedoEdit,DiscardEdits,Clear
 }
 impl App{
-    fn inspect_surface(&mut self){
+    fn inspect_surface(&mut self,exposed_volume:bool){
         self.surface=None;
         self.surface_report=match self.current_key(){
             None=>"Select a Java world first.".into(),
@@ -133,14 +133,21 @@ impl App{
                         "Original 3D surface footprint must fit 16x16.".into()
                     }else{
                         match self.current_session(key).and_then(|session|
-                            session.inspect_surface(
-                                bounds.minimum[0],bounds.minimum[2],
-                                bounds.minimum[1],bounds.maximum[1],
-                                w as u8,depth as u8
-                            ).map_err(|e|e.to_string())){
+                            (if exposed_volume{
+                                session.inspect_exposed_volume(
+                                    bounds.minimum[0],bounds.minimum[2],
+                                    bounds.minimum[1],bounds.maximum[1],
+                                    w as u8,depth as u8)
+                            }else{
+                                session.inspect_surface(
+                                    bounds.minimum[0],bounds.minimum[2],
+                                    bounds.minimum[1],bounds.maximum[1],
+                                    w as u8,depth as u8)
+                            }).map_err(|e|e.to_string())){
                             Ok(result)=>{
                                 let message=format!(
-                                    "3D voxel surface: {} visible columns, {} missing source columns across {} chunks. Click a polygon to inspect/select its exact XYZ. @BlockEntities are preserved.",
+                                    "3D {}: {} visible voxels, {} missing source columns across {} chunks. Click top/side faces for exact XYZ; cropped boundary faces are viewport cuts, not inferred air.",
+                                    if exposed_volume{"exposed multilayer volume"}else{"highest-column surface"},
                                     result.voxels.len(),result.missing_columns,result.source_chunks
                                 );
                                 self.surface=Some((key.0,key.1,result));
@@ -616,7 +623,8 @@ fn update(app:&mut App,message:Message){
     match message{
         Message::Path(x)=>app.path=x,
         Message::SurfaceArea(value)=>{app.surface_area=value;app.surface=None;},
-        Message::InspectSurface=>app.inspect_surface(),
+        Message::InspectSurface=>app.inspect_surface(false),
+        Message::InspectVolume=>app.inspect_surface(true),
         Message::PickSurface(x,y,z)=>app.pick_surface(x,y,z),
         Message::RotateSurface=>app.surface_camera=(app.surface_camera+1)%4,
         Message::ClipboardPath(value)=>app.clipboard_path=value,
@@ -1096,7 +1104,8 @@ fn view(app:&App)->Element<'_,Message>{
         body=body.push(row![
             text_input("3D voxel surface X1,Y1,Z1;X2,Y2,Z2 (16x16x32 max)",
                 &app.surface_area).on_input(Message::SurfaceArea).width(Length::Fill),
-            button("Inspect original 3D voxels").on_press(Message::InspectSurface)
+            button("Top-surface 3D").on_press(Message::InspectSurface),
+            button("Exposed multi-layer 3D").on_press(Message::InspectVolume)
         ].spacing(8));
         if let Some((wi,di,view))=&app.surface{
             if app.current_key()==Some((*wi,*di)){

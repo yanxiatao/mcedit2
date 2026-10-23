@@ -9,11 +9,20 @@ use crate::sections::{Chunk,State};
 use crate::{WorldError,WorldSummary};
 
 fn refuse(s:impl Into<String>)->WorldError{WorldError::Invalid(s.into())}
+pub const FACE_TOP:u8=1;
+pub const FACE_BOTTOM:u8=2;
+pub const FACE_POS_X:u8=4;
+pub const FACE_NEG_X:u8=8;
+pub const FACE_POS_Z:u8=16;
+pub const FACE_NEG_Z:u8=32;
+pub const ALL_FACES:u8=63;
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub struct SurfaceVoxel {
     pub x:i32,pub y:i32,pub z:i32,
     pub state:State,
     pub original_block_entity:bool,
+    /// Original exposed voxel faces; missing source cells are unknown.
+    pub faces:u8,
 }
 #[derive(Debug,Clone)]
 pub struct SurfaceView {
@@ -73,6 +82,7 @@ pub fn inspect_surface(
                 let voxel=SurfaceVoxel{
                     x:wx,y,z:wz,state,
                     original_block_entity:chunk.has_block_entity(wx,y,wz),
+                    faces:ALL_FACES,
                 };
                 if fallback.is_none(){fallback=Some(voxel.clone());}
                 if !is_air(&voxel.state){
@@ -89,6 +99,79 @@ pub fn inspect_surface(
         source_chunks:cache.len(),
     })
 }
+
+/// Bounded multilevel voxel inspection: show exposed real solids including
+/// internal cavities, never inventing air for absent chunks/Sections.
+pub fn inspect_exposed_volume(
+    session:&Session,x:i32,z:i32,y_min:i32,y_max:i32,width:u8,depth:u8
+)->Result<SurfaceView,WorldError>{
+    if !(1..=16).contains(&width)||!(1..=16).contains(&depth)
+        ||y_min>y_max||y_max as i64-y_min as i64>=32{
+        return Err(refuse("3D volume exceeds 16x16x32"));
+    }
+    let max_x=x.checked_add(width as i32-1).ok_or_else(||refuse("Volume X overflow"))?;
+    let max_z=z.checked_add(depth as i32-1).ok_or_else(||refuse("Volume Z overflow"))?;
+    let _=crate::editing::Bounds::new((x,y_min,z),(x,y_min,z))?;
+    let _=crate::editing::Bounds::new((max_x,y_max,max_z),(max_x,y_max,max_z))?;
+    let mut chunks:BTreeMap<(i32,i32),Option<Chunk>>=BTreeMap::new();
+    let mut known:BTreeMap<(i32,i32,i32),bool>=BTreeMap::new();
+    let mut solids=Vec::new();
+    let mut missing_columns=0;
+    for dz in 0..depth as i32{
+        for dx in 0..width as i32{
+            let (wx,wz)=(x+dx,z+dz);
+            let key=(wx.div_euclid(16),wz.div_euclid(16));
+            if !chunks.contains_key(&key){
+                chunks.insert(key,read_world_chunk(
+                    session.original_world(),session.dimension(),key.0,key.1
+                )?);
+            }
+            let Some(chunk)=chunks.get(&key).and_then(Option::as_ref) else{
+                missing_columns+=1;continue;
+            };
+            let mut column_known=false;
+            for y in y_min..=y_max{
+                let Some(original)=chunk.block(
+                    wx.rem_euclid(16) as u8,y,wz.rem_euclid(16) as u8
+                )else{continue};
+                column_known=true;
+                let state=session.effective_state((wx,y,wz),original);
+                let solid=!is_air(&state);
+                known.insert((wx,y,wz),solid);
+                if solid{
+                    solids.push(SurfaceVoxel{
+                        x:wx,y,z:wz,state,
+                        original_block_entity:chunk.has_block_entity(wx,y,wz),
+                        faces:0,
+                    });
+                }
+            }
+            if !column_known{missing_columns+=1;}
+        }
+    }
+    const SIDES:[(i32,i32,i32,u8);6]=[
+        (0,1,0,FACE_TOP),(0,-1,0,FACE_BOTTOM),
+        (1,0,0,FACE_POS_X),(-1,0,0,FACE_NEG_X),
+        (0,0,1,FACE_POS_Z),(0,0,-1,FACE_NEG_Z),
+    ];
+    let mut voxels=Vec::new();
+    for mut voxel in solids{
+        for (dx,dy,dz,bit) in SIDES{
+            let (nx,ny,nz)=(voxel.x+dx,voxel.y+dy,voxel.z+dz);
+            let clipped=nx<x||nx>max_x||nz<z||nz>max_z
+                ||ny<y_min||ny>y_max;
+            if clipped||matches!(known.get(&(nx,ny,nz)),Some(false)){
+                voxel.faces|=bit;
+            }
+        }
+        if voxel.faces!=0{voxels.push(voxel);}
+    }
+    Ok(SurfaceView{
+        x,z,y_min,y_max,width,depth,voxels,missing_columns,
+        source_chunks:chunks.len(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

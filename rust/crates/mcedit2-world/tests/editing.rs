@@ -1107,3 +1107,30 @@ fn declarative_plugin_preview_uses_original_chunk_safety_and_a_single_undo(){
     assert_eq!(world.bytes_now(),before);
     fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn native_multilayer_original_exposed_volume_culls_hidden_blocks_and_shows_real_cavities(){
+    use mcedit2_world::surface::{FACE_TOP,FACE_POS_X,FACE_NEG_X};
+    let world=NativeWorld::create(true);
+    let original=world.bytes_now();
+    let mut session=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    let solid=session.inspect_exposed_volume(0,0,-64,-62,3,3).unwrap();
+    assert_eq!(solid.voxels.len(),26);
+    assert!(!solid.voxels.iter().any(|v|(v.x,v.y,v.z)==(1,-63,1)));
+    let hollow=Bounds::new((1,-63,1),(1,-63,1)).unwrap();
+    let change=session.prepare(hollow,&parse_state("minecraft:air").unwrap(),None).unwrap();
+    session.commit(change).unwrap();
+    let exposed=session.inspect_exposed_volume(0,0,-64,-62,3,3).unwrap();
+    assert_eq!(exposed.voxels.len(),26);
+    assert!(exposed.voxels.iter().any(|v|
+        (v.x,v.y,v.z)==(1,-64,1)&&v.faces&FACE_TOP!=0
+    ));
+    assert!(exposed.voxels.iter().any(|v|
+        (v.x,v.y,v.z)==(0,-63,1)&&v.faces&FACE_POS_X!=0
+    ));
+    assert!(exposed.voxels.iter().any(|v|
+        (v.x,v.y,v.z)==(2,-63,1)&&v.faces&FACE_NEG_X!=0
+    ));
+    assert!(session.inspect_exposed_volume(0,0,-64,-32,3,3).is_err());
+    assert_eq!(world.bytes_now(),original);
+}

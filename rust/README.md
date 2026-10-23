@@ -521,3 +521,18 @@ a plain `String` as button content. The voxel inspector now reuses the
 already decoded source chunk and overlays staged effective block states
 without re-decompressing NBT for every cell. The isometric Y projection is
 anchored to the top Y level so visible high blocks are on-screen.
+
+## Five-batch migration cycle — Batch 1: multi-layer voxel view
+
+The editor now reads the actual bounded 16x16x32-or-smaller Java volume,
+uses original known air/solid cells and renders all visible top/side faces,
+including exposed underground cavities. Completely surrounded voxels are
+culled. Missing chunks/Sections are UNKNOWN, never synthesized as air.
+Boundary faces indicate selected viewport clipping, not world adjacency.
+The iced isometric canvas has separate highest-column and exposed-volume
+buttons; top and side polygons select the original exact XYZ. This remains
+an untextured bounded view, not a GPU mesh renderer.
+
+Scheduling correction: only run one compile/test-only CI after FIVE FULL
+migration batches. This is batch ONE of the new cycle, not five subrounds.
+No CI/build/package is triggered by this source-only commit.

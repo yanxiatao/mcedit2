@@ -363,6 +363,12 @@ impl Session {
     )->Result<crate::surface::SurfaceView,WorldError>{
         crate::surface::inspect_surface(self,x,z,y_min,y_max,width,depth)
     }
+    pub fn inspect_exposed_volume(
+        &self,x:i32,z:i32,y_min:i32,y_max:i32,
+        width:u8,depth:u8,
+    )->Result<crate::surface::SurfaceView,WorldError>{
+        crate::surface::inspect_exposed_volume(self,x,z,y_min,y_max,width,depth)
+    }
     pub fn visible_block(&self, position: Position) -> Result<Lookup, WorldError> {
         if let Some(state) = self.overlay.get(&position) {
             return Ok(Lookup::Present(crate::block_lookup::BlockDetails {

@@ -3,7 +3,7 @@
 //! every pick uses exact original XYZ and the existing editing safety checks.
 use iced::{Color,Point,Rectangle,Renderer,Theme,mouse};
 use iced::widget::canvas::{self,Path,Frame};
-use mcedit2_world::surface::{SurfaceView,SurfaceVoxel};
+use mcedit2_world::surface::{SurfaceView,SurfaceVoxel,FACE_TOP,FACE_POS_X,FACE_NEG_X,FACE_POS_Z,FACE_NEG_Z};
 use crate::Message;
 
 #[derive(Debug,Clone)]
@@ -59,6 +59,22 @@ fn top_diamond(c:Point)->[Point;4]{
         Point::new(c.x-12.0,c.y-6.0),
     ]
 }
+fn visible_sides(camera:u8)->(u8,u8){
+    match camera%4{
+        0=>(FACE_POS_Z,FACE_POS_X),
+        1=>(FACE_POS_X,FACE_NEG_Z),
+        2=>(FACE_NEG_Z,FACE_NEG_X),
+        _=>(FACE_NEG_X,FACE_POS_Z),
+    }
+}
+fn left_face(top:[Point;4])->[Point;4]{
+    [top[3],top[2],Point::new(top[2].x,top[2].y+12.0),
+        Point::new(top[3].x,top[3].y+12.0)]
+}
+fn right_face(top:[Point;4])->[Point;4]{
+    [top[1],top[2],Point::new(top[2].x,top[2].y+12.0),
+        Point::new(top[1].x,top[1].y+12.0)]
+}
 fn contained(point:Point,vertices:&[Point])->bool {
     let mut count=0;
     for index in 0..vertices.len(){
@@ -76,7 +92,7 @@ impl IsometricSurface {
         entries.sort_by(|a,b|{
             let (ax,az)=rotated(a,&self.surface,self.camera_quarters);
             let (bx,bz)=rotated(b,&self.surface,self.camera_quarters);
-            (ax+az).total_cmp(&(bx+bz))
+            (ax+az).total_cmp(&(bx+bz)).then_with(||a.y.cmp(&b.y))
         });
         entries
     }
@@ -86,8 +102,11 @@ impl IsometricSurface {
             let diamond=top_diamond(center(
                 voxel,&self.surface,self.camera_quarters,size
             ));
-            if contained(point,&diamond){Some((voxel.x,voxel.y,voxel.z))}
-            else{None}
+            let (left,right)=visible_sides(self.camera_quarters);
+            let hit=voxel.faces&FACE_TOP!=0&&contained(point,&diamond)
+                ||voxel.faces&left!=0&&contained(point,&left_face(diamond))
+                ||voxel.faces&right!=0&&contained(point,&right_face(diamond));
+            if hit{Some((voxel.x,voxel.y,voxel.z))}else{None}
         })
     }
 }
@@ -100,18 +119,14 @@ impl canvas::Program<Message> for IsometricSurface {
             let center=center(voxel,&self.surface,self.camera_quarters,bounds.size());
             let top=top_diamond(center);
             let shade=color(voxel);
-            let down=Point::new(0.0,12.0);
-            polygon(&mut frame,&[
-                top[3],top[2],
-                Point::new(top[2].x+down.x,top[2].y+down.y),
-                Point::new(top[3].x+down.x,top[3].y+down.y),
-            ],tint(shade,0.62));
-            polygon(&mut frame,&[
-                top[1],top[2],
-                Point::new(top[2].x+down.x,top[2].y+down.y),
-                Point::new(top[1].x+down.x,top[1].y+down.y),
-            ],tint(shade,0.78));
-            polygon(&mut frame,&top,shade);
+            let (left,right)=visible_sides(self.camera_quarters);
+            if voxel.faces&left!=0{
+                polygon(&mut frame,&left_face(top),tint(shade,0.62));
+            }
+            if voxel.faces&right!=0{
+                polygon(&mut frame,&right_face(top),tint(shade,0.78));
+            }
+            if voxel.faces&FACE_TOP!=0{polygon(&mut frame,&top,shade);}
         }
         vec![frame.into_geometry()]
     }
@@ -141,7 +156,7 @@ mod tests {
         let voxel=SurfaceVoxel{
             x:2,y:-63,z:3,
             state:State{name:"minecraft:stone".into(),properties:vec![]},
-            original_block_entity:false
+            original_block_entity:false,faces:FACE_TOP|FACE_POS_X|FACE_POS_Z
         };
         let view=SurfaceView{x:2,z:3,y_min:-64,y_max:-49,width:1,depth:1,
             voxels:vec![voxel.clone()],missing_columns:0,source_chunks:1};
