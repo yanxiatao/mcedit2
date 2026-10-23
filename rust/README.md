@@ -609,3 +609,13 @@ and TAG_Double, encoding IEEE 754 big-endian original NBT payload bytes and
 rejecting NaN/infinities, unchanged scalar values and malformed syntax.
 The existing exact-byte siblings, BE positions and block state verification
 still apply. Added modded machine Float/Double regression fixtures.
+
+## Round 2/5 — nested modded Compound scalar leaf editing
+
+The original byte-level BE editor now accepts slash-separated paths through
+up to eight real existing TAG_Compound ancestors (e.g.
+`ModdedCompound/Inner/BurnTime`). The leaf is changed in place, while
+siblings at every nesting level are verified with their original exact NBT
+bytes. Lists, arrays, unknown leaf types, identity or coordinate fields
+remain protected; paths never create or delete tags. Test fixtures include
+nested opaque mod data and invalid path refusals.

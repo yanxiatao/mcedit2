@@ -259,6 +259,14 @@ fn chunk_with_be(state: &str, position: (i32, i32, i32)) -> Vec<u8> {
         tag(8, "UnrecognizedPayload", &nbt_string("KEEP EXACTLY")),
         tag(5, "MachineHeat", &25.0f32.to_bits().to_be_bytes()),
         tag(6, "MachinePressure", &1234.5f64.to_bits().to_be_bytes()),
+        tag(10, "ModdedCompound", &compound(vec![
+            tag(4, "CycleCount", &123i64.to_be_bytes()),
+            tag(8, "OwnerNote", &nbt_string("OPAQUE NESTED VALUE")),
+            tag(10, "Inner", &compound(vec![
+                tag(3, "BurnTime", &14i32.to_be_bytes()),
+                tag(8, "UnknownNested", &nbt_string("keep deep sibling")),
+            ])),
+        ])),
     ]));
     let replacement = tag(9, "block_entities", &entries);
     let at = raw.windows(empty.len()).position(|part| part == empty).unwrap();
@@ -1319,4 +1327,27 @@ fn opaque_be_float_and_double_scalar_edits_preserve_all_other_modded_nbt(){
     assert!(mcedit2_world::sections::patch_original_block_entity_scalar(
         &source,(2,-64,3),"MachineHeat","25.0"
     ).is_err(),"Identical scalar values cannot produce unnecessary edits");
+}
+
+#[test]
+fn compound_path_scalar_surgery_changes_one_leaf_without_reserializing_siblings(){
+    let source=chunk_with_be("minecraft:stone",(2,-64,3));
+    let changed=mcedit2_world::sections::patch_original_block_entity_scalar(
+        &source,(2,-64,3),"ModdedCompound/Inner/BurnTime","80"
+    ).unwrap();
+    assert!(changed.windows(b"keep deep sibling".len()).any(|v|v==b"keep deep sibling"));
+    assert!(changed.windows(b"OPAQUE NESTED VALUE".len()).any(|v|v==b"OPAQUE NESTED VALUE"));
+    assert!(changed.windows(b"KEEP EXACTLY".len()).any(|v|v==b"KEEP EXACTLY"));
+    assert!(mcedit2_world::sections::patch_original_block_entity_scalar(
+        &source,(2,-64,3),"ModdedCompound/Inner/BurnTime","14"
+    ).is_err());
+    for path in [
+        "ModdedCompound/Inner/UnknownNested/more","ModdedCompound//CycleCount",
+        "ModdedCompound/id","ModdedCompound/Inner/x",
+        "ModdedCompound/NoSuchField","ModdedCompound/Inner/BurnTime/",
+    ]{
+        assert!(mcedit2_world::sections::patch_original_block_entity_scalar(
+            &source,(2,-64,3),path,"100"
+        ).is_err(),"Accepted invalid nested path {path}");
+    }
 }

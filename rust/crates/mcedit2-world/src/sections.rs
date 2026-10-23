@@ -383,14 +383,51 @@ pub fn inspect_original_block_entity(
 /// inside a single original Block Entity. This NEVER saves a world file.
 /// Unknown siblings, other entities, blocks, registry IDs and nested NBT
 /// remain exact original bytes. No deletions, additions or type changes.
+/// Every ancestor must be a real Compound in the original source. Only
+/// the final leaf is replaceable; all sibling names, kinds and raw payloads
+/// must survive byte-for-byte. Lists and arrays are deliberately opaque.
+fn verify_be_scalar_path<'a>(
+    original:&Tag<'a>,replaced:&Tag<'_>,path:&[&str],bytes:&[u8],
+)->Result<()>{
+    if original.kind!=10||replaced.kind!=10
+        ||original.fields.len()!=replaced.fields.len()||path.is_empty(){
+        return Err(error("Nested BE edit changed Compound schema"));
+    }
+    for ((name,old),(new_name,new)) in
+        original.fields.iter().zip(&replaced.fields){
+        if name!=new_name||old.kind!=new.kind{
+            return Err(error("Nested BE edit changed original field identity"));
+        }
+        if name==path[0]{
+            if path.len()==1{
+                if new.raw!=bytes{
+                    return Err(error("Targeted BE scalar bytes not found after replay"));
+                }
+            }else{
+                verify_be_scalar_path(old,new,&path[1..],bytes)?;
+            }
+        }else if old.raw!=new.raw{
+            return Err(error("Nested BE edit touched an unselected field"));
+        }
+    }
+    if original.field(path[0]).is_none(){
+        return Err(error("Nested BE path disappeared during replay"));
+    }
+    Ok(())
+}
+
 pub fn patch_original_block_entity_scalar(
     original_nbt:&[u8],position:(i32,i32,i32),field:&str,text:&str,
 )->Result<Vec<u8>>{
     if field.is_empty()||field.len()>128||text.len()>4096{
         return Err(error("Block Entity field/value exceeds preview safety budget"));
     }
-    if matches!(field,"x"|"y"|"z"|"id"|"keepPacked"){
-        return Err(error("Block Entity identity and position tags cannot be changed"));
+    let path=field.split('/').collect::<Vec<_>>();
+    if path.is_empty()||path.len()>8||path.iter().any(|segment|
+        segment.is_empty()||segment.len()>64
+        ||matches!(*segment,"x"|"y"|"z"|"id"|"keepPacked")
+    ){
+        return Err(error("Unsafe or excessively deep original BE scalar field path"));
     }
     let before=decode_sections(original_nbt)?;
     if !before.block_entities.contains(&position){
@@ -405,7 +442,12 @@ pub fn patch_original_block_entity_scalar(
         &&item.field("y").and_then(|t|t.i32().ok())==Some(position.1)
         &&item.field("z").and_then(|t|t.i32().ok())==Some(position.2)
     }).ok_or_else(||error("Original Block Entity missing from compound List"))?;
-    let old=entity.field(field).ok_or_else(||error("Field not present in original Block Entity"))?;
+    let mut parent=entity;
+    for segment in &path[..path.len()-1]{
+        parent=parent.require(segment,10)?;
+    }
+    let old=parent.field(path[path.len()-1])
+        .ok_or_else(||error("Field not present in original Block Entity"))?;
     let replacement=match old.kind{
         1=>vec![text.parse::<i8>().map_err(|_|error("Expected signed TAG_Byte"))? as u8],
         2=>text.parse::<i16>().map_err(|_|error("Expected signed TAG_Short"))?
@@ -470,14 +512,7 @@ pub fn patch_original_block_entity_scalar(
             if original.fields.len()!=updated.fields.len(){
                 return Err(error("Edited BE changed number of existing tags"));
             }
-            for ((key,old_field),(new_key,new_field)) in
-                original.fields.iter().zip(&updated.fields){
-                if key!=new_key||old_field.kind!=new_field.kind
-                    ||(key!=field&&old_field.raw!=new_field.raw)
-                    ||(key==field&&new_field.raw!=replacement){
-                    return Err(error("BE scalar preview modified an unselected field"));
-                }
-            }
+            verify_be_scalar_path(original,updated,&path,&replacement)?;
         }else if original.raw!=updated.raw{
             return Err(error("BE scalar preview touched a different original Block Entity"));
         }
