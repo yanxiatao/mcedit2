@@ -311,6 +311,23 @@ impl Session {
         }
         read_world_block(&self.world, &self.dimension, position.0, position.1, position.2)
     }
+    /// Inspect an ORIGINAL modded Block Entity, reporting exact field kinds
+    /// and a source NBT digest without rewriting any of its contents.
+    pub fn inspect_original_block_entity(
+        &self,position:Position,
+    )->Result<Option<crate::sections::OriginalBlockEntity>,WorldError>{
+        let (cx,cz)=(position.0.div_euclid(16),position.2.div_euclid(16));
+        let Some(raw)=read_world_chunk_bytes(&self.world,&self.dimension,cx,cz)? else {
+            return Ok(None);
+        };
+        let decoded=decode_sections(&raw)
+            .map_err(|e|refuse(format!("Original BE chunk invalid: {e}")))?;
+        if decoded.x.is_some_and(|x|x!=cx)||decoded.z.is_some_and(|z|z!=cz){
+            return Err(refuse("Original Block Entity chunk position mismatch"));
+        }
+        crate::sections::inspect_original_block_entity(&raw,position)
+            .map_err(|e|refuse(format!("Original Block Entity NBT invalid: {e}")))
+    }
     /// Group by original chunk; inspect each native NBT at most once.
     /// Entire preview is read-only. Missing original chunks/Sections are
     /// REFUSED: no auto-created air, chunk or legacy ID registry is assumed.

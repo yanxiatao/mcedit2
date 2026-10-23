@@ -86,7 +86,7 @@ struct App{
 #[derive(Debug,Clone)]
 enum Message{
     Path(String),Open,Select(usize),Coordinates(String),Dimension(usize),
-    InspectBlock,SliceText(String),InspectSlice,PickSlice(i32,i32,i32),MoveSlice(i32,i32,i32),
+    InspectBlock,InspectOriginalBlockEntity,SliceText(String),InspectSlice,PickSlice(i32,i32,i32),MoveSlice(i32,i32,i32),
     SelectionText(String),TargetText(String),FilterText(String),
     CloneDestination(String), PreviewClone,
     FillSeed(String), PreviewFill,
@@ -646,6 +646,20 @@ fn update(app:&mut App,message:Message){
                 }
             };
         },
+        Message::InspectOriginalBlockEntity=>{
+            let result=(||->Result<String,String>{
+                let point=parse_xyz(&app.query_coordinates).map_err(|e|e.to_string())?;
+                let key=app.current_key().ok_or("Select an original Java world")?;
+                let be=app.current_session(key)?
+                    .inspect_original_block_entity(point)
+                    .map_err(|e|e.to_string())?;
+                Ok(match be{
+                    Some(data)=>data.report(),
+                    None=>format!("No ORIGINAL Block Entity is recorded at ({},{},{}).",point.0,point.1,point.2),
+                })
+            })();
+            app.block_result=result.unwrap_or_else(|e|format!("Block Entity inspection refused: {e}"));
+        },
         Message::SliceText(value)=>{
             app.slice_area=value;
             app.slice_grid=None;
@@ -804,7 +818,8 @@ fn view(app:&App)->Element<'_,Message>{
                 .on_input(Message::Coordinates)
                 .on_submit(Message::InspectBlock)
                 .width(Length::Fill),
-            button("Inspect exact block (read-only)").on_press(Message::InspectBlock)
+            button("Inspect exact block (read-only)").on_press(Message::InspectBlock),
+            button("Inspect original BE NBT (read-only)").on_press(Message::InspectOriginalBlockEntity)
         ].spacing(12);
         body=body.push(lookup);
         if !app.block_result.is_empty(){

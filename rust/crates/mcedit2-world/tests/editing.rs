@@ -881,3 +881,21 @@ fn original_block_only_clipboard_refuses_be_wrong_dimension_and_corrupted_size()
     let newer=Session::new(fixture.metadata(),"minecraft:overworld").unwrap();
     assert!(newer.capture_clipboard(select).is_err());
 }
+
+#[test]
+fn opaque_original_block_entity_inspection_preserves_moded_fields_verbatim(){
+    let fixture=NativeWorld::create(true);
+    let chunk=chunk_with_be("minecraft:stone",(2,-64,3));
+    overwrite_region(&fixture,&chunk);
+    let original=fixture.bytes_now();
+    let editor=Session::new(fixture.metadata(),"minecraft:overworld").unwrap();
+    let value=editor.inspect_original_block_entity((2,-64,3)).unwrap().unwrap();
+    assert_eq!(value.raw_id.as_deref(),Some("mod:precious_machine"));
+    assert_eq!(value.original_compound_sha256.len(),64);
+    assert!(value.fields.iter().any(|field|
+        field.name=="UnrecognizedPayload"&&field.kind==8
+    ));
+    assert!(value.report().contains("original"));
+    assert!(editor.inspect_original_block_entity((1,-64,3)).unwrap().is_none());
+    assert_eq!(fixture.bytes_now(),original);
+}

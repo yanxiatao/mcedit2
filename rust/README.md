@@ -397,3 +397,14 @@ and the existing BE guard and Undo system handles destination edits. Sponge
 v3, full BE/entity schematic transfers, and version conversion still remain
 unimplemented. This completes the five new migration source rounds; perform
 combined Linux/Windows **check and test only** next, not application builds.
+
+## Migration batch 3, round 1/5 — read-only opaque Block Entity inspector
+
+The native core now reports an original modded Block Entity ID, SHA-256
+fingerprint, serialized compound byte length, original NBT tag types and
+bounded direct-field names/sizes. The iced editor exposes a read-only
+inspection button for a specific XYZ coordinate. This DOES NOT yet allow
+Block Entity editing, movement or copying: source and destination BE blocks
+remain protected during all existing editing operations. Malformed original
+NBT fails closed rather than yielding a misleading empty object. No build,
+packaging or GitHub Actions run occurs until five feature rounds complete.

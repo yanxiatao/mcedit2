@@ -4,6 +4,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest,Sha256};
 
 const MAX_DEPTH: u8 = 64;
 const MAX_NODES: usize = 1_000_000;
@@ -291,6 +292,90 @@ pub fn decode_sections(raw: &[u8]) -> Result<Chunk> {
         layout: if modern { Layout::Modern118 } else { Layout::Named113 },
         sections, block_entities,
     })
+}
+
+
+/// One shallow, unmodified original NBT field summary. Compound/list
+/// payloads are NOT normalized, decoded into guessed classes or rewritten.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OriginalNbtField {
+    pub name:String,
+    pub kind:u8,
+    pub payload_bytes:usize,
+    pub direct_children:usize,
+}
+/// Original opaque Java Block Entity contents available for safe inspection.
+/// No value is automatically converted to the modern registry, and full
+/// source NBT remains unchanged on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OriginalBlockEntity {
+    pub x:i32,
+    pub y:i32,
+    pub z:i32,
+    pub raw_id:Option<String>,
+    pub original_compound_sha256:String,
+    pub original_compound_bytes:usize,
+    pub original_field_count:usize,
+    pub fields:Vec<OriginalNbtField>,
+}
+impl OriginalBlockEntity {
+    pub fn report(&self)->String {
+        let id=self.raw_id.as_deref().unwrap_or("<original ID absent>");
+        let mut s=format!(
+            "Original Block Entity ({},{},{}), id={}, {} byte NBT Compound, SHA-256 {}, {} direct fields (read-only)\n",
+            self.x,self.y,self.z,id,self.original_compound_bytes,
+            self.original_compound_sha256,self.original_field_count
+        );
+        for field in &self.fields {
+            s.push_str(&format!(
+                "  {}: NBT type {}, {} payload bytes, {} immediate children\n",
+                field.name,field.kind,field.payload_bytes,field.direct_children
+            ));
+        }
+        if self.fields.len()!=self.original_field_count {
+            s.push_str("  ... further fields omitted from display, original NBT retained ...\n");
+        }
+        s
+    }
+}
+/// Inspect a single BE without cloning or rewriting its opaque raw NBT.
+/// Absence is distinguishable from malformed source (which is refused).
+pub fn inspect_original_block_entity(
+    original_nbt:&[u8],position:(i32,i32,i32)
+)->Result<Option<OriginalBlockEntity>>{
+    let chunk=decode_sections(original_nbt)?;
+    if !chunk.block_entities.contains(&position) {return Ok(None);}
+    if chunk.x.is_some_and(|cx|position.0.div_euclid(16)!=cx)
+        ||chunk.z.is_some_and(|cz|position.2.div_euclid(16)!=cz){
+        return Err(error("Original Block Entity coordinates mismatch chunk owner"));
+    }
+    let root=parse_root(original_nbt)?;
+    let modern=root.field("sections").is_some();
+    let source=if modern {&root}else{root.require("Level",10)?};
+    let list=source.require(if modern{"block_entities"}else{"TileEntities"},9)?;
+    let original=list.items.iter().find(|tag|{
+        tag.kind==10
+        &&tag.field("x").and_then(|v|v.i32().ok())==Some(position.0)
+        &&tag.field("y").and_then(|v|v.i32().ok())==Some(position.1)
+        &&tag.field("z").and_then(|v|v.i32().ok())==Some(position.2)
+    }).ok_or_else(||error("Block Entity disappeared from source NBT"))?;
+    let raw_id=original.field("id").map(|tag|tag.string()).transpose()?;
+    let original_compound_sha256=Sha256::digest(original.raw).iter()
+        .map(|byte|format!("{byte:02x}")).collect::<String>();
+    const MAX_FIELDS:usize=96;
+    let fields=original.fields.iter().take(MAX_FIELDS).map(|(name,tag)|
+        OriginalNbtField {
+            name:name.clone(),kind:tag.kind,payload_bytes:tag.raw.len(),
+            direct_children:if tag.kind==10{tag.fields.len()}
+                else if tag.kind==9{tag.items.len()}else{0},
+        }
+    ).collect();
+    Ok(Some(OriginalBlockEntity {
+        x:position.0,y:position.1,z:position.2,
+        raw_id,original_compound_sha256,
+        original_compound_bytes:original.raw.len(),
+        original_field_count:original.fields.len(),fields,
+    }))
 }
 
 /// A strict original-byte, SAME-PALETTE named-state patch candidate.
