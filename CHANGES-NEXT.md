@@ -1332,3 +1332,33 @@ available and is not automatically replaced.
   structure-placement safety is asserted.
 - **Major feature 2 of 5** in current batch; CI intentionally deferred
   [skip ci], to be run after major feature 5.
+
+## 0.3.0a92 — Major feature 3/5: full Sponge v2/v3 blocks + BEs + standalone entities
+
+- Added **Sponge Schematic .schem v2 and v3 export/import with original Block
+  Entity NBT and independent item/XP entities**, matching the two distinct
+  official Sponge entity layouts: v2 flat Pos, Id and extra NBT fields; v3
+  Pos, Id and nested Data Compound. No assumed v2/v3 interchange of fields.
+- Exports original opaque entity NBT with relative Pos; BE data uses the
+  previously hardened original binary NBT codec. Every exported entity
+  retains its source UUID as data: *DO NOT* place externally without
+  rewriting UUIDs. Expert import always issues fresh UUIDv4.
+- Imports decode only independent vanilla dropped item and XP-orb entities
+  with an original valid UUID and relative Pos. Unknown modded entity
+  classes, owners, riders, linked UUID graphs, malformed or ambiguous
+  wrappers and unsupported extra root/biome fields fail closed.
+- Reused the strict combined native block/BE/entity transaction: exact
+  Java 1.13+ Anvil DataVersion, original Sections, no BE overwrite,
+  existing destination entity storage, original UUID collision checks,
+  read-only all-or-nothing preview, one Undo/Redo before Save, and
+  original disk region backup on Save. No DataFixer, generated chunks,
+  biome transfer or modded identity/reference repair.
+- Qt6 File menu now offers separate v2/v3 BE+entity expert export and
+  import with version selection, 3D selection, air masks, native preview
+  and warnings about source UUID and region backup limitations.
+- Added v2/v3 structural fixture tests, opaque modded ItemStack NBT checks,
+  BE/terrain preservation, gzip file roundtrip, native Save/reopen,
+  grouped Undo/Redo, fresh UUID repeat import, malformed Pos/Data,
+  absent entity region and BE collision, plus Qt6 dialog tests.
+- This is **major feature 3/5**, encompassing codec, GUI, tests and docs
+  in ONE commit. CI remains deferred until major feature 5 [skip ci].

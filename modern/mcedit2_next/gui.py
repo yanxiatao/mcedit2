@@ -367,6 +367,8 @@ class MainWindow(QMainWindow):
                         self.import_classic_be)
         self.add_action(file_menu, "Import Sponge v2/v3 with BE (.schem; expert)…", "",
                         self.import_schem_be)
+        self.add_action(file_menu, "Import Sponge v2/v3 with BE + safe entities (.schem; expert)…", "",
+                        self.import_sponge_entity_structure)
         self.add_action(file_menu, "Import vanilla Java structure with BE (.nbt; expert)…", "",
                         self.import_vanilla_be_structure)
         self.add_action(file_menu, "Import Java structure with BE + standalone entities (.nbt; expert)…", "",
@@ -388,6 +390,8 @@ class MainWindow(QMainWindow):
                         self.export_classic_be)
         self.add_action(file_menu, "Export Sponge v2/v3 with BE (.schem; expert)…", "",
                         self.export_schem_be)
+        self.add_action(file_menu, "Export Sponge v2/v3 with BE + safe entities (.schem; expert)…", "",
+                        self.export_sponge_entity_structure)
         self.add_action(file_menu, "Export vanilla Java structure with BE (.nbt; expert)…", "",
                         self.export_vanilla_be_structure)
         self.add_action(file_menu, "Export selection with BE + standalone entities (.nbt; expert)…", "",
@@ -1852,6 +1856,94 @@ class MainWindow(QMainWindow):
                     only_replace_air=self.be_import_target_air_action.isChecked()))
         except Exception as exc:
             QMessageBox.critical(self, "Legacy BE schematic import refused", str(exc))
+
+    def export_sponge_entity_structure(self):
+        """Sponge v2/v3 with native BE and independent item/XP entity contents."""
+        if self.world is None or self.session is None or not self.view.selection:
+            QMessageBox.information(
+                self, "Sponge entity export",
+                "Open Java 1.13+ Anvil and select a 3D area.")
+            return
+        answer = QMessageBox.warning(
+            self, "Sponge original BE + entities export (expert)",
+            "Export a standard Sponge v2 or v3 .schem with original block "
+            "states, opaque Block Entities, independent dropped items "
+            "and experience orbs. Mobs, modded entity identities, "
+            "owners, passengers and entity links are refused. "
+            "Exported entity records KEEP their source UUID and must not "
+            "be pasted directly into another world without regenerating "
+            "identities. MCEdit2 expert import generates NEW UUIDv4. "
+            "Use an offline backup. Export?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        filename, selected = QFileDialog.getSaveFileName(
+            self, "Export Sponge BE + standalone entities", "",
+            "Sponge v3 safe entities (*.schem);;Sponge v2 safe entities (*.schem)")
+        if not filename:
+            return
+        try:
+            from .schem_entity import (
+                capture_sponge_entity_structure, save_sponge_entity_structure)
+            structure = capture_sponge_entity_structure(
+                self.world, self._box(), self.session.max_blocks)
+            version = 2 if "v2" in selected else 3
+            save_sponge_entity_structure(
+                filename, structure, schematic_version=version)
+            self.statusBar().showMessage(
+                f"Exported Sponge v{version}: "
+                f"{len(structure.blocks.structure.blocks)} blocks, "
+                f"{len(structure.blocks.block_entities)} BEs, "
+                f"{len(structure.entities)} independent entities.")
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "Sponge BE + entities export refused", str(exc))
+
+    def import_sponge_entity_structure(self):
+        """Expert preview and one atomic native BE+entity import transaction."""
+        if self.world is None or self.session is None:
+            QMessageBox.information(
+                self, "Sponge entity import", "Open a Java world first.")
+            return
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Import Sponge BE + independent item / XP entities", "",
+            "Sponge BE + entity schematic (*.schem)")
+        if not filename:
+            return
+        try:
+            from .schem_entity import (
+                load_sponge_entity_structure, preview_sponge_entity_structure,
+                place_sponge_entity_structure)
+            structure = load_sponge_entity_structure(filename)
+            origin = (self._box().minimum if self.view.selection else
+                      (self.view.center_x, self.y_spin.value(),
+                       self.view.center_z))
+            source_air = self.be_import_skip_air_action.isChecked()
+            target_air = self.be_import_target_air_action.isChecked()
+            report = preview_sponge_entity_structure(
+                self.session, structure, origin,
+                skip_air=source_air, only_replace_air=target_air)
+            answer = QMessageBox.warning(
+                self, "Confirm Sponge BE + entities import (expert)",
+                report.summary() +
+                "\n\nOriginal Java DataVersion must match exactly. All "
+                "terrain Sections and destination entity chunks must exist; "
+                "existing Block Entities cannot be overwritten. Only "
+                "standalone items / XP orbs with safe original UUIDs are "
+                "accepted. Every imported entity gets a new UUIDv4. "
+                "No conversion, chunk creation or owner/reference repair "
+                "is performed. Entity history clears after Save; restore "
+                "from region backup if needed. Use an offline world copy.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer == QMessageBox.StandardButton.Yes:
+                self._perform(lambda: place_sponge_entity_structure(
+                    self.session, structure, origin,
+                    skip_air=source_air, only_replace_air=target_air))
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "Sponge BE + entities import refused", str(exc))
 
     def export_schem_be(self):
         """Opt-in Sponge v2/v3 .schem with original opaque Block Entity NBT."""
