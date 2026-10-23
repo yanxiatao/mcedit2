@@ -362,6 +362,8 @@ class MainWindow(QMainWindow):
                 lambda checked=False, code=language: self.set_language(code))
         self.add_action(file_menu, "Open world…", "Ctrl+O", self.open_world)
         self.add_action(file_menu, "Import structure (.nbt / .schem / .schematic)…", "", self.import_structure)
+        self.add_action(file_menu, "Import legacy Alpha schematic with BE (.schematic; expert)…", "",
+                        self.import_classic_be)
         self.add_action(file_menu, "Import Sponge v2/v3 with BE (.schem; expert)…", "",
                         self.import_schem_be)
         self.add_action(file_menu, "Import vanilla Java structure with BE (.nbt; expert)…", "",
@@ -371,6 +373,8 @@ class MainWindow(QMainWindow):
         self.add_action(file_menu, "Queue structures for later placement…", "",
                         self.show_pending_imports)
         self.add_action(file_menu, "Export selected structure (.nbt / .schem / .schematic)…", "", self.export_structure)
+        self.add_action(file_menu, "Export legacy Alpha schematic with BE (.schematic; expert)…", "",
+                        self.export_classic_be)
         self.add_action(file_menu, "Export Sponge v2/v3 with BE (.schem; expert)…", "",
                         self.export_schem_be)
         self.add_action(file_menu, "Export vanilla Java structure with BE (.nbt; expert)…", "",
@@ -1751,6 +1755,73 @@ class MainWindow(QMainWindow):
                 f"Exported {len(structure.blocks)} block states, without BE/entities")
         except Exception as exc:
             QMessageBox.critical(self, "Export failed", str(exc))
+
+    def export_classic_be(self):
+        """Opt-in original numeric Alpha .schematic with preserved TileEntities."""
+        if self.session is None or self.world is None or self.view.selection is None:
+            QMessageBox.information(
+                self, "Legacy BE schematic export", "Select an offline numeric Anvil region.")
+            return
+        answer = QMessageBox.warning(
+            self, "Legacy numeric BE schematic export",
+            "Export an experimental Alpha .schematic retaining original numeric "
+            "IDs, metadata, and opaque TileEntity NBT. An MCEdit2DataVersion "
+            "tag will be added because Alpha files do not identify the Minecraft "
+            "data version. This does not fix modded links, owner/UUID references "
+            "or world upgrades. Use only same-version OFFLINE worlds. Export?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Export legacy schematic with TileEntity NBT", "",
+            "MCEdit2 legacy BE schematic (*.schematic)")
+        if not filename:
+            return
+        try:
+            from .classic_be import capture_classic_be, save_classic_be
+            transfer = capture_classic_be(
+                self.world, self._box(), self.session.max_blocks)
+            save_classic_be(filename, transfer)
+            self.statusBar().showMessage(
+                f"Exported legacy BE schematic: {transfer.summary()}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Legacy BE schematic export refused", str(exc))
+
+    def import_classic_be(self):
+        """Require explicit old-format marker, never assume arbitrary BE data."""
+        if self.session is None or self.world is None:
+            QMessageBox.information(
+                self, "Legacy BE schematic import", "Open an offline Java world first.")
+            return
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Import MCEdit2 legacy BE schematic", "",
+            "Legacy BE schematic (*.schematic)")
+        if not filename:
+            return
+        try:
+            from .classic_be import load_classic_be, place_classic_be
+            transfer = load_classic_be(filename)
+            origin = (self._box().minimum if self.view.selection else
+                      (self.view.center_x, self.y_spin.value(),
+                       self.view.center_z))
+            answer = QMessageBox.warning(
+                self, "Import original numeric TileEntities (expert)",
+                f"Place {transfer.summary()} at {origin}? "
+                "An MCEdit2DataVersion tag is required; arbitrary external "
+                "schematics without this tag are deliberately refused. "
+                "Original numeric ID and metadata cannot be converted to "
+                "modern names. Every BE destination must be ORIGINAL numeric "
+                "air (0:0) and no existing BE may be overwritten. "
+                "Unmodified modded machine/UUID links might be invalid. "
+                "Work on a disposable OFFLINE save.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer == QMessageBox.StandardButton.Yes:
+                self._perform(lambda: place_classic_be(
+                    self.session, transfer, origin))
+        except Exception as exc:
+            QMessageBox.critical(self, "Legacy BE schematic import refused", str(exc))
 
     def export_schem_be(self):
         """Opt-in Sponge v2/v3 .schem with original opaque Block Entity NBT."""

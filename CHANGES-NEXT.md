@@ -1136,3 +1136,23 @@ available and is not automatically replaced.
   malformed/unsafe data refusal.
 - CI is intentionally deferred while the user batches five feature
   commits. This is feature commit 1 of 5 and is marked [skip ci].
+
+## 0.3.0a81 — Legacy Alpha .schematic original numeric BE expert transfer (2/5)
+
+- Added explicitly marked legacy Alpha .schematic export/import carrying
+  full 0..4095 original block ID + 0..15 metadata and original opaque
+  TileEntities, without mapping unfamiliar modded IDs to modern blocks.
+- Alpha .schematic lacks a trustworthy Minecraft DataVersion. For safe
+  lossless BE transfer, this expert file requires an MCEdit2DataVersion
+  TAG_Int; arbitrary legacy schematic BE input without the marker is
+  rejected rather than guessed. The ordinary block-only importer stays
+  strict and does not accept BE-bearing files.
+- Export rewrites BE root xyz coordinates from absolute to local and
+  saves all non-coordinate original NBT bytes unchanged. Import checks
+  exact destination DataVersion and preflight; all legacy BE targets must
+  be ORIGINAL numeric 0:0 air. No MCRegion .mcr, external BE overwrite,
+  missing Section, entity/ticks transfer, network/UUID repair or cross-
+  version conversion.
+- Added Qt6 expert File menu import/export options and targeted synthetic
+  native Anvil save/reopen, post-save Undo and failure fixtures.
+- No CI for this commit [skip ci], per five-feature batch request.
