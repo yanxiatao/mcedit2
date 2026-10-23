@@ -437,6 +437,8 @@ class MainWindow(QMainWindow):
                         self.copy_standalone_entities)
         self.add_action(edit_menu, "Paste standalone entity clipboard by XYZ offset…", "",
                         self.paste_standalone_entities)
+        self.add_action(edit_menu, "Clean loose items / XP orbs in 3D selection (expert)…", "",
+                        self.cleanup_entities_in_selection)
         self.add_action(edit_menu, "Copy with BE NBT (experimental)…", "", self.copy_with_be)
         self.add_action(edit_menu, "Paste with BE NBT (experimental)…", "", self.paste_with_be)
         self.add_action(edit_menu, "Paste at center", "Ctrl+V", self.paste)
@@ -2254,6 +2256,62 @@ class MainWindow(QMainWindow):
                     only_replace_air=self.be_import_target_air_action.isChecked()))
         except Exception as exc:
             QMessageBox.critical(self, "Original BE import refused", str(exc))
+
+    def cleanup_entities_in_selection(self):
+        """Guarded native 3D selection item/orb deletion with one Undo."""
+        if self.session is None or self.world is None or not self.view.selection:
+            QMessageBox.information(
+                self, "3D entity cleanup",
+                "Open a world and select the complete 3D XYZ region first.")
+            return
+        choices = [
+            "Loose items AND experience orbs",
+            "Only loose items",
+            "Only experience orbs",
+        ]
+        selected, accepted = QInputDialog.getItem(
+            self, "Clean independent entities in original world",
+            "Strict original native entity type filter:", choices, 0, False)
+        if not accepted:
+            return
+        options = {
+            choices[0]: "both",
+            choices[1]: "items",
+            choices[2]: "experience",
+        }
+        chosen = options.get(selected)
+        if chosen is None:
+            return
+        try:
+            from .entity_selection_cleanup import (
+                capture_entity_cleanup, preview_entity_cleanup,
+                commit_entity_cleanup,
+            )
+            snapshot = capture_entity_cleanup(
+                self.session, self._box(), filter=chosen)
+            report = preview_entity_cleanup(self.session, snapshot)
+            if report.selected_total == 0:
+                QMessageBox.information(
+                    self, "3D entity cleanup",
+                    report.summary() + "\nNothing eligible to remove.")
+                return
+            answer = QMessageBox.warning(
+                self, "Confirm original entity List deletion (expert)",
+                report.summary() +
+                "\n\nOnly original independent vanilla item/orb entities "
+                "are deleted. Mobs/other entities remain unchanged. "
+                "Linked entities and staged source NBT edits are refused. "
+                "All targets will be checked again on Apply, then staged "
+                "as one Undo. Original entity list indices change on Save, "
+                "so saved deletions can only be restored from the original "
+                "region backup. Use an OFFLINE world copy. Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer == QMessageBox.StandardButton.Yes:
+                self._perform(lambda: commit_entity_cleanup(
+                    self.session, snapshot))
+        except Exception as exc:
+            QMessageBox.critical(self, "3D entity cleanup refused", str(exc))
 
     def copy_standalone_entities(self):
         """Memory-only selected item/orb capture; rejects unknown reference graphs."""

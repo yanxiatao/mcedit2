@@ -1440,3 +1440,37 @@ available and is not automatically replaced.
 - This is **major feature 5 of 5**. The entire five-feature batch
   (a90..a94) now runs ONE complete six-job CI matrix. Failures
   are repaired before reporting the batch as verified.
+
+## 0.3.0a95 — Major feature 1/5: 3D original entity cleanup across chunks
+
+- Migrated full **3D selection-based bulk cleanup** for independent
+  dropped items and experience orbs, extending existing original native
+  same-chunk delete to a bounded 256-chunk, 2048-original-entity /
+  8-MiB NBT selection across Java Anvil and pre-Anvil MCRegion.
+- Exactly three explicit Qt6 filters: remove loose items, experience
+  orbs, or both. All mobs, vehicles and unknown modded entity types
+  are left untouched and excluded from candidate counts; ineligible
+  original entities do not require UUID schema rewriting.
+- A capture+preview phase reads original stable list members and
+  original NBT without staging world changes. Commit rechecks the
+  exact same original payload, coordinates, containing entity chunk,
+  world identity/dimension/version and native deletion safety
+  allowlist; source edits, references, passengers or unsafe staged
+  entities are refused before any deletion is staged.
+- All eligible original entity records in the full 3D selection are
+  staged as one native **Undo/Redo** operation with transactional
+  rollback, leaving all original region bytes and unrelated NBT
+  untouched until Save. Original entire-region backups accompany
+  Save; structural entity-index history is invalidated on Save.
+- Expert Qt6 Edit menu action displays filter selection, exact
+  per-type counts, affected native chunks, nonremoved entities,
+  strict confirmation and explicit saved-list backup limitations.
+  Empty selection, cancellation and preview are never world edits.
+- Added disk-backed synthetic modern Anvil two-chunk tests for
+  filtered cleanup, distinct surviving mobs with original NBT,
+  original terrain/level.dat unchanged, save/reopen and backups,
+  stale entity refusal, world binding, 3D XYZ boundaries and
+  linked/passenger rejection, plus original .mcr numeric-era
+  original-entity cleanup and offscreen Qt6 interactions.
+- **New batch: major feature 1 of 5.** No CI in this commit;
+  run one complete CI suite after all 5 major features [skip ci].
