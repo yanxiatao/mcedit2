@@ -74,8 +74,10 @@ class BEImportTargetAirTests(unittest.TestCase):
             self.assertEqual(place_be_transfer(
                 session, transfer, (2, 0, 0), only_replace_air=True), 1)
             self.assertIsNotNone(world.get_block_entity_raw(2, 0, 0))
-            self.assertEqual(world.get_block(3, 0, 0),
-                             make_block("mcedit2:legacy_id_1[data=0]"))
+            from mcedit2_next.legacy_anvil import id_meta
+            # Native reader canonicalizes verified vanilla ID 1:0 to
+            # minecraft:stone after Save. Compare actual numeric identity.
+            self.assertEqual(id_meta(world.get_block(3, 0, 0)), (1, 0))
             self.assertTrue(session.undo())
             self.assertIsNone(world.get_block_entity_raw(2, 0, 0))
             world.close()
