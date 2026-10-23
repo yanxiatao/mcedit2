@@ -1,0 +1,9 @@
+[package]
+name = "mcedit2-cli"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+mcedit2-world = { path = "../mcedit2-world" }

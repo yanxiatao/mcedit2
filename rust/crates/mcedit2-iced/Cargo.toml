@@ -1,0 +1,15 @@
+[package]
+name = "mcedit2-iced"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Native Rust iced Minecraft world inspector and future editor"
+
+[dependencies]
+iced = "0.14"
+mcedit2-world = { path = "../mcedit2-world" }
+
+[[bin]]
+name = "mcedit2"
+path = "src/main.rs"

@@ -1,0 +1,86 @@
+name: Rust iced rewrite validation
+
+# Manual validation only while the Rust migration is being developed.
+# Code commits must not automatically build or execute CI.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  world-and-cli:
+    name: Rust core and legacy CLI tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Rust toolchain versions
+        run: |
+          rustc --version
+          cargo --version
+      - name: Compile and run native world, format, CLI parser tests
+        working-directory: rust
+        run: cargo test -p mcedit2-world -p mcedit2-cli --verbose
+      - name: Check original MCEdit CLI flags on original 1.8 Anvil fixture
+        working-directory: rust
+        run: |
+          cargo run -q -p mcedit2-cli -- -h
+          cargo run -q -p mcedit2-cli -- -debug -log -vv -view ../test_files/AnvilWorld_1.8
+          if cargo run -q -p mcedit2-cli -- -eval 'print(123)'; then
+            echo "Unsupported legacy Python execution was silently accepted!"
+            exit 1
+          fi
+
+  iced-build:
+    name: Native iced GUI build and workspace tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Install native desktop build dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libwayland-dev libxkbcommon-dev \
+            libx11-dev libxcb1-dev libxrandr-dev \
+            libxi-dev libxcursor-dev libgl1-mesa-dev
+      - name: Build and test whole pure Rust workspace, including iced
+        working-directory: rust
+        run: |
+          cargo check --workspace
+          cargo test --workspace
+
+  windows-iced:
+    name: Windows MSVC native iced build, legacy CLI and Rust tests
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Compile native GUI and test world/CLI on Windows
+        working-directory: rust
+        shell: pwsh
+        run: |
+          cargo check --workspace
+          cargo test -p mcedit2-world -p mcedit2-cli
+          cargo build -p mcedit2-iced
+          cargo run -q -p mcedit2-cli -- -h
+      - name: Upload experimental Windows native desktop binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcedit2-rust-iced-windows-preview
+          path: rust/target/debug/mcedit2.exe
+          retention-days: 7
+          if-no-files-found: error
