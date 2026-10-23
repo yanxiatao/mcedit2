@@ -238,6 +238,7 @@ class MainWindow(QMainWindow):
         self.active_brush_shape = None
         self.asset_archives = []
         self._stroke_tx = None
+        self._entity_selection_clipboard = None
         self._connect_view(self.view)
 
         root = QWidget(self)
@@ -424,6 +425,10 @@ class MainWindow(QMainWindow):
         self.add_action(edit_menu, "Find entities across ALL generated regions…", "",
                         self.find_world_entities)
         self.add_action(edit_menu, "Copy selection", "Ctrl+C", self.copy)
+        self.add_action(edit_menu, "Copy selected standalone item / XP entities (expert)…", "",
+                        self.copy_standalone_entities)
+        self.add_action(edit_menu, "Paste standalone entity clipboard by XYZ offset…", "",
+                        self.paste_standalone_entities)
         self.add_action(edit_menu, "Copy with BE NBT (experimental)…", "", self.copy_with_be)
         self.add_action(edit_menu, "Paste with BE NBT (experimental)…", "", self.paste_with_be)
         self.add_action(edit_menu, "Paste at center", "Ctrl+V", self.paste)
@@ -1034,6 +1039,7 @@ class MainWindow(QMainWindow):
             self.view.overlay = None
         self.world.close()
         self.world = candidate
+        self._entity_selection_clipboard = None
         self.session = EditSession(candidate)
         self._sampled_native_biome = None
         self.slice_view.invalidate_biome_overlay()
@@ -2073,6 +2079,72 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Original BE import refused", str(exc))
 
+    def copy_standalone_entities(self):
+        """Memory-only selected item/orb capture; rejects unknown reference graphs."""
+        if self.session is None or self.world is None or not self.view.selection:
+            QMessageBox.information(self, "Entity copy",
+                                    "Open a Java Anvil world and select a 3D area.")
+            return
+        try:
+            from .entity_selection_clipboard import capture_entity_selection
+            clip = capture_entity_selection(self.world, self._box())
+            self._entity_selection_clipboard = clip
+            self.statusBar().showMessage(
+                f"Captured {len(clip.entities)} independent item/orb entities; "
+                "no world edits.")
+        except Exception as exc:
+            QMessageBox.critical(self, "Entity copy refused", str(exc))
+
+    def paste_standalone_entities(self):
+        """XYZ-offset modal dialog, native preview and one-Undo paste."""
+        clip = self._entity_selection_clipboard
+        if self.session is None or clip is None:
+            QMessageBox.information(self, "Entity paste",
+                                    "Copy items/orbs from a 3D selection first.")
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Paste independent entities (expert)")
+        form = QFormLayout(dialog)
+        fields = []
+        for name, maximum in (("X", 29_999_999), ("Y", 4096), ("Z", 29_999_999)):
+            spin = QSpinBox(dialog)
+            spin.setObjectName("entity_copy_offset_" + name.lower())
+            spin.setRange(-maximum, maximum)
+            spin.setSingleStep(16 if name != "Y" else 1)
+            form.addRow(name + " offset", spin)
+            fields.append(spin)
+        form.addRow(QLabel(
+            "Only standalone dropped items/XP orbs; new UUIDs; "
+            "destination entity chunks must already exist.", dialog))
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel, dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        offset = tuple(spin.value() for spin in fields)
+        try:
+            from .entity_selection_clipboard import (
+                preview_entity_copy, paste_entity_copy)
+            report = preview_entity_copy(self.session, clip, offset)
+            answer = QMessageBox.warning(
+                self, "Confirm safe independent entity copy",
+                report.summary() +
+                "\n\nOnly original Pos and UUID change. Other original NBT "
+                "is copied without interpreting unknown fields. "
+                "Entity structural Undo is cleared after Save; "
+                "recover from automatic region backup if necessary. "
+                "Operate on a disposable OFFLINE world.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer == QMessageBox.StandardButton.Yes:
+                self._perform(lambda: paste_entity_copy(
+                    self.session, clip, offset))
+        except Exception as exc:
+            QMessageBox.critical(self, "Entity paste refused", str(exc))
+
     def open_world(self):
         folder = QFileDialog.getExistingDirectory(self, "Choose a world folder")
         if not folder:
@@ -2094,6 +2166,7 @@ class MainWindow(QMainWindow):
         if self.world is not None:
             self.world.close()
         self.world = candidate
+        self._entity_selection_clipboard = None
         self.session = EditSession(candidate)
         self._sampled_native_biome = None
         self.slice_view.invalidate_biome_overlay()

@@ -1265,3 +1265,35 @@ available and is not automatically replaced.
   read-only mixed previews and single Undo continue to use exact preflight.
 - Added native Anvil tests for source edits, deletion and different world
   identity. Feature 5 of 5: run one complete CI matrix after this commit.
+
+## 0.3.0a90 — Major feature 1/5: bounded cross-chunk entity selection clipboard
+
+- Full **independent standalone-entity 3D selection clipboard**: scan up
+  to 256 existing Java Anvil chunks, capture up to 128 independently
+  cloneable original dropped-item / experience-orb NBT records, preserving
+  opaque ItemStack and modded Compound fields.
+- Native multi-chunk paste supports one or many separate original source
+  chunks and destination entity chunks, both 1.12 numeric and modern
+  Anvil entity storage without regenerating missing chunks.
+- Each copied entity obtains an independent UUIDv4. Only original Pos and
+  UUID bytes are rewritten; other raw NBT members remain byte-identical.
+  Source entities are never deleted, and each repeat paste gets distinct
+  UUIDs. Existing entity region data and terrain NBT are left untouched
+  until explicit Save with automatic original region backup.
+- Memory-only preview checks original source snapshots, correct source
+  and destination chunk, existing target NBT, original duplicate UUIDs,
+  batch limits, world instance/dimension and DataVersion; no staging or
+  UUID allocation during preview. Commit rechecks then stages all additions
+  as **one Undo/Redo**. Entity structural history is cleared on Save as
+  original member indices change; backup restoration remains supported.
+- Added Qt6 selection Copy + XYZ-offset Paste expert actions, preview
+  confirmation and new-world/dimension clipboard clearing. Only
+  independent vanilla item/orb entities are supported: mobs, passengers,
+  leashes, ownership references and unknown modded entity graphs are
+  deliberately refused. No arbitrary schematic entity compatibility.
+- New disk-backed dual-chunk synthetic tests include UUID/opaque NBT
+  fidelity, grouped Undo/Redo, Save/reopen/backup, cross-chunk paste,
+  repeated pastes, missing destination, stale source, wrong world,
+  unsupported entities and GUI dialog interactions.
+- **Major feature 1 of 5** in the new CI batch. No CI until all five
+  substantial feature commits are complete. [skip ci]
