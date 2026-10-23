@@ -62,6 +62,10 @@ struct App{
     path:String,
     surface_area:String,
     surface_camera:u8,
+    surface_zoom:f32,
+    surface_pan_x:f32,
+    surface_pan_y:f32,
+    selected_surface:Option<(i32,i32,i32)>,
     surface:Option<(usize,usize,SurfaceView)>,
     surface_report:String,
     slice_grid:Option<(usize,usize,Slice)>,
@@ -108,6 +112,7 @@ struct App{
 enum Message{
     Path(String),Open,Select(usize),Coordinates(String),Dimension(usize),
     SurfaceArea(String),InspectSurface,InspectVolume,PickSurface(i32,i32,i32),RotateSurface,
+    ZoomSurface(i8),PanSurface(i32,i32),ResetSurfaceCamera,
     BeScalarField(String),BeScalarValue(String),PreviewBeScalar,
     StageBeScalar,UndoBeScalar,RedoBeScalar,InspectStagedBe,InspectBeTree,
     BeSnapshotPath(String),ExportOriginalBe,VerifyOriginalBe,
@@ -132,7 +137,7 @@ enum Message{
 }
 impl App{
     fn inspect_surface(&mut self,exposed_volume:bool){
-        self.surface=None;
+        self.surface=None;self.selected_surface=None;
         self.surface_report=match self.current_key(){
             None=>"Select a Java world first.".into(),
             Some(key)=>match parse_bounds(&self.surface_area){
@@ -180,6 +185,7 @@ impl App{
             return;
         }
         self.query_coordinates=format!("{x}, {y}, {z}");
+        self.selected_surface=Some((x,y,z));
         self.edit_area=format!("{x},{y},{z};{x},{y},{z}");
         self.be_prepared=None;
         self.save_preview=None;self.prepared=None;
@@ -563,7 +569,8 @@ impl App{
             fill_seed:"0, 64, 0".into(),
             clipboard_destination:"0, 64, 0".into(),
             vertical_area:"0,-64,0;15,-49,0".into(),
-            surface_area:"0,-64,0;15,-49,15".into(),..Default::default()
+            surface_area:"0,-64,0;15,-49,15".into(),
+            surface_zoom:1.0,..Default::default()
         };
         for path in &args.worlds {
             match inspect_input(path) {
@@ -735,6 +742,15 @@ fn update(app:&mut App,message:Message){
         Message::InspectVolume=>app.inspect_surface(true),
         Message::PickSurface(x,y,z)=>app.pick_surface(x,y,z),
         Message::RotateSurface=>app.surface_camera=(app.surface_camera+1)%4,
+        Message::ZoomSurface(n)=>app.surface_zoom=(app.surface_zoom+n as f32*0.25).clamp(0.5,3.0),
+        Message::PanSurface(dx,dy)=>{
+            app.surface_pan_x=(app.surface_pan_x+dx as f32).clamp(-1000.0,1000.0);
+            app.surface_pan_y=(app.surface_pan_y+dy as f32).clamp(-1000.0,1000.0);
+        },
+        Message::ResetSurfaceCamera=>{
+            app.surface_zoom=1.0;app.surface_pan_x=0.0;app.surface_pan_y=0.0;
+            app.surface_camera=0;
+        },
         Message::ClipboardPath(value)=>app.clipboard_path=value,
         Message::SchematicPath(value)=>app.schematic_path=value,
         Message::SpongePath(value)=>app.sponge_path=value,
@@ -1467,10 +1483,21 @@ fn view(app:&App)->Element<'_,Message>{
         ].spacing(8));
         if let Some((wi,di,view))=&app.surface{
             if app.current_key()==Some((*wi,*di)){
-                body=body.push(button(text(format!("Rotate 3D camera 90° (view {})",app.surface_camera)))
-                    .on_press(Message::RotateSurface));
+                body=body.push(row![
+                    button(text(format!("Rotate 90° ({})",app.surface_camera)))
+                        .on_press(Message::RotateSurface),
+                    button("Zoom +").on_press(Message::ZoomSurface(1)),
+                    button("Zoom -").on_press(Message::ZoomSurface(-1)),
+                    button("Pan ←").on_press(Message::PanSurface(-40,0)),
+                    button("Pan →").on_press(Message::PanSurface(40,0)),
+                    button("Pan ↑").on_press(Message::PanSurface(0,-40)),
+                    button("Pan ↓").on_press(Message::PanSurface(0,40)),
+                    button("Reset camera").on_press(Message::ResetSurfaceCamera),
+                ].spacing(5));
                 body=body.push(canvas(IsometricSurface{
-                    surface:view.clone(),camera_quarters:app.surface_camera
+                    surface:view.clone(),camera_quarters:app.surface_camera,
+                    zoom:app.surface_zoom,pan_x:app.surface_pan_x,
+                    pan_y:app.surface_pan_y,selected:app.selected_surface
                 })
                     .width(Length::Fill).height(Length::Fixed(440.0)));
             }

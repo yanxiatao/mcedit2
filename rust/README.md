@@ -671,3 +671,10 @@ block editor. They only read/mutate voxels in the actual brush mask, refuse
 original BE collisions and missing source Sections, use exact optional
 block filters, and stage as one Undo/Redo group. iced exposes dedicated
 preview commands; no world files are written during brush previews.
+
+## Major feature 3/5 — isometric camera controls and world-space picking
+
+The iced 3D surface supports bounded zoom (0.5x–3x), XY pan, four viewing
+quarters and camera reset, with selected block highlighting. Drawn top and
+side polygon geometry shares the same transforms with original XYZ mouse
+picking; the NBT world/editor overlays remain unchanged by camera actions.
