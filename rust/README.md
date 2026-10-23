@@ -652,3 +652,13 @@ This makes the new nested scalar surgery discoverable in the GUI without
 rewriting original modded arrays, inventories or sibling payloads.
 All five rounds are now complete; one check/test-only Linux/Windows CI
 may run. Packaging and binary builds remain manual only.
+
+## Migration cycle — Major commit 1/5: Sponge Schematic v3
+
+The native Java edition block-only interchange reads and exports the official
+v3 root `Schematic` compound with nested `Blocks.Palette` and `Blocks.Data`
+VarInts. Version-3 importer enforces exact original DataVersion, bounded
+volume/palette size, zero offsets and empty BE/Entity/Biome containers.
+It cannot silently drop original modded inventories or entities and never
+writes original region data on import preview. iced adds separate v3 export
+and guarded paste preview alongside v2 and numeric legacy schematics.

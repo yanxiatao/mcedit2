@@ -123,7 +123,7 @@ enum Message{
     ClipboardPath(String),ClipboardDestination(String),ExportClipboard,PreviewPasteClipboard,
     PreviewTransformedClipboard(HorizontalTransform),
     SchematicPath(String),PreviewLegacySchematic,ExportLegacySchematic,
-    SpongePath(String),PreviewSpongeV2,ExportSpongeV2,
+    SpongePath(String),PreviewSpongeV2,ExportSpongeV2,PreviewSpongeV3,ExportSpongeV3,
     PreviewBeRegion,PrepareWorldSave,SavePhrase(String),ConfirmWorldSave,
     RegionBatchPath(String),PreviewRegionBatch,ExportRegionBatch,VerifyRegionBatch,
     PrepareBeSave,BeSavePhrase(String),ConfirmBeSave,
@@ -753,6 +753,36 @@ fn update(app:&mut App,message:Message){
                 Ok(n)=>format!("Exported {n} selected block states to a create-new .mcedit2clip file. Block Entities/entities excluded; Minecraft world unchanged."),
                 Err(e)=>format!("Block-only clipboard export refused: {e}"),
             };
+        },
+        Message::ExportSpongeV3=>{
+            let path=PathBuf::from(app.sponge_path.trim());
+            let result=(||->Result<usize,String>{
+                let area=parse_bounds(&app.edit_area).map_err(|e|e.to_string())?;
+                let key=app.current_key().ok_or("Select original world")?;
+                app.current_session(key)?.export_sponge_v3(area,&path)
+                    .map_err(|e|e.to_string())
+            })();
+            app.edit_report=match result{
+                Ok(n)=>format!("Exported {n} named source blocks to Sponge v3; unknown BEs/entities/biomes are not silently discarded."),
+                Err(e)=>format!("Sponge v3 export refused: {e}"),
+            };
+        },
+        Message::PreviewSpongeV3=>{
+            app.save_preview=None;app.prepared=None;
+            let path=PathBuf::from(app.sponge_path.trim());
+            let result=(||->Result<Preview,String>{
+                let dest=parse_xyz(&app.clipboard_destination).map_err(|e|e.to_string())?;
+                let key=app.current_key().ok_or("Select original world")?;
+                app.current_session(key)?.prepare_import_sponge_v3(&path,dest)
+                    .map_err(|e|e.to_string())
+            })();
+            match result{
+                Ok(preview)=>{
+                    app.edit_report=format!("Sponge v3 exact DataVersion safe paste preview: {}",preview.summary());
+                    if let Some((wi,di))=app.current_key(){app.prepared=Some((wi,di,preview));}
+                },
+                Err(e)=>app.edit_report=format!("Sponge v3 import refused: {e}"),
+            }
         },
         Message::ExportSpongeV2=>{
             app.save_preview=None;
@@ -1601,6 +1631,8 @@ fn view(app:&App)->Element<'_,Message>{
                 .on_input(Message::SpongePath).width(Length::Fill),
             button("Export selection to Sponge v2").on_press(Message::ExportSpongeV2),
             button("Preview Sponge v2 paste").on_press(Message::PreviewSpongeV2),
+            button("Export Sponge v3").on_press(Message::ExportSpongeV3),
+            button("Preview Sponge v3 paste").on_press(Message::PreviewSpongeV3),
         ].spacing(8));
         body=body.push(row![
             text_input("External .mcedit2regionplan.json",&app.region_batch_path)

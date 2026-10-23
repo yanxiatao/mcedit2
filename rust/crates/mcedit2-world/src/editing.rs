@@ -1531,6 +1531,21 @@ impl Session {
         let block_clip=schematic::import_sponge_v2(&self.world,&self.dimension,path)?;
         self.prepare_paste_clipboard(&block_clip,destination_min)
     }
+    /// Original Sponge v3 block-only paste; preserve full named properties,
+    /// reject unknown BE/Entity/Biome payloads and DataVersion drift.
+    pub fn prepare_import_sponge_v3(
+        &self,path:&Path,destination_min:Position,
+    )->Result<Preview,WorldError>{
+        let clip=schematic::import_sponge_v3(&self.world,&self.dimension,path)?;
+        self.prepare_paste_clipboard(&clip,destination_min)
+    }
+    pub fn export_sponge_v3(
+        &self,bounds:Bounds,path:&Path,
+    )->Result<usize,WorldError>{
+        let clip=self.capture_clipboard(bounds)?;
+        schematic::export_sponge_v3(&self.world,&clip,path)?;
+        Ok(clip.blocks.len())
+    }
     /// Export only BE-free named blocks to Sponge v2; no entity/biome data.
     pub fn export_sponge_v2(
         &self,bounds:Bounds,path:&Path,
