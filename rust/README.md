@@ -691,3 +691,14 @@ state compressed into ONE bounded (<=4096 distinct cells) preview and one
 Undo/Redo group. Existing v1 manifests remain supported; neither version
 executes untrusted Python, shell or native code. Iced's plugin preview UI
 accepts both manifest versions.
+
+## Major 5/5 — original Java entity sidecar catalog and snapshots
+
+Recognizes both legacy embedded Entities lists and separate modern
+`entities/r.X.Z.mca` files. The strict read-only catalog validates actual
+entity Region chunk Position metadata, reports modded entity IDs, original
+Compound SHA-256, tag counts and optional finite Double positions. An
+external create-new `.mcedit2entities` file stores exact original entity
+chunk NBT and full source provenance; verification refuses changed source
+bytes. iced adds entity inspection, export and source verification. No
+entity mutation or hidden BE serialization is enabled.

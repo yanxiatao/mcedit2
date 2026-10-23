@@ -413,6 +413,19 @@ impl Session {
         self.overlay.get(&position).unwrap_or(source).clone()
     }
     pub fn dimension(&self) -> &str { &self.dimension }
+    /// Original entities are never inserted into the block-only overlay.
+    pub fn inspect_entities(&self,cx:i32,cz:i32)
+        ->Result<crate::entity_catalog::EntityCatalog,WorldError>{
+        crate::entity_catalog::inspect(&self.world,&self.dimension,cx,cz)
+    }
+    pub fn export_original_entities(&self,cx:i32,cz:i32,path:&Path)
+        ->Result<usize,WorldError>{
+        crate::entity_catalog::export(&self.world,&self.dimension,cx,cz,path)
+    }
+    pub fn verify_original_entities(&self,path:&Path)
+        ->Result<usize,WorldError>{
+        crate::entity_catalog::verify(&self.world,&self.dimension,path)
+    }
     pub fn pending_cells(&self) -> usize { self.overlay.len() }
     pub fn undo_depth(&self) -> usize { self.undo.len() }
     pub fn redo_depth(&self) -> usize { self.redo.len() }
@@ -752,6 +765,9 @@ impl Session {
         let (mut examined,mut matched,mut touched)=(0usize,0usize,0usize);
         for op in operations{
             let preview=crate::plugins::preview_op(&trial,op)?;
+            if preview.changed()==0 {
+                return Err(refuse("Declarative plugin step matched no actual original block changes"));
+            }
             examined=examined.checked_add(preview.examined)
                 .ok_or_else(||refuse("Plugin examined-cell budget overflow"))?;
             matched=matched.checked_add(preview.matched)
@@ -768,7 +784,11 @@ impl Session {
                 return Err(refuse("Plugin exceeds 4096 distinct edited cells"));
             }
         }
-        let changes=merged.into_values().filter(|c|c.before!=c.after).collect();
+        let changes:Vec<Change>=merged.into_values()
+            .filter(|c|c.before!=c.after).collect();
+        if changes.is_empty() {
+            return Err(refuse("Declarative plugin finished without any effective changes"));
+        }
         Ok(Preview{
             root:self.world.root.clone(),dimension:self.dimension.clone(),
             data_version:self.world.data_version,changes,

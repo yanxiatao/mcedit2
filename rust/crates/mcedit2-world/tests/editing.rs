@@ -1459,7 +1459,7 @@ fn five_geometry_brushes_produce_atomic_edit_previews_and_restore_original_bytes
     assert_eq!(world.bytes_now(),unchanged);
 }
 #[test]
-fn 3d_hollow_brush_skips_original_be_inside_mask_but_full_brush_refuses(){
+fn hollow_3d_brush_skips_original_be_outside_mask_and_refuses_inside(){
     use mcedit2_world::editing::BrushShape;
     let world=NativeWorld::create(true);
     overwrite_region(&world,&chunk_with_be("minecraft:stone",(2,-63,2)));
@@ -1522,4 +1522,48 @@ fn version2_plugin_refuses_any_late_bad_step_without_staging(){
     assert!(editor.prepare_plugin_file(&path).is_err());
     assert_eq!(editor.pending_cells(),0);
     fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn modern_entities_sidecar_is_inspected_and_snapshotted_without_modded_nbt_loss(){
+    let world=NativeWorld::create(true);
+    let original=world.bytes_now();
+    fs::create_dir_all(world.path.join("entities")).unwrap();
+    let region=world.path.join("entities/r.0.0.mca");
+    let mut pos=2i32.to_be_bytes().to_vec();
+    pos.extend(0i32.to_be_bytes());pos.extend(0i32.to_be_bytes());
+    let mut doubles=vec![6];doubles.extend(3i32.to_be_bytes());
+    for value in [1.5f64,70.0,2.5]{doubles.extend(value.to_be_bytes());}
+    let entity=compound(vec![
+        tag(8,"id",&nbt_string("mod:custom_entity")),
+        tag(8,"OpaqueData",&nbt_string("KEEP CUSTOM ENTITY EXACTLY")),
+        tag(9,"Pos",&doubles),
+    ]);
+    let mut list=vec![10];list.extend(1i32.to_be_bytes());list.extend(entity);
+    let raw=tag(10,"",&compound(vec![
+        tag(3,"DataVersion",&3955i32.to_be_bytes()),
+        tag(11,"Position",&pos),
+        tag(9,"Entities",&list),
+    ]));
+    fs::write(&region,region_bytes(&raw)).unwrap();
+    let session=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    let catalog=session.inspect_entities(0,0).unwrap();
+    assert_eq!(catalog.entities.len(),1);
+    assert_eq!(catalog.entities[0].id.as_deref(),Some("mod:custom_entity"));
+    assert_eq!(catalog.entities[0].pos,Some([1.5,70.0,2.5]));
+    let filename=std::env::temp_dir().join(format!(
+        "mcedit-entities-{}-{}.mcedit2entities",
+        std::process::id(),COUNTER.fetch_add(1,Ordering::Relaxed)
+    ));
+    assert!(session.export_original_entities(0,0,&filename).unwrap()>0);
+    assert!(session.verify_original_entities(&filename).is_ok());
+    assert_eq!(world.bytes_now(),original);
+    let replacement=tag(10,"",&compound(vec![
+        tag(3,"DataVersion",&3955i32.to_be_bytes()),
+        tag(11,"Position",&pos),
+        tag(9,"Entities",&[10,0,0,0,0]),
+    ]));
+    fs::write(&region,region_bytes(&replacement)).unwrap();
+    assert!(session.verify_original_entities(&filename).is_err());
+    fs::remove_file(filename).unwrap();
 }

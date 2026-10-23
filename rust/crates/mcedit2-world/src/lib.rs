@@ -10,6 +10,7 @@ pub mod alpha;
 pub mod block_lookup;
 pub mod editing;
 pub mod surface;
+pub mod entity_catalog;
 pub mod plugins;
 pub mod be_snapshot;
 pub mod be_journal;

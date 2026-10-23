@@ -85,6 +85,7 @@ struct App{
     be_scalar_field:String,
     be_scalar_value:String,
     be_snapshot_path:String,
+    entity_snapshot_path:String,
     be_journal_path:String,
     be_batch_path:String,
     plugin_manifest_path:String,
@@ -116,6 +117,7 @@ enum Message{
     BeScalarField(String),BeScalarValue(String),PreviewBeScalar,
     StageBeScalar,UndoBeScalar,RedoBeScalar,InspectStagedBe,InspectBeTree,
     BeSnapshotPath(String),ExportOriginalBe,VerifyOriginalBe,
+    EntitySnapshotPath(String),InspectEntities,ExportEntities,VerifyEntities,
     BeJournalPath(String),ExportBeJournal,ImportBeJournal,
     BeBatchPath(String),PreviewBeBatch,StageBeBatch,
     PluginManifestPath(String),PreviewPlugin,
@@ -1005,6 +1007,49 @@ fn update(app:&mut App,message:Message){
             };
         },
         Message::BeScalarField(value)=>{app.be_scalar_field=value;app.be_prepared=None;},
+        Message::EntitySnapshotPath(value)=>app.entity_snapshot_path=value,
+        Message::InspectEntities=>{
+            let outcome=(||->Result<String,String>{
+                let p=parse_xyz(&app.query_coordinates).map_err(|e|e.to_string())?;
+                let key=app.current_key().ok_or("Select original world")?;
+                let report=app.current_session(key)?
+                    .inspect_entities(p.0.div_euclid(16),p.2.div_euclid(16))
+                    .map_err(|e|e.to_string())?;
+                let mut out=format!("Original {} chunk {:?}, {} entities, SHA-256 {}. READ ONLY.\n",
+                    report.source,report.chunk,report.entities.len(),report.source_sha256);
+                for e in report.entities.iter().take(64){
+                    out.push_str(&format!("id={} Pos={:?} fields={} original NBT={} bytes SHA={}\n",
+                        e.id.as_deref().unwrap_or("unknown"),e.pos,e.fields,e.bytes,e.sha256));
+                }
+                Ok(out)
+            })();
+            app.block_result=outcome.unwrap_or_else(|e|format!("Entity inspection refused: {e}"));
+        },
+        Message::ExportEntities=>{
+            let file=PathBuf::from(app.entity_snapshot_path.trim());
+            let outcome=(||->Result<usize,String>{
+                let p=parse_xyz(&app.query_coordinates).map_err(|e|e.to_string())?;
+                let key=app.current_key().ok_or("Select original world")?;
+                app.current_session(key)?.export_original_entities(
+                    p.0.div_euclid(16),p.2.div_euclid(16),&file
+                ).map_err(|e|e.to_string())
+            })();
+            app.block_result=match outcome{
+                Ok(n)=>format!("Exported {n} bytes of exact original entity snapshot. World unchanged."),
+                Err(e)=>format!("Entity snapshot export refused: {e}"),
+            };
+        },
+        Message::VerifyEntities=>{
+            let file=PathBuf::from(app.entity_snapshot_path.trim());
+            let outcome=app.current_key().ok_or_else(||"Select original world".to_string())
+                .and_then(|key|app.current_session(key))
+                .and_then(|editor|editor.verify_original_entities(&file)
+                    .map_err(|e|e.to_string()));
+            app.block_result=match outcome{
+                Ok(n)=>format!("Verified {n} original entity NBT bytes against current source."),
+                Err(e)=>format!("Entity snapshot verification refused: {e}"),
+            };
+        },
         Message::BeSnapshotPath(value)=>app.be_snapshot_path=value,
         Message::BeJournalPath(value)=>app.be_journal_path=value,
         Message::BeBatchPath(value)=>app.be_batch_path=value,
@@ -1538,6 +1583,13 @@ fn view(app:&App)->Element<'_,Message>{
                 .on_input(Message::BeJournalPath).width(Length::Fill),
             button("Checkpoint staged BE edits").on_press(Message::ExportBeJournal),
             button("Restore BE edits (memory)").on_press(Message::ImportBeJournal),
+        ].spacing(8));
+        body=body.push(row![
+            text_input("External .mcedit2entities original source snapshot",&app.entity_snapshot_path)
+                .on_input(Message::EntitySnapshotPath).width(Length::Fill),
+            button("Inspect original entities").on_press(Message::InspectEntities),
+            button("Export entity NBT").on_press(Message::ExportEntities),
+            button("Verify entity source").on_press(Message::VerifyEntities),
         ].spacing(8));
         body=body.push(row![
             text_input("Outside-world .mcedit2be original NBT snapshot",&app.be_snapshot_path)
