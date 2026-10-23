@@ -362,11 +362,15 @@ class MainWindow(QMainWindow):
                 lambda checked=False, code=language: self.set_language(code))
         self.add_action(file_menu, "Open world…", "Ctrl+O", self.open_world)
         self.add_action(file_menu, "Import structure (.nbt / .schem / .schematic)…", "", self.import_structure)
+        self.add_action(file_menu, "Import vanilla Java structure with BE (.nbt; expert)…", "",
+                        self.import_vanilla_be_structure)
         self.add_action(file_menu, "Import original BE transfer (.nbt; expert)…", "",
                         self.import_be_transfer)
         self.add_action(file_menu, "Queue structures for later placement…", "",
                         self.show_pending_imports)
         self.add_action(file_menu, "Export selected structure (.nbt / .schem / .schematic)…", "", self.export_structure)
+        self.add_action(file_menu, "Export vanilla Java structure with BE (.nbt; expert)…", "",
+                        self.export_vanilla_be_structure)
         self.add_action(file_menu, "Export selection with original BE NBT (.nbt; expert)…", "",
                         self.export_be_transfer)
         self.add_action(file_menu, "Save…", "Ctrl+S", self.save_world)
@@ -1743,6 +1747,77 @@ class MainWindow(QMainWindow):
                 f"Exported {len(structure.blocks)} block states, without BE/entities")
         except Exception as exc:
             QMessageBox.critical(self, "Export failed", str(exc))
+
+    def export_vanilla_be_structure(self):
+        """Export ordinary unmarked Java 1.13+ .nbt with BE compounds."""
+        if self.session is None or self.world is None or self.view.selection is None:
+            QMessageBox.information(
+                self, "Export standard BE structure",
+                "Open a 1.13+ Java world and select a bounded 3D area first.")
+            return
+        confirmation = QMessageBox.warning(
+            self, "Standard Java .nbt with Block Entities (expert)",
+            "Export an UNMARKED Java .nbt structure with original unknown "
+            "Block Entity fields intact. BE root x/y/z will be OMITTED as in "
+            "standard vanilla structures. No standalone entities are exported. "
+            "Only Java 1.13+ Anvil is supported. Imported structures can "
+            "duplicate unique modded machines, inventories or UUID links: "
+            "these are NOT rewritten. Proceed with export?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if confirmation != QMessageBox.StandardButton.Yes:
+            return
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Export standard Java structure with original BE NBT", "",
+            "Java BE structure (*.nbt)")
+        if not filename:
+            return
+        try:
+            from .vanilla_structure_be import (
+                capture_vanilla_be_structure, save_vanilla_be_structure)
+            transfer = capture_vanilla_be_structure(
+                self.world, self._box(), self.session.max_blocks)
+            save_vanilla_be_structure(filename, transfer)
+            self.statusBar().showMessage(
+                f"Exported standard Java BE structure: {transfer.summary()}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Standard BE export refused", str(exc))
+
+    def import_vanilla_be_structure(self):
+        """Expert-only standard .nbt BE placement with exact-version preflight."""
+        if self.session is None or self.world is None:
+            QMessageBox.information(
+                self, "Standard Java BE structure", "Open a Java world first.")
+            return
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Import standard Java .nbt with original Block Entities", "",
+            "Standard Java BE structure (*.nbt)")
+        if not filename:
+            return
+        try:
+            from .vanilla_structure_be import (
+                load_vanilla_be_structure, place_vanilla_be_structure)
+            transfer = load_vanilla_be_structure(filename)
+            origin = (self._box().minimum if self.view.selection else
+                      (self.view.center_x, self.y_spin.value(),
+                       self.view.center_z))
+            confirmation = QMessageBox.warning(
+                self, "Place standard Java BE structure (expert)",
+                f"Import {transfer.summary()} at origin {origin}? "
+                "Only matching DataVersion / named Java 1.13+ Anvil "
+                "are supported. Target chunks and Sections must exist; "
+                "existing Block Entities will NOT be overwritten. "
+                "Standalone entities, passengers and cross-version ID "
+                "conversion are NOT supported. Unknown machine links, "
+                "inventories, controllers and UUID references are not repaired. "
+                "Work on an OFFLINE disposable world copy and verify in-game.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if confirmation == QMessageBox.StandardButton.Yes:
+                self._perform(lambda: place_vanilla_be_structure(
+                    self.session, transfer, origin))
+        except Exception as exc:
+            QMessageBox.critical(self, "Standard BE import refused", str(exc))
 
     def export_be_transfer(self):
         """Explicit original-format structure export including opaque BE NBT."""

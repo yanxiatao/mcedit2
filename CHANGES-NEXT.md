@@ -1089,3 +1089,29 @@ available and is not automatically replaced.
   private ZIPs in isolated temporary copies: both export/import/Undo/Redo,
   save/reopen, Undo after Save, no original ZIP modification; not proof of
   Minecraft client or mod controller linkage correctness.
+
+## 0.3.0a79 — Standard Java NBT structures with original Block Entity NBT (expert)
+
+- Added independent **standard, unmarked Java .nbt** structure import/export
+  with optional original Block Entity Compound NBT. The normal block-only
+  structure path is unchanged and still rejects BE/entity-bearing files;
+  the separately marked MCEdit2 original BE transfer remains separate.
+- Standard file export strips only original BE root x/y/z TAG_Int fields
+  (stored as target positions by the structure format), preserving all other
+  original opaque NBT fields including unknown mod capabilities and arrays
+  byte-exact. Import accepts all three old integer XYZ fields or none and
+  canonicalizes only those coordinates in-memory. Source files stay unchanged.
+- Reuses original strict native Anvil BE transaction preflight:
+  **matching DataVersion**, Java **1.13+ named** palette (not legacy
+  numeric or MCRegion), generated destination Sections, no existing BE
+  collisions, one atomic Undo/Redo operation and original region backups.
+  Standalone entities and passenger/UUID graphs are **refused**; unknown
+  root/block fields, malformed BE NBT and oversized payloads fail closed.
+- Qt6 File menu exposes **Import/Export vanilla Java structure with BE
+  (.nbt; expert)** with explicit confirmation and modded-link warnings.
+- Added synthetic native Save/reopen, Undo-after-Save, optional author,
+  malformed BE, collision and Qt6 UI regressions. Locally validated against
+  the user's private real 1.21.1/DataVersion 3955 ZIP in disposable copies;
+  original ZIP stayed byte-identical. 1.12.2 numeric Java is intentionally
+  refused by this standard route and retains its original-ID-specific
+  transfer tool. In-game modded machine/network semantics are unverified.
