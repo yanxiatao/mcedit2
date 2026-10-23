@@ -1231,3 +1231,14 @@ available and is not automatically replaced.
   malformed mask flags or wrong extensions are rejected before world edits.
 - Synthetic modern/legacy fixtures and private 1.21.1 read-only checks.
 - CI deferred per five-feature batch [skip ci].
+
+## 0.3.0a87 — One transaction for mixed block-only and BE queues (3/5)
+
+- Mixed structure groups can contain ordinary block-only and BE-aware files;
+  all destinations are preflighted together and staged in one native Undo.
+- Mixed queues fail closed on any overlapping original footprint, invalid
+  backend writes, BE collisions, missing Sections, and unconfirmed version
+  mismatches. Existing pure block-only queue last-wins behavior is unchanged.
+- Read-only preview reports total block and BE changes. Native Save/reopen,
+  Undo-after-Save tests, and private real 1.21.1 mixed placements verified.
+- CI deferred until feature 5 [skip ci].

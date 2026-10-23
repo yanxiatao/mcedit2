@@ -108,3 +108,90 @@ def commit_be_queue(session: EditSession, entries: tuple[PendingBEImport, ...]):
     session.redo_stack.clear()
     session.dirty = True
     return len(edits)
+
+
+def plan_mixed_queue(session: EditSession, entries: tuple):
+    """Read-only preflight for original block-only and BE structures together.
+
+    Reject all mixed-queue overlap, even for skipped cells. The existing
+    separate pure block-only queue retains its historical last-wins behavior.
+    """
+    if not isinstance(entries, tuple) or len(entries) > MAX_PENDING_BE_IMPORTS:
+        raise BETransferError("Mixed queue must contain at most 16 entries")
+    if not any(isinstance(e, PendingBEImport) for e in entries):
+        raise BETransferError("Use the original block-only queue for plain structures")
+    occupied = set()
+    planned = []
+    blocks = records = raw_bytes = skipped_source = skipped_target = 0
+    for entry in entries:
+        if isinstance(entry, PendingBEImport):
+            transfer = entry.transfer
+            source = transfer.structure.blocks
+            records += len(transfer.block_entities)
+            raw_bytes += sum(len(payload) for _, payload in transfer.block_entities)
+        else:
+            if not hasattr(entry, "structure") or not hasattr(entry, "version_confirmed"):
+                raise BETransferError("Unknown mixed queue entry")
+            transfer = None
+            source = entry.structure.blocks
+            version = entry.structure.data_version
+            if (version and version != session.world.version
+                    and not entry.version_confirmed):
+                raise BETransferError("Unconfirmed queued block DataVersion mismatch")
+        if not isinstance(entry.origin, tuple) or len(entry.origin) != 3 or any(
+                type(v) is not int for v in entry.origin):
+            raise BETransferError("Mixed queue origin must contain integer XYZ")
+        sx, sy, sz = (entry.structure.size if transfer is None
+                      else transfer.structure.size)
+        if not sx or not sy or not sz or sx * sy * sz > session.max_blocks:
+            raise BETransferError("Invalid queued structure bounds")
+        blocks += len(source)
+        session._check_size(blocks)
+        if records > MAX_BE_RECORDS or raw_bytes > MAX_BE_BYTES:
+            raise BETransferError("Mixed queue opaque BE budget exceeded")
+        for relative, _ in source:
+            if len(relative) != 3 or any(
+                    not 0 <= relative[i] < (sx, sy, sz)[i] for i in range(3)):
+                raise BETransferError("Malformed queued relative coordinate")
+            point = tuple(entry.origin[i] + relative[i] for i in range(3))
+            if point in occupied:
+                raise BETransferError(f"Mixed queue overlap at {point}")
+            occupied.add(point)
+        if transfer is not None:
+            changes, preview = _plan_be_transfer(
+                session, transfer, entry.origin,
+                skip_air=entry.skip_air, only_replace_air=entry.only_replace_air)
+            planned.extend(changes)
+            skipped_source += preview.skipped_source_air
+            skipped_target += preview.skipped_target_nonair
+        else:
+            preflight = getattr(session.world, "validate_block_write", None)
+            if not callable(preflight):
+                raise BETransferError("Mixed queue requires native block write validation")
+            for relative, after in source:
+                point = tuple(entry.origin[i] + relative[i] for i in range(3))
+                before = session.world.get_block(*point)
+                if before != after:
+                    preflight(*point, after)
+                    planned.append((point, before, after))
+    return planned, BEQueuePreview(
+        len(entries), blocks, len(planned),
+        sum(hasattr(after, "block_entity") and after.block_entity is not None
+            for _, _, after in planned), skipped_source, skipped_target)
+
+
+def preview_mixed_queue(session: EditSession, entries: tuple):
+    return plan_mixed_queue(session, entries)[1]
+
+
+def commit_mixed_queue(session: EditSession, entries: tuple):
+    """All-or-nothing mixed BE+plain block transaction, one Undo step."""
+    changes, _ = plan_mixed_queue(session, entries)
+    if not changes:
+        return 0
+    session._apply(changes, reverse=False)
+    session.undo_stack.append(changes)
+    session.undo_stack = session.undo_stack[-100:]
+    session.redo_stack.clear()
+    session.dirty = True
+    return len(changes)
