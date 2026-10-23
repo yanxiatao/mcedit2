@@ -410,10 +410,13 @@ jobs:
           QT_QPA_PLATFORM: offscreen
           PYTHONPATH: modern:tests
         run: |
-          python - <<'PY'
+          timeout --signal=TERM --kill-after=10s 180s python -u - <<'PY'
+          import faulthandler
           import pathlib
           import sys
           import unittest
+          faulthandler.enable(all_threads=True)
+          faulthandler.dump_traceback_later(65, repeat=True, file=sys.stderr)
           modules = sorted(p.stem for p in pathlib.Path("tests").glob("test_*.py"))
           print(f"Running {len(modules)} migrated top-level test modules", flush=True)
           suite = unittest.defaultTestLoader.loadTestsFromNames(modules)
