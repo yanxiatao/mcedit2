@@ -1362,3 +1362,41 @@ available and is not automatically replaced.
   absent entity region and BE collision, plus Qt6 dialog tests.
 - This is **major feature 3/5**, encompassing codec, GUI, tests and docs
   in ONE commit. CI remains deferred until major feature 5 [skip ci].
+
+## 0.3.0a93 — Major feature 4/5: native mixed pending queue with entities
+
+- Extended the Qt6 Pending Imports workflow into an **entity-aware
+  atomic multi-format queue**: add arbitrary combinations of existing
+  plain block-only structures, original BE-bearing .nbt/.schem files,
+  plus **standard Java .nbt or Sponge v2/v3 .schem with independent
+  items/XP entities** from explicit expert format selectors.
+- New immutable PendingEntityImport records bind the original file SHA-256,
+  source world instance, exact Anvil DataVersion, BE+entity structure and
+  per-entry origin/air masks. Every queue preview and final Apply reopens
+  and fingerprints ALL source files. Modified, deleted or incompatible
+  files/worlds are refused before staging.
+- Cross-file read-only preflight reserves every source block footprint,
+  even masked air, to reject overlapping mixed placements. The original
+  BE planner and modern entity structure planner verify all destinations
+  together: original Sections, BE conflicts, missing entity chunks,
+  original/staged UUIDs, combined 128 entity count / 8-MiB NBT budget,
+  destination collection capacity and EditSession cell limit.
+- A single final commit issues a **fresh distinct UUIDv4 per imported
+  entity**, rewrites only original entity Pos/UUID, and stages all plain
+  block changes + original BEs + entity additions as ONE native Undo/Redo
+  group. Source entities, source region bytes and other opaque NBT are
+  not removed or rewritten. Entity structural history is cleared on Save,
+  with native region backups.
+- The original **plain-only** pending queue keeps its historical
+  last-wins semantics; BE-bearing mixed queues retain strict overlap
+  rejection. Enqueue/removal/reposition/cancel remain memory-only.
+- Qt6 Pending Imports adds a third file chooser for two entity-bearing
+  formats, detailed per-entry entity/BE counts, provenance hashes,
+  editable XYZ & independent air masks, and a final whole-queue
+  preview/confirmation showing added entities and target chunks.
+- New synthetic modern native Anvil/Qt6 regression tests cover Java +
+  Sponge + plain + BE in one group, source hash tampering/deletion,
+  overlap/invalid destination refusal, wrong world/version,
+  file-format validation, Undo/Redo, Save/reopen and native backups.
+- **One major feature commit**, 4/5 in the current batch. CI deliberately
+  deferred until major feature 5 [skip ci]; test outcomes not claimed.

@@ -23,12 +23,21 @@ from .schem_io import load_schem
 from .structure_io import load_structure, Structure
 from .be_import_queue import PendingBEImport, preview_mixed_queue, commit_mixed_queue
 from .pending_be_files import load_pending_be
+from .entity_import_queue import (
+    PendingEntityImport, load_pending_entity,
+    preview_entity_mixed_queue, commit_entity_mixed_queue,
+)
 
 BE_FORMATS = (
     ("MCEdit2 original BE (.nbt)", "original_nbt", "*.nbt"),
     ("Standard Java BE (.nbt)", "java_nbt", "*.nbt"),
     ("Sponge BE (.schem)", "sponge", "*.schem"),
     ("Legacy Alpha BE (.schematic)", "alpha", "*.schematic"),
+)
+ENTITY_FORMATS = (
+    ("Java BE + standalone items/XP (.nbt)", "java_entities", "*.nbt"),
+    ("Sponge v2/v3 BE + standalone items/XP (.schem)",
+     "sponge_entities", "*.schem"),
 )
 
 MAX_IMPORTS = 16
@@ -96,7 +105,7 @@ class PendingImportsDock(QDockWidget):
         super().__init__("MCEdit2 Pending Imports", editor)
         self.setObjectName("mcedit2_next_pending_imports")
         self.editor = editor
-        self.entries: list[PendingImport | PendingBEImport] = []
+        self.entries: list[PendingImport | PendingBEImport | PendingEntityImport] = []
         self.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea |
                              Qt.DockWidgetArea.RightDockWidgetArea)
         widget = QWidget(self)
@@ -104,7 +113,7 @@ class PendingImportsDock(QDockWidget):
         layout = QVBoxLayout(widget)
         layout.addWidget(QLabel(
             "Queue structures without editing. Confirm origins, then "
-            "apply all blocks in one undoable transaction."))
+            "apply all blocks, BEs and supported entities in one Undo."))
         self.items = QListWidget(widget)
         self.items.setObjectName("pending_imports_list")
         self.items.currentRowChanged.connect(self.selected_changed)
@@ -141,6 +150,10 @@ class PendingImportsDock(QDockWidget):
         add_be.setObjectName("pending_imports_add_be")
         add_be.clicked.connect(self.queue_be_file)
         top_buttons.addWidget(add_be)
+        add_entities = QPushButton("Queue BE + entities (expert)…", widget)
+        add_entities.setObjectName("pending_imports_add_entities")
+        add_entities.clicked.connect(self.queue_entity_file)
+        top_buttons.addWidget(add_entities)
         remove = QPushButton("Remove selected", widget)
         remove.clicked.connect(self.remove_selected)
         top_buttons.addWidget(remove)
@@ -164,12 +177,21 @@ class PendingImportsDock(QDockWidget):
         self.items.blockSignals(True)
         self.items.clear()
         for entry in self.entries:
-            is_be = isinstance(entry, PendingBEImport)
-            structure = entry.transfer.structure if is_be else entry.structure
-            filename = entry.name if is_be else entry.filename
-            prefix = f"[BE {len(entry.transfer.block_entities)}] " if is_be else ""
+            if isinstance(entry, PendingEntityImport):
+                base = entry.structure.blocks
+                structure = base.structure
+                caption = f"[BE {len(base.block_entities)} / Entities {len(entry.structure.entities)}] "
+                name = entry.name
+            elif isinstance(entry, PendingBEImport):
+                structure = entry.transfer.structure
+                caption = f"[BE {len(entry.transfer.block_entities)}] "
+                name = entry.name
+            else:
+                structure = entry.structure
+                caption = ""
+                name = entry.filename
             self.items.addItem(
-                f"{prefix}{Path(filename).name} — "
+                f"{caption}{Path(name).name} — "
                 f"{structure.size[0]}×{structure.size[1]}×"
                 f"{structure.size[2]} @ {entry.origin}")
         self.items.blockSignals(False)
@@ -182,23 +204,39 @@ class PendingImportsDock(QDockWidget):
         if not 0 <= row < len(self.entries):
             return
         entry = self.entries[row]
+        is_entity = isinstance(entry, PendingEntityImport)
         is_be = isinstance(entry, PendingBEImport)
-        structure = entry.transfer.structure if is_be else entry.structure
+        if is_entity:
+            transfer = entry.structure.blocks
+            structure = transfer.structure
+            count = len(entry.structure.entities)
+        elif is_be:
+            transfer = entry.transfer
+            structure = transfer.structure
+            count = 0
+        else:
+            transfer = None
+            structure = entry.structure
+            count = 0
         for spin, value in zip(self.coords, entry.origin):
             spin.setValue(value)
-        self.skip_air.setChecked(entry.skip_air if is_be else False)
-        self.only_replace_air.setChecked(entry.only_replace_air if is_be else False)
-        self.skip_air.setEnabled(is_be)
-        self.only_replace_air.setEnabled(is_be)
+        self.skip_air.setChecked(entry.skip_air if transfer is not None else False)
+        self.only_replace_air.setChecked(
+            entry.only_replace_air if transfer is not None else False)
+        self.skip_air.setEnabled(transfer is not None)
+        self.only_replace_air.setEnabled(transfer is not None)
+        name = entry.name if transfer is not None else entry.filename
+        checksum = getattr(entry, "source_sha256", None)
         self.report.setPlainText(
-            f"File: {entry.name if is_be else entry.filename}\n"
+            f"File: {name}\n"
             f"DataVersion: {structure.data_version}\n"
             f"Size: {structure.size}\n"
             f"Blocks: {len(structure.blocks)}\n"
-            f"Original BE records: {len(entry.transfer.block_entities) if is_be else 0}\n"
+            f"Original BE records: {len(transfer.block_entities) if transfer else 0}\n"
+            f"Independent item/XP entities: {count}\n"
             f"Placement origin: {entry.origin}\n"
-            f"BE file fingerprint: {(entry.source_sha256 or 'in-memory')[:16]}\n"
-            "BE imports preserve opaque original NBT; no entity graphs. "
+            f"File fingerprint: {(checksum or 'in-memory')[:16]}\n"
+            "Original BE/entity UUID links are NOT repaired. "
             "Nothing is staged before Apply.")
 
     def _default_origin(self):
@@ -208,10 +246,47 @@ class PendingImportsDock(QDockWidget):
         return (view.center_x, self.editor.y_spin.value(), view.center_z)
 
     def _queued_cells(self):
-        return sum(len(entry.transfer.structure.blocks)
-                   if isinstance(entry, PendingBEImport)
-                   else len(entry.structure.blocks)
-                   for entry in self.entries)
+        return sum(
+            len(entry.structure.blocks.structure.blocks)
+            if isinstance(entry, PendingEntityImport)
+            else len(entry.transfer.structure.blocks)
+            if isinstance(entry, PendingBEImport)
+            else len(entry.structure.blocks)
+            for entry in self.entries)
+
+    def queue_entity_file(self):
+        """Queue a Java/Sponge file only via explicit entity-aware decoder."""
+        if self.editor.session is None or self.editor.world is None:
+            QMessageBox.information(self, "Entity pending imports", "Open a world first.")
+            return
+        if len(self.entries) >= MAX_IMPORTS:
+            QMessageBox.warning(self, "Pending imports", "Queue limit: 16 files.")
+            return
+        labels = [row[0] for row in ENTITY_FORMATS]
+        selected, ok = QInputDialog.getItem(
+            self, "Original entity-bearing structure", "Choose exact format:",
+            labels, 0, False)
+        if not ok:
+            return
+        codec = next((row for row in ENTITY_FORMATS if row[0] == selected), None)
+        if codec is None:
+            return
+        filename, _ = QFileDialog.getOpenFileName(
+            self, f"Queue {selected}", "", f"Explicit entity format ({codec[2]})")
+        if not filename:
+            return
+        try:
+            entry = load_pending_entity(
+                filename, self.editor.world, origin=self._default_origin(),
+                format=codec[1])
+            if self._queued_cells() + len(
+                    entry.structure.blocks.structure.blocks) > self.editor.session.max_blocks:
+                raise ValueError("Queued native blocks exceed the edit budget")
+            self.entries.append(entry)
+            self._refresh(len(self.entries) - 1)
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "Entity-bearing structure queue refused", str(exc))
 
     def queue_be_file(self):
         """Opt-in BE structure queue: explicitly select the decoder first."""
@@ -291,7 +366,7 @@ class PendingImportsDock(QDockWidget):
             return
         entry = self.entries[row]
         updates = {"origin": tuple(spin.value() for spin in self.coords)}
-        if isinstance(entry, PendingBEImport):
+        if isinstance(entry, (PendingBEImport, PendingEntityImport)):
             updates.update(skip_air=self.skip_air.isChecked(),
                            only_replace_air=self.only_replace_air.isChecked())
         self.entries[row] = replace(entry, **updates)
@@ -308,9 +383,15 @@ class PendingImportsDock(QDockWidget):
             return
         group = tuple(self.entries)
         session = self.editor.session
+        has_entities = any(isinstance(e, PendingEntityImport) for e in group)
         has_be = any(isinstance(e, PendingBEImport) for e in group)
         try:
-            if has_be:
+            if has_entities:
+                preview = preview_entity_mixed_queue(session, group)
+                message = (preview.summary() + "\n"
+                           "Every mixed block footprint must be disjoint. "
+                           "Original entity reference graphs are not repaired.")
+            elif has_be:
                 preview = preview_mixed_queue(session, group)
                 message = (preview.summary() + "\n"
                            "Overlapping mixed placements are forbidden.")
@@ -331,7 +412,8 @@ class PendingImportsDock(QDockWidget):
         if confirm != QMessageBox.StandardButton.Yes:
             return
         try:
-            changed = (commit_mixed_queue(session, group) if has_be
+            changed = (commit_entity_mixed_queue(session, group) if has_entities
+                       else commit_mixed_queue(session, group) if has_be
                        else commit_import_queue(session, group))
         except Exception as exc:
             QMessageBox.critical(self, "Queued import refused", str(exc))
@@ -341,5 +423,5 @@ class PendingImportsDock(QDockWidget):
         self.editor.view.update()
         self.editor.history_dock.refresh()
         self.editor.statusBar().showMessage(
-            f"Staged {changed:,} queued native blocks as one undo operation")
+            f"Staged {changed:,} queued block, BE and entity changes in one Undo")
         self.clear()
