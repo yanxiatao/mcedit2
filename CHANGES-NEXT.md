@@ -1190,3 +1190,23 @@ available and is not automatically replaced.
 - Added synthetic modern and pre-1.13 numeric Anvil placement, backup,
   Undo-after-Save, staged occupancy and conflict refusal regressions.
 - No CI is run for this batch commit [skip ci].
+
+## 0.3.0a84 — Read-only exact-preflight BE paste preview (5/5)
+
+- Split original BE structure placement into a **shared immutable planning**
+  stage and a separate commit stage, so preview and Apply use the exact
+  same DataVersion, existing Section, numeric/original-state and
+  Block Entity collision checks. Apply RE-SCANS after user confirmation
+  instead of trusting potentially stale preview results.
+- Read-only summary counts total original source blocks, actual changed
+  cells, new BE records, strict source-air cells skipped and occupied
+  target cells skipped. The preview NEVER mutates world files, stages
+  unsaved edits or changes the Undo/Redo history.
+- Four expert GUI BE import paths (.nbt marked, .nbt vanilla, .schem
+  v2/v3, Alpha .schematic) show actual native preflight summary before
+  confirmation. Unsafe operations are rejected before the dialog.
+- Added modern and numeric legacy Anvil test fixtures for preview vs
+  actual commit parity, air-mask counts, collisions, unavailable chunks
+  and DataVersion refusals.
+- This is the 5th feature commit of the requested batch. Full CI is
+  now enabled to validate all five features together.

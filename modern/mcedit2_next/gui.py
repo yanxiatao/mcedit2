@@ -1764,6 +1764,15 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Export failed", str(exc))
 
+    def _be_import_preview(self, transfer, origin):
+        """Validate and report BE writes without modifying editor or world."""
+        from .structure_be import preview_be_transfer
+        summary = preview_be_transfer(
+            self.session, transfer, origin,
+            skip_air=self.be_import_skip_air_action.isChecked(),
+            only_replace_air=self.be_import_target_air_action.isChecked())
+        return summary.summary()
+
     def export_classic_be(self):
         """Opt-in original numeric Alpha .schematic with preserved TileEntities."""
         if self.session is None or self.world is None or self.view.selection is None:
@@ -1815,6 +1824,7 @@ class MainWindow(QMainWindow):
                        self.view.center_z))
             answer = QMessageBox.warning(
                 self, "Import original numeric TileEntities (expert)",
+                f"{self._be_import_preview(transfer, origin)}\n\n"
                 f"Place {transfer.summary()} at {origin}? "
                 "An MCEdit2DataVersion tag is required; arbitrary external "
                 "schematics without this tag are deliberately refused. "
@@ -1885,6 +1895,7 @@ class MainWindow(QMainWindow):
                        self.view.center_z))
             accepted = QMessageBox.warning(
                 self, "Sponge BE placement (expert)",
+                f"{self._be_import_preview(transfer, origin)}\n\n"
                 f"Place {transfer.summary()} at {origin}? "
                 "Every original target Section must already exist, "
                 "DataVersion must match exactly, and target BEs cannot "
@@ -1956,6 +1967,7 @@ class MainWindow(QMainWindow):
                        self.view.center_z))
             confirmation = QMessageBox.warning(
                 self, "Place standard Java BE structure (expert)",
+                f"{self._be_import_preview(transfer, origin)}\n\n"
                 f"Import {transfer.summary()} at origin {origin}? "
                 "Only matching DataVersion / named Java 1.13+ Anvil "
                 "are supported. Target chunks and Sections must exist; "
@@ -2033,6 +2045,7 @@ class MainWindow(QMainWindow):
                       (self.view.center_x, self.y_spin.value(),
                        self.view.center_z))
             warning = (
+                f"{self._be_import_preview(transfer, origin)}\n\n"
                 f"EXPERIMENTAL transfer of {transfer.summary()}. "
                 f"Target origin: {origin}. The editor will change ONLY "
                 "BE root x/y/z coordinates. It will NOT rewrite modded "

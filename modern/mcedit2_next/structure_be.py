@@ -235,10 +235,29 @@ def save_be_transfer(path, transfer: BETransfer):
             temporary.unlink(missing_ok=True)
 
 
-def place_be_transfer(session: EditSession, transfer: BETransfer, origin, *,
+@dataclass(frozen=True)
+class BEPlacementPreview:
+    """Same native validation as Apply, with no mutation or Undo entry."""
+    total_blocks: int
+    actual_changes: int
+    block_entities: int
+    skipped_source_air: int
+    skipped_target_nonair: int
+
+    def summary(self) -> str:
+        return (
+            f"Original source blocks: {self.total_blocks:,}\n"
+            f"Planned block changes: {self.actual_changes:,}\n"
+            f"New original BE records: {self.block_entities:,}\n"
+            f"Ignored exact source air: {self.skipped_source_air:,}\n"
+            f"Skipped occupied destination: {self.skipped_target_nonair:,}"
+        )
+
+
+def _plan_be_transfer(session: EditSession, transfer: BETransfer, origin, *,
                       skip_air: bool = False,
                       only_replace_air: bool = False):
-    """One guarded undoable BE import, with full preflight and no overwrites."""
+    """Read-only complete native BE transfer preflight and destination plan."""
     _validate_transfer(transfer)
     if type(skip_air) is not bool or type(only_replace_air) is not bool:
         raise BETransferError("Air mask options must be booleans")
@@ -263,13 +282,17 @@ def place_be_transfer(session: EditSession, transfer: BETransfer, origin, *,
         raise BETransferError("Destination lacks native BE-safe validation")
     payloads = dict(transfer.block_entities)
     planned = []
+    skipped_source_air = 0
+    skipped_target_nonair = 0
     for relative, state in transfer.structure.blocks:
         # Skip only exact original air, never arbitrary modded air-like IDs.
         if skip_air:
             if is_legacy:
                 if legacy_anvil.id_meta(state) == (0, 0):
+                    skipped_source_air += 1
                     continue
             elif is_vanilla_source_air(state):
+                skipped_source_air += 1
                 continue
         point = tuple(origin[i] + relative[i] for i in range(3))
         if any(not -2**31 <= v < 2**31 for v in point):
@@ -294,6 +317,7 @@ def place_be_transfer(session: EditSession, transfer: BETransfer, origin, *,
                 target_air = (is_vanilla_source_air(original_state)
                               and is_vanilla_source_air(staged_state))
             if not target_air:
+                skipped_target_nonair += 1
                 continue
         be = payloads.get(relative)
         if be is not None:
@@ -315,10 +339,37 @@ def place_be_transfer(session: EditSession, transfer: BETransfer, origin, *,
         before = getter(*point)
         if before != after:
             planned.append((point, before, after))
+    # Return an immutable, read-only report; no edits/Undo stack were touched.
+    return planned, BEPlacementPreview(
+        total_blocks=len(transfer.structure.blocks),
+        actual_changes=len(planned),
+        block_entities=sum(after.block_entity is not None
+                           for _, _, after in planned),
+        skipped_source_air=skipped_source_air,
+        skipped_target_nonair=skipped_target_nonair)
+
+
+
+
+def preview_be_transfer(session: EditSession, transfer: BETransfer, origin, *,
+                        skip_air: bool = False,
+                        only_replace_air: bool = False) -> BEPlacementPreview:
+    """Never stage edits; reject unsafe versions, chunks and BE collisions."""
+    _, preview = _plan_be_transfer(
+        session, transfer, origin, skip_air=skip_air,
+        only_replace_air=only_replace_air)
+    return preview
+
+
+def place_be_transfer(session: EditSession, transfer: BETransfer, origin, *,
+                      skip_air: bool = False,
+                      only_replace_air: bool = False):
+    """Re-run preflight after confirmation, then stage one atomic Undo entry."""
+    planned, _ = _plan_be_transfer(
+        session, transfer, origin, skip_air=skip_air,
+        only_replace_air=only_replace_air)
     if not planned:
         return 0
-    # Existing transactional rollback restores staged source snapshots if
-    # an unexpected backend error occurs. Preflight prevents partial writes.
     session._apply(planned, reverse=False)
     session.undo_stack.append(planned)
     session.undo_stack = session.undo_stack[-100:]
