@@ -1234,6 +1234,81 @@ impl Session {
     }
     /// Preview complete append-only MCA/MCR images for staged block edits.
     /// Never replaces original region data, never writes any file.
+    /// BE-aware original Region candidate: STRICT memory-only preflight.
+    /// The original single-Region disk writer cannot accept BE candidates.
+    pub fn preview_be_region_candidates(
+        &self,timestamp:u32
+    )->Result<Vec<NativeRegionCandidate>,WorldError>{
+        if self.be_overlay.is_empty(){
+            return Err(refuse("BE-aware preview requires staged BE scalars"));
+        }
+        // First reconstruct the block-only candidates in a duplicate Session
+        // which intentionally excludes BE staging. This retains all existing
+        // block-state guards and deterministic named-palette order.
+        let mut blocks_only=self.clone();
+        blocks_only.be_overlay.clear();
+        blocks_only.be_source.clear();
+        blocks_only.be_undo.clear();
+        blocks_only.be_redo.clear();
+        let mut candidates=if self.overlay.is_empty(){
+            Vec::new()
+        }else{blocks_only.prepare_native_palette_candidates()?};
+        let mut lookup=BTreeMap::new();
+        for (index,item) in candidates.iter().enumerate(){
+            lookup.insert((item.chunk_x,item.chunk_z),index);
+        }
+        let mut operations:BTreeMap<ChunkPos,Vec<region_plan::BeReplayStep>>=BTreeMap::new();
+        for step in &self.be_undo{
+            operations.entry(step.chunk).or_default().push(region_plan::BeReplayStep{
+                xyz:[step.position.0,step.position.1,step.position.2],
+                field:step.field.clone(),value:step.value.clone(),
+            });
+        }
+        if operations.len()!=self.be_overlay.len(){
+            return Err(refuse("BE-aware Region preview has nonreplayable history"));
+        }
+        let mut proofs=Vec::new();
+        for (chunk,ops) in operations{
+            let original=read_world_chunk_bytes(
+                &self.world,&self.dimension,chunk.0,chunk.1
+            )?.ok_or_else(||refuse("BE source chunk disappeared"))?;
+            if self.be_source.get(&chunk)!=Some(&nbt_sha(&original)){
+                return Err(refuse("BE-aware Region preview source digest changed"));
+            }
+            let mut verified=original.clone();
+            for step in &ops{
+                verified=crate::sections::patch_original_block_entity_scalar(
+                    &verified,(step.xyz[0],step.xyz[1],step.xyz[2]),
+                    &step.field,&step.value
+                ).map_err(|e|refuse(format!("BE original replay rejected: {e}")))?;
+            }
+            if self.be_overlay.get(&chunk)!=Some(&verified){
+                return Err(refuse("BE overlay differs from source-authenticated scalar replay"));
+            }
+            let mut output=if let Some(&i)=lookup.get(&chunk){
+                candidates[i].patched_nbt.clone()
+            }else{original.clone()};
+            for step in &ops{
+                output=crate::sections::patch_original_block_entity_scalar(
+                    &output,(step.xyz[0],step.xyz[1],step.xyz[2]),
+                    &step.field,&step.value
+                ).map_err(|e|refuse(format!("Combined block/BE replay failed: {e}")))?;
+            }
+            if let Some(&i)=lookup.get(&chunk){
+                candidates[i].patched_nbt=output;
+            }else{
+                lookup.insert(chunk,candidates.len());
+                candidates.push(NativeChunkCandidate{
+                    chunk_x:chunk.0,chunk_z:chunk.1,edited_blocks:0,
+                    original_nbt_sha256:nbt_sha(&original),patched_nbt:output,
+                });
+            }
+            proofs.extend(ops);
+        }
+        region_plan::plan_world_regions_with_be(
+            &self.world,&self.dimension,&candidates,&proofs,timestamp
+        )
+    }
     pub fn prepare_native_region_candidates(
         &self, timestamp: u32,
     ) -> Result<Vec<NativeRegionCandidate>, WorldError> {

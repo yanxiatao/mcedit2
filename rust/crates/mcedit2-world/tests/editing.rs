@@ -1231,3 +1231,31 @@ fn be_journal_source_drift_and_invalid_entry_are_refused_without_partial_import(
     assert_eq!(empty.pending_be_chunks(),0);
     fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn be_only_and_combined_block_be_region_candidates_preserve_opaque_data(){
+    let world=NativeWorld::create(true);
+    overwrite_region(&world,&chunk_with_be("minecraft:stone",(2,-64,3)));
+    let unchanged=world.bytes_now();
+    let mut editor=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    let change=editor.prepare_be_edit(
+        (2,-64,3),"UnrecognizedPayload","BE EXACT REPLAY"
+    ).unwrap();
+    editor.commit_be_edit(change).unwrap();
+    let preview=editor.preview_be_region_candidates(47).unwrap();
+    assert_eq!(preview.len(),1);
+    assert_eq!(preview[0].be_replay.len(),1);
+    assert!(preview[0].image.len()>unchanged.len());
+    assert!(mcedit2_world::region_transaction::apply_single_region(
+        &world.metadata(),"minecraft:overworld",&preview[0]
+    ).is_err(),"BE Region preview remains in-memory only");
+    assert_eq!(world.bytes_now(),unchanged);
+    let area=Bounds::new((0,-64,0),(0,-64,0)).unwrap();
+    editor.commit(editor.prepare(
+        area,&parse_state("minecraft:gold_block").unwrap(),None
+    ).unwrap()).unwrap();
+    let mixed=editor.preview_be_region_candidates(49).unwrap();
+    assert_eq!(mixed.len(),1);
+    assert_eq!(mixed[0].be_replay.len(),1);
+    assert_eq!(world.bytes_now(),unchanged);
+}

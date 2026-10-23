@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use flate2::{Compression,read::{GzDecoder,ZlibDecoder},write::{GzEncoder,ZlibEncoder}};
 use sha2::{Digest,Sha256};
 use crate::editing::NativeChunkCandidate;
-use crate::sections::{decode_sections,patch_named_growing_palette,patch_original_numeric_arrays,Chunk,InPaletteEdit,Layout};
+use crate::sections::{decode_sections,patch_named_growing_palette,patch_original_numeric_arrays,patch_original_block_entity_scalar,Chunk,InPaletteEdit,Layout};
 use crate::{WorldError,WorldSummary};
 
 const SECTOR:usize=4096;
@@ -139,6 +139,31 @@ fn count_actual_edits(original:&Chunk,updated:&Chunk)->Result<usize,WorldError>{
     }
     Ok(changed)
 }
+/// Complete, chronological original-BE surgery proof. The only supported
+/// change is an EXISTING Byte/Short/Int/Long/String tag within a fixed BE.
+#[derive(Debug,Clone)]
+pub struct BeReplayStep {
+    pub xyz:[i32;3],
+    pub field:String,
+    pub value:String,
+}
+impl BeReplayStep {
+    fn chunk(&self)->(i32,i32){
+        (self.xyz[0].div_euclid(16),self.xyz[2].div_euclid(16))
+    }
+}
+fn replay_be_proofs(raw:&[u8],proofs:&[&BeReplayStep])
+    ->Result<Vec<u8>,WorldError>{
+    let mut patched=raw.to_vec();
+    for step in proofs{
+        patched=patch_original_block_entity_scalar(
+            &patched,(step.xyz[0],step.xyz[1],step.xyz[2]),
+            &step.field,&step.value
+        ).map_err(|e|refuse(format!("Exact BE NBT scalar replay rejected: {e}")))?;
+    }
+    Ok(patched)
+}
+
 /// Complete memory-only Region rewrite candidate; original path and original
 /// file SHA-256 are retained for the later backup/atomic writer.
 #[derive(Debug,Clone)]
@@ -148,6 +173,8 @@ pub struct NativeRegionCandidate {
     pub region_x:i32,
     pub region_z:i32,
     pub modified_chunks:usize,
+    /// Exact replay list required for every proposed Block Entity change.
+    pub be_replay:Vec<BeReplayStep>,
     pub original_bytes:usize,
     pub planned_bytes:usize,
     /// Full candidate image; NEVER write this directly without a transaction.
@@ -156,6 +183,12 @@ pub struct NativeRegionCandidate {
 fn plan_region_image(
     original:&[u8],region_x:i32,region_z:i32,
     changes:&[&NativeChunkCandidate],timestamp:u32,
+)->Result<Vec<u8>,WorldError>{
+    plan_region_image_with_be(original,region_x,region_z,changes,&[],timestamp)
+}
+fn plan_region_image_with_be(
+    original:&[u8],region_x:i32,region_z:i32,
+    changes:&[&NativeChunkCandidate],proofs:&[BeReplayStep],timestamp:u32,
 )->Result<Vec<u8>,WorldError>{
     if changes.is_empty()||changes.len()>1024{
         return Err(refuse("Region plan requires 1..1024 existing changed chunks"));
@@ -187,8 +220,48 @@ fn plan_region_image(
         let patched=decode_sections(&change.patched_nbt)
             .map_err(|e|refuse(format!("Modified region NBT rejected: {e}")))?;
         let changed=count_actual_edits(&decoded,&patched)?;
-        if changed==0||changed!=change.edited_blocks {
-            return Err(refuse("Planned actual block changes mismatch original editor preview"));
+        let proof_count=proofs.iter().filter(|step|
+            step.chunk()==(change.chunk_x,change.chunk_z)
+        ).count();
+        if changed!=change.edited_blocks || (changed==0&&proof_count==0) {
+            return Err(refuse("Planned actual block/BE changes mismatch source preview"));
+        }
+        if proof_count>0{
+            let ops=proofs.iter().filter(|step|
+                step.chunk()==(change.chunk_x,change.chunk_z)
+            ).collect::<Vec<_>>();
+            // The only BE edits allowed are exact replayed scalar operations.
+            let expected=if changed==0{nbt.clone()}else{
+                // The block-only replay is constructed from the actual
+                // original/updated palettes by the transaction verifier.
+                let mut edits=Vec::new();
+                for section in &decoded.sections{
+                    let next=patched.sections.iter().find(|s|s.y==section.y)
+                        .ok_or_else(||refuse("BE candidate Section missing"))?;
+                    for idx in 0..4096usize{
+                        let old=&section.palette[section.indices[idx] as usize];
+                        let new=&next.palette[next.indices[idx] as usize];
+                        if old!=new{
+                            edits.push(InPaletteEdit{
+                                local_x:(idx%16) as u8,
+                                local_z:((idx/16)%16) as u8,
+                                y:section.y as i32*16+(idx/256) as i32,
+                                original:old.clone(),replacement:new.clone(),
+                            });
+                        }
+                    }
+                }
+                edits.sort_by_key(|e|(e.local_x,e.y,e.local_z));
+                match decoded.layout{
+                    Layout::Named113|Layout::Modern118=>
+                        patch_named_growing_palette(&nbt,&edits),
+                    Layout::McRegion128|Layout::NumericAnvil112=>
+                        patch_original_numeric_arrays(&nbt,&edits),
+                }.map_err(|e|refuse(format!("BE planner block replay failed: {e}")))?
+            };
+            if replay_be_proofs(&expected,&ops)?!=change.patched_nbt{
+                return Err(refuse("BE Region candidate changes NBT beyond declared scalar proofs"));
+            }
         }
         let encoded=compress(compression,&change.patched_nbt)?;
         let length=encoded.len().checked_add(1)
@@ -258,6 +331,7 @@ fn plan_region_image(
 /// entities, inventory, or Block Entity NBT into an on-disk transaction.
 fn verify_exact_block_only_replay(
     original_nbt:&[u8],patched_nbt:&[u8],before:&Chunk,after:&Chunk,
+    proofs:&[&BeReplayStep],
 )->Result<(),WorldError>{
     if !equivalent_metadata(before,after) {
         return Err(refuse("Replayed NBT metadata or BE coordinates differ"));
@@ -281,18 +355,23 @@ fn verify_exact_block_only_replay(
             }
         }
     }
-    if edits.is_empty(){return Err(refuse("No actual edited cells in candidate"));}
+    if edits.is_empty()&&proofs.is_empty(){
+        return Err(refuse("No actual block or authenticated BE scalar edits in candidate"));
+    }
     // Session's overlay is an ordered BTreeMap by world X,Y,Z. Repeating the
     // same deterministic order reconstructs palette growth insertion order.
     edits.sort_by_key(|e|(e.local_x,e.y,e.local_z));
-    let expected=match before.layout {
-        Layout::Named113|Layout::Modern118=>
-            patch_named_growing_palette(original_nbt,&edits),
-        Layout::McRegion128|Layout::NumericAnvil112=>
-            patch_original_numeric_arrays(original_nbt,&edits),
-    }.map_err(|e|refuse(format!("Canonical NBT block-only replay rejected: {e}")))?;
+    let expected=if edits.is_empty(){original_nbt.to_vec()}else{
+        match before.layout {
+            Layout::Named113|Layout::Modern118=>
+                patch_named_growing_palette(original_nbt,&edits),
+            Layout::McRegion128|Layout::NumericAnvil112=>
+                patch_original_numeric_arrays(original_nbt,&edits),
+        }.map_err(|e|refuse(format!("Canonical NBT block-only replay rejected: {e}")))?
+    };
+    let expected=replay_be_proofs(&expected,proofs)?;
     if expected!=patched_nbt {
-        return Err(refuse("Edited NBT differs from block-only byte replay; opaque NBT must be retained"));
+        return Err(refuse("Region candidate has unproven changes to opaque original NBT"));
     }
     Ok(())
 }
@@ -306,6 +385,9 @@ pub(crate) fn verify_candidate(original:&[u8],candidate:&NativeRegionCandidate)
         || candidate.image.len()!=candidate.planned_bytes {
         return Err(refuse("Region candidate original digest or image size differs"));
     }
+    if candidate.be_replay.len()>24{
+        return Err(refuse("Region BE proof exceeds 24 original scalar operations"));
+    }
     let original_slots=parse_slots(original)?;
     let image_slots=parse_slots(&candidate.image)?;
     if candidate.image.len()<=original.len()
@@ -314,6 +396,7 @@ pub(crate) fn verify_candidate(original:&[u8],candidate:&NativeRegionCandidate)
     }
     let original_end=original.len()/SECTOR;
     let mut modified=0;
+    let mut touched=BTreeSet::new();
     let mut ranges=Vec::new();
     for slot_index in 0..1024 {
         let header=slot_index*4;
@@ -348,12 +431,22 @@ pub(crate) fn verify_candidate(original:&[u8],candidate:&NativeRegionCandidate)
             ||z.rem_euclid(32)!=(slot_index/32) as i32) {
             return Err(refuse("Candidate original chunk coordinate does not match its Region slot"));
         }
-        if count_actual_edits(&before,&after)?==0 {
-            return Err(refuse("Region image needlessly replaced original chunk"));
+        let chunk_coord=(
+            candidate.region_x*32+(slot_index%32) as i32,
+            candidate.region_z*32+(slot_index/32) as i32
+        );
+        touched.insert(chunk_coord);
+        let proofs=candidate.be_replay.iter()
+            .filter(|step|step.chunk()==chunk_coord).collect::<Vec<_>>();
+        if count_actual_edits(&before,&after)?==0&&proofs.is_empty(){
+            return Err(refuse("Region candidate replaced a chunk without proven edits"));
         }
-        verify_exact_block_only_replay(&source_nbt,&target_nbt,&before,&after)?;
+        verify_exact_block_only_replay(&source_nbt,&target_nbt,&before,&after,&proofs)?;
         ranges.push((destination.start,destination.start+destination.sectors));
         modified+=1;
+    }
+    if candidate.be_replay.iter().any(|step|!touched.contains(&step.chunk())){
+        return Err(refuse("BE proof refers to a chunk not changed by the Region image"));
     }
     if modified!=candidate.modified_chunks || modified==0 {
         return Err(refuse("Region candidate modified-chunk count mismatch"));
@@ -377,6 +470,18 @@ pub(crate) fn verify_candidate(original:&[u8],candidate:&NativeRegionCandidate)
 pub(crate) fn plan_world_regions(
     world:&WorldSummary,dimension:&str,changes:&[NativeChunkCandidate],timestamp:u32,
 )->Result<Vec<NativeRegionCandidate>,WorldError>{
+    plan_world_regions_with_be(world,dimension,changes,&[],timestamp)
+}
+pub(crate) fn plan_world_regions_with_be(
+    world:&WorldSummary,dimension:&str,changes:&[NativeChunkCandidate],
+    proofs:&[BeReplayStep],timestamp:u32,
+)->Result<Vec<NativeRegionCandidate>,WorldError>{
+    if proofs.len()>24{return Err(refuse("Too many BE scalar proofs"));}
+    let changed=changes.iter().map(|v|(v.chunk_x,v.chunk_z))
+        .collect::<BTreeSet<_>>();
+    if proofs.iter().any(|p|!changed.contains(&p.chunk())){
+        return Err(refuse("Region planner was supplied an unrelated BE edit proof"));
+    }
     let dim=world.dimensions.iter().find(|dim|dim.name==dimension)
         .ok_or_else(||refuse("Unknown source dimension for region planning"))?;
     if dim.extension.contains("c.x.z.dat") {
@@ -402,7 +507,12 @@ pub(crate) fn plan_world_regions(
         }
         let original=fs::read(&path)?;
         let stamp=hash(&original);
-        let image=plan_region_image(&original,rx,rz,&changed,timestamp)?;
+        let region_proofs=proofs.iter().filter(|p|
+            p.chunk().0.div_euclid(32)==rx&&p.chunk().1.div_euclid(32)==rz
+        ).cloned().collect::<Vec<_>>();
+        let image=plan_region_image_with_be(
+            &original,rx,rz,&changed,&region_proofs,timestamp
+        )?;
         // Catch concurrent modifications during planning.
         if hash(&fs::read(&path)?)!=stamp{
             return Err(refuse("Original region bytes changed during dry-run; refuse"));
@@ -411,6 +521,7 @@ pub(crate) fn plan_world_regions(
             path,region_x:rx,region_z:rz,
             original_region_sha256:stamp,
             modified_chunks:changed.len(),
+            be_replay:region_proofs,
             original_bytes:original.len(),planned_bytes:image.len(),
             image,
         });

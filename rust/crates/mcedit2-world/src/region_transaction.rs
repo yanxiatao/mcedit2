@@ -207,6 +207,12 @@ pub fn apply_single_region(
     if fs::canonicalize(&region)?!=fs::canonicalize(&candidate.path)? {
         return Err(refuse("Region candidate references an untrusted/noncanonical path"));
     }
+    // The current disk transaction supports only block-state modifications.
+    // Authenticated BE candidates are for IN-MEMORY validation until their
+    // separate recovery/rollback integration has been explicitly enabled.
+    if !candidate.be_replay.is_empty(){
+        return Err(refuse("BE-aware Region previews are not yet permitted to write Minecraft files"));
+    }
     let original=fs::read(&region)?;
     verify_candidate(&original,candidate)?;
     let next=sha(&candidate.image);

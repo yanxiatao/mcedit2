@@ -569,3 +569,17 @@ Region write is enabled while any BE bytes remain staged. This is a
 checkpoint/restore capability, not a Minecraft world writer.
 
 **Cycle: 3 full batches of 5 completed; no CI yet.**
+
+## Five-batch migration cycle — Batch 4: source-replayed BE Region preview
+
+The native Region planner now accepts an explicit ordered proof of original
+BE scalar changes, independently verifying a byte-for-byte reapplication
+against the original chunk's NBT. Both BE-only and mixed block/BE changes
+can produce a complete append-only in-memory Region image. The final
+transaction verifier reconstructs all block edits AND all permitted BE
+tag surgeries from the original decompressed chunk to ensure unknown
+modded NBT, original inventories, positions and neighboring Blocks remain
+unchanged. No proof, a wrong field/value, extra opaque byte changes or a
+nonexistent chunk is rejected. **The disk transaction explicitly refuses
+any candidate containing BE operations**; this stage only validates
+complete save previews, not BE writes. No CI (batch FOUR of five).

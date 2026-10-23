@@ -119,7 +119,7 @@ enum Message{
     PreviewTransformedClipboard(HorizontalTransform),
     SchematicPath(String),PreviewLegacySchematic,ExportLegacySchematic,
     SpongePath(String),PreviewSpongeV2,ExportSpongeV2,
-    PrepareWorldSave,SavePhrase(String),ConfirmWorldSave,
+    PreviewBeRegion,PrepareWorldSave,SavePhrase(String),ConfirmWorldSave,
     RecoverRegion(String),RecoveryPhrase(String),FinalizeRegion,RollbackRegion,
     PreviewEdit,ApplyEdit,UndoEdit,RedoEdit,DiscardEdits,Clear
 }
@@ -1003,6 +1003,17 @@ fn update(app:&mut App,message:Message){
                 app.surface=None;app.slice_grid=None;app.vertical_grid=None;
             }
         },
+        Message::PreviewBeRegion=>{
+            app.save_preview=None;
+            let result=app.current_key().ok_or("Select original world").and_then(|key|
+                app.current_session(key)
+            ).and_then(|editor|editor.preview_be_region_candidates(0).map_err(|e|e.to_string()));
+            app.edit_report=match result{
+                Ok(regions)=>format!("BE-AUTHENTICATED IN-MEMORY Region preview: {} affected Region files; {} total bytes in candidates. Actual Minecraft disk saving is disabled for BE edits.",regions.len(),
+                    regions.iter().map(|r|r.planned_bytes).sum::<usize>()),
+                Err(e)=>format!("BE-aware Region preview refused: {e}"),
+            };
+        },
         Message::InspectStagedBe=>{
             let r=(||->Result<String,String>{
                 let p=parse_xyz(&app.query_coordinates).map_err(|e|e.to_string())?;
@@ -1237,6 +1248,7 @@ fn view(app:&App)->Element<'_,Message>{
             button("Undo BE").on_press(Message::UndoBeScalar),
             button("Redo BE").on_press(Message::RedoBeScalar),
             button("Inspect staged BE").on_press(Message::InspectStagedBe),
+            button("Verify BE Region (memory only)").on_press(Message::PreviewBeRegion),
         ].spacing(8));
         body=body.push(row![
             text_input("Outside-world BE edit .mcedit2bejournal.json",&app.be_journal_path)
