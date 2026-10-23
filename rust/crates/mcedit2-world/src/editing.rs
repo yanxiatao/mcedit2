@@ -738,6 +738,45 @@ impl Session {
     pub fn stage_be_operation_file(&mut self,path:&Path)->Result<usize,WorldError>{
         crate::be_operations::stage_file(self,path)
     }
+    /// V2 declarative plugins may comprise several dependent edits, but the
+    /// entire sequence is simulated on an isolated cloned Session and
+    /// compressed into ONE source-authenticated Undo-able preview.
+    pub(crate) fn prepare_plugin_sequence(
+        &self,operations:&[crate::plugins::PluginOperation]
+    )->Result<Preview,WorldError>{
+        if operations.is_empty()||operations.len()>24{
+            return Err(refuse("Plugin requires 1..24 bounded operations"));
+        }
+        let mut trial=self.clone();
+        let mut merged:BTreeMap<Position,Change>=BTreeMap::new();
+        let (mut examined,mut matched,mut touched)=(0usize,0usize,0usize);
+        for op in operations{
+            let preview=crate::plugins::preview_op(&trial,op)?;
+            examined=examined.checked_add(preview.examined)
+                .ok_or_else(||refuse("Plugin examined-cell budget overflow"))?;
+            matched=matched.checked_add(preview.matched)
+                .ok_or_else(||refuse("Plugin matched-cell budget overflow"))?;
+            touched=touched.checked_add(preview.source_chunks)
+                .ok_or_else(||refuse("Plugin source-chunk counter overflow"))?;
+            for item in &preview.changes{
+                merged.entry(item.position)
+                    .and_modify(|c|c.after=item.after.clone())
+                    .or_insert_with(||item.clone());
+            }
+            trial.commit(preview)?;
+            if merged.len()>MAX_CELLS{
+                return Err(refuse("Plugin exceeds 4096 distinct edited cells"));
+            }
+        }
+        let changes=merged.into_values().filter(|c|c.before!=c.after).collect();
+        Ok(Preview{
+            root:self.world.root.clone(),dimension:self.dimension.clone(),
+            data_version:self.world.data_version,changes,
+            source_checks:Vec::new(),
+            is_copy:false,is_move:false,is_fill:false,
+            examined,matched,skipped:0,source_chunks:touched,
+        })
+    }
     pub fn prepare_plugin_file(&self,path:&Path)->Result<Preview,WorldError>{
         crate::plugins::prepare_file(self,path)
     }

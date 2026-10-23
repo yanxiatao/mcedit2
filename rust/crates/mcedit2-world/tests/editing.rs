@@ -1469,3 +1469,57 @@ fn 3d_hollow_brush_skips_original_be_inside_mask_but_full_brush_refuses(){
     assert!(editor.prepare_brush(bounds,BrushShape::HollowBox,&target,None).is_ok());
     assert!(editor.prepare_brush(bounds,BrushShape::Ellipsoid,&target,None).is_err());
 }
+
+#[test]
+fn version2_plugin_composes_dependent_original_edits_as_one_undo(){
+    let world=NativeWorld::create(true);
+    let unchanged=world.bytes_now();
+    let path=std::env::temp_dir().join(format!(
+        "mcedit-v2-{}-{}.mcedit2plugin.json",
+        std::process::id(),COUNTER.fetch_add(1,Ordering::Relaxed)
+    ));
+    let ops=serde_json::json!({
+        "schema_version":2,"name":"two-step paint and geometry",
+        "operations":[
+            {"kind":"replace_blocks","minimum":[0,-64,0],"maximum":[4,-64,4],
+                "with_state":"minecraft:gold_block","only_if_state":"minecraft:stone"},
+            {"kind":"brush","minimum":[0,-64,0],"maximum":[4,-64,4],
+                "shape":"ellipsoid","with_state":"minecraft:diamond_block",
+                "only_if_state":"minecraft:gold_block"}
+        ]
+    });
+    fs::write(&path,serde_json::to_vec(&ops).unwrap()).unwrap();
+    let mut editor=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    let preview=editor.prepare_plugin_file(&path).unwrap();
+    assert_eq!(preview.changed(),25);
+    assert_eq!(editor.pending_cells(),0);
+    editor.commit(preview).unwrap();
+    assert_eq!(editor.undo_depth(),1);
+    assert_eq!(editor.pending_cells(),25);
+    assert!(editor.undo().unwrap());
+    assert_eq!(editor.pending_cells(),0);
+    assert_eq!(world.bytes_now(),unchanged);
+    fs::remove_file(&path).unwrap();
+}
+#[test]
+fn version2_plugin_refuses_any_late_bad_step_without_staging(){
+    let world=NativeWorld::create(true);
+    let path=std::env::temp_dir().join(format!(
+        "mcedit-v2-bad-{}-{}.mcedit2plugin.json",
+        std::process::id(),COUNTER.fetch_add(1,Ordering::Relaxed)
+    ));
+    let ops=serde_json::json!({
+        "schema_version":2,"name":"bad dependent step",
+        "operations":[
+            {"kind":"replace_blocks","minimum":[0,-64,0],"maximum":[1,-64,1],
+                "with_state":"minecraft:gold_block"},
+            {"kind":"brush","minimum":[0,-64,0],"maximum":[1,-64,1],
+                "shape":"ellipsoid","with_state":"numeric:2[data=0]"}
+        ]
+    });
+    fs::write(&path,serde_json::to_vec(&ops).unwrap()).unwrap();
+    let editor=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    assert!(editor.prepare_plugin_file(&path).is_err());
+    assert_eq!(editor.pending_cells(),0);
+    fs::remove_file(path).unwrap();
+}

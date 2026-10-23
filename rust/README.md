@@ -678,3 +678,16 @@ The iced 3D surface supports bounded zoom (0.5x–3x), XY pan, four viewing
 quarters and camera reset, with selected block highlighting. Drawn top and
 side polygon geometry shares the same transforms with original XYZ mouse
 picking; the NBT world/editor overlays remain unchanged by camera actions.
+
+## Major 4/5 — versioned multi-operation safe plugin engine
+
+The declarative plugin protocol now accepts v2 `.mcedit2plugin.json`
+manifests with up to 24 dependent ReplaceBlocks/Brush actions, optional
+exact source DataVersion and dimension constraints. Every action is safely
+simulated on a cloned original-world Session; its resulting effective block
+states feed the next action, including the new 3D geometry masks. Only after
+the entire sequence passes strict original BE/source preflight is the final
+state compressed into ONE bounded (<=4096 distinct cells) preview and one
+Undo/Redo group. Existing v1 manifests remain supported; neither version
+executes untrusted Python, shell or native code. Iced's plugin preview UI
+accepts both manifest versions.
