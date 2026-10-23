@@ -1758,6 +1758,9 @@ class MainWindow(QMainWindow):
             "This is not a generic vanilla structure file or automatic "
             "machine/UUID transfer format. It is intended for explicit "
             "same-DataVersion editor imports on disposable OFFLINE worlds. "
+            "Native 1.12 numeric IDs/metadata are preserved without remapping. "
+            "Legacy BE target positions must be original air (ID 0, data 0). "
+            "MCRegion (.mcr) remains unsupported. "
             "Do not share as an ordinary vanilla structure template. "
             "Continue?")
         answer = QMessageBox.warning(
@@ -1809,6 +1812,8 @@ class MainWindow(QMainWindow):
                 "machines. Existing destination BE records can NEVER "
                 "be overwritten; every target Section must already "
                 "exist and DataVersion MUST exactly match. "
+                "For 1.12 and earlier Anvil, BE targets must contain "
+                "original numeric air (0:0); MCRegion is unsupported. "
                 "An ordinary native Save still requires a separate "
                 "confirmation and backs up region files. "
                 "Operate only on a disposable OFFLINE copy. Import?")

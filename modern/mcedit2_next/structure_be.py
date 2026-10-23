@@ -1,12 +1,13 @@
-"""Explicit, byte-preserving original Java structure transfer with Block Entities.
+"""Explicit, byte-preserving original Java Anvil structure transfer with Block Entities.
 
 THIS IS NOT a generic vanilla structure importer. Only files created by this
 marked MCEdit2 transfer format are accepted by these functions. Original BE
 Compound payloads (including unknown/modded members) remain opaque bytes;
 the only permitted transform at placement is root x/y/z relocation.
 
-No entity/UUID/link rewriting, old numeric conversions, registry inference
-or unverified cross-DataVersion placement is attempted.
+No entity/UUID/link rewriting, numeric ID conversion, registry inference
+or unverified cross-DataVersion placement is attempted. Legacy Anvil keeps
+original 0..4095 IDs and 0..15 metadata, without a DataFixer.
 """
 from __future__ import annotations
 
@@ -20,7 +21,8 @@ import os
 from . import nbtwire as nbt
 from .be_nbt import relocate_payload, validate_payload
 from .core import Box, CellSnapshot, EditSession, MAX_OPERATION_BLOCKS
-from .palette import BlockState, make_block
+from .palette import BlockState
+from . import legacy_anvil
 from .structure_io import (
     Structure, StructureError, MAX_COMPRESSED_BYTES, _area, _int_list, _triplet,
     decode_structure, encode_structure,
@@ -52,8 +54,10 @@ def _validate_transfer(transfer: BETransfer):
         raise BETransferError("Expected marked original-BE transfer")
     structure = transfer.structure
     _area(structure.size)
-    if type(structure.data_version) is not int or structure.data_version < 1519:
-        raise BETransferError("Only named Java 1.13+ native BE transfer supported")
+    if (type(structure.data_version) is not int
+            or not 0 < structure.data_version < 2**31):
+        raise BETransferError("Original BE transfer requires a known DataVersion")
+    is_legacy = structure.data_version < 1519
     if (not isinstance(transfer.source_origin, tuple)
             or len(transfer.source_origin) != 3
             or any(type(v) is not int or not -2**31 <= v < 2**31
@@ -75,9 +79,17 @@ def _validate_transfer(transfer: BETransfer):
             raise BETransferError("Duplicated, absent or out-of-range BE cell")
         seen.add(relative)
         state = positions[relative]
-        if (not isinstance(state, BlockState)
-                or state.name in ("minecraft:air", "minecraft:cave_air",
-                                  "minecraft:void_air")):
+        if not isinstance(state, BlockState):
+            raise BETransferError("BE must belong to a valid native BlockState")
+        if is_legacy:
+            try:
+                native_id, _ = legacy_anvil.id_meta(state)
+            except ValueError as exc:
+                raise BETransferError("Unrepresentable legacy numeric BE block") from exc
+            if native_id == 0:
+                raise BETransferError("Legacy BE cannot belong to numeric air ID")
+        elif state.name in ("minecraft:air", "minecraft:cave_air",
+                                  "minecraft:void_air"):
             raise BETransferError("BE must belong to a valid non-air block")
         if not isinstance(payload, bytes):
             raise BETransferError("BE record must be original opaque Compound bytes")
@@ -91,10 +103,13 @@ def capture_be_transfer(world, box: Box, limit=MAX_OPERATION_BLOCKS):
     if (not isinstance(box, Box) or box.volume > limit
             or box.volume > MAX_OPERATION_BLOCKS):
         raise BETransferError("Selection exceeds native transfer block limit")
-    if (getattr(world, "legacy", True)
-            or getattr(world, "is_mcregion", True)
-            or getattr(world, "version", 0) < 1519):
-        raise BETransferError("BE transfer requires named Java Anvil")
+    if (getattr(world, "is_mcregion", True)
+            or type(getattr(world, "legacy", None)) is not bool
+            or type(getattr(world, "version", None)) is not int
+            or world.version <= 0):
+        raise BETransferError("BE transfer requires versioned Java Anvil (.mca)")
+    if world.legacy and not getattr(world, "lossless_legacy_be_transfer", False):
+        raise BETransferError("Legacy numeric BE transfer requires a lossless backend")
     get_cell = getattr(world, "get_cell", None)
     if not callable(get_cell):
         raise BETransferError("Native backend cannot losslessly capture BE NBT")
@@ -223,11 +238,15 @@ def place_be_transfer(session: EditSession, transfer: BETransfer, origin):
     """One guarded undoable BE import, with full preflight and no overwrites."""
     _validate_transfer(transfer)
     world = session.world
-    if (getattr(world, "legacy", True)
-            or getattr(world, "is_mcregion", True)
+    is_legacy = transfer.structure.data_version < 1519
+    if (getattr(world, "is_mcregion", True)
+            or type(getattr(world, "legacy", None)) is not bool
+            or world.legacy != is_legacy
             or getattr(world, "version", None) != transfer.structure.data_version):
         raise BETransferError(
-            "Original BE transfer requires exact destination DataVersion")
+            "Original Anvil BE transfer requires exact destination DataVersion and format")
+    if is_legacy and not getattr(world, "lossless_legacy_be_transfer", False):
+        raise BETransferError("Destination does not support lossless legacy BE transfer")
     if (not isinstance(origin, tuple) or len(origin) != 3
             or any(type(v) is not int for v in origin)):
         raise BETransferError("BE transfer destination must be integer XYZ")
@@ -247,12 +266,21 @@ def place_be_transfer(session: EditSession, transfer: BETransfer, origin):
             raise BETransferError(
                 f"Destination {point} has BE; explicit overwrite is forbidden")
         # All destination chunks and Sections must already be present.
-        section(point[0] >> 4, point[2] >> 4, point[1] >> 4)
+        original_section = section(point[0] >> 4, point[2] >> 4, point[1] >> 4)
         validated = world.make_block(str(state))
         if validated != state:
             raise BETransferError("Unsafe native blockstate conversion")
         be = payloads.get(relative)
         if be is not None:
+            if is_legacy:
+                # Legacy set_cell requires numeric 0:0 when removing a BE
+                # after Save. Restrict targets to ORIGINAL air, including
+                # disk state, so Undo is safe both before and after Save.
+                index = ((point[1] & 15) << 8) | ((point[2] & 15) << 4) | (point[0] & 15)
+                if (legacy_anvil.id_meta(original_section[index]) != (0, 0)
+                        or legacy_anvil.id_meta(world.get_block(*point)) != (0, 0)):
+                    raise BETransferError(
+                        f"Legacy BE target {point} must be original numeric air (0:0)")
             source = tuple(transfer.source_origin[i] + relative[i]
                            for i in range(3))
             be = relocate_payload(be, source, point)

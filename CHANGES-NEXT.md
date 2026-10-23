@@ -1068,3 +1068,24 @@ available and is not automatically replaced.
 - Added native Anvil save/reopen/opaque-BE regression, non-cascading,
   duplicate refusal, atomic preflight rejection and offscreen Qt6
   dialog smoke coverage.
+
+## 0.3.0a78 — Lossless legacy numeric Anvil original-BE structure files
+
+- Extended the **explicit, marked MCEdit2 original Block Entity .nbt structure**
+  export/import workflow to original **pre-1.13 numeric Anvil (.mca)**
+  alongside previously supported named 1.13+ Anvil.
+- Export preserves original numeric block ID (0..4095) and metadata (0..15)
+  including unknown modded combinations as native opaque states. Original
+  BE Compound payloads are byte-identical; only BE root x/y/z TAG_Int changes
+  upon placement. No automatic DataFixer, registry mapping or mod link rewriting.
+- Requires a known, exact source/destination DataVersion and native BE-safe
+  backend, and refuses MCRegion (.mcr), existing destination BEs and unavailable
+  chunks/Sections. All legacy BE **destinations must be original numeric
+  air (ID 0, meta 0)** so removing transferred BE records remains safe
+  even after native Save followed by Undo and another Save.
+- Qt6 expert import/export warnings now disclose legacy numeric limitations.
+  Add disk-backed synthetic legacy roundtrip/Undo-after-Save and refusal tests.
+  Verified actual 1.12.2 (DataVersion 1343) and 1.21.1 (3955) original
+  private ZIPs in isolated temporary copies: both export/import/Undo/Redo,
+  save/reopen, Undo after Save, no original ZIP modification; not proof of
+  Minecraft client or mod controller linkage correctness.
