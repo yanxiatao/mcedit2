@@ -3,7 +3,7 @@ use iced::widget::{button,column,container,row,scrollable,text,text_input};
 use iced::{Element,Length,Theme};
 use mcedit2_world::{compatibility_label,inspect_input,launch,WorldSummary};
 use mcedit2_world::block_lookup::{parse_xyz,read_world_block};
-use mcedit2_world::editing::{parse_bounds,parse_state,Preview,Session};
+use mcedit2_world::editing::{parse_bounds,parse_state,Bounds,Preview,Session,Slice,SliceCell};
 use mcedit2_world::region_plan::NativeRegionCandidate;
 use mcedit2_world::region_transaction::{apply_single_region,finalize_single_region,rollback_pending_region};
 use std::collections::BTreeMap;
@@ -30,9 +30,32 @@ fn parse_region_name(name:&str)->Result<(i32,i32,&str),String>{
     }
     Ok((rx,rz,ext))
 }
+fn slice_cell_label(cell:&SliceCell)->String{
+    match cell {
+        SliceCell::MissingChunk => "·".into(),
+        SliceCell::MissingSection => "?".into(),
+        SliceCell::Present { original_block_entity:true,.. } => "@".into(),
+        SliceCell::Present { state,.. } => state.name.rsplit(':')
+            .next().unwrap_or("?").chars().next()
+            .unwrap_or('?').to_ascii_uppercase().to_string(),
+    }
+}
+fn shifted_slice(bounds:Bounds,dx:i32,dy:i32,dz:i32)->Result<String,String>{
+    let add=|v:i32,delta:i32|v.checked_add(delta)
+        .ok_or_else(||"Slice pan coordinate overflow".to_owned());
+    let first=(add(bounds.minimum[0],dx)?,add(bounds.minimum[1],dy)?,
+        add(bounds.minimum[2],dz)?);
+    let last=(add(bounds.maximum[0],dx)?,add(bounds.maximum[1],dy)?,
+        add(bounds.maximum[2],dz)?);
+    Bounds::new(first,last).map_err(|e|e.to_string())?;
+    Ok(format!("{},{},{};{},{},{}",first.0,first.1,first.2,
+        last.0,last.1,last.2))
+}
+
 #[derive(Default)]
 struct App{
     path:String,
+    slice_grid:Option<(usize,usize,Slice)>,
     worlds:Vec<WorldSummary>,
     current:Option<usize>,
     dimension_index:usize,
@@ -59,7 +82,7 @@ struct App{
 #[derive(Debug,Clone)]
 enum Message{
     Path(String),Open,Select(usize),Coordinates(String),Dimension(usize),
-    InspectBlock,SliceText(String),InspectSlice,
+    InspectBlock,SliceText(String),InspectSlice,PickSlice(i32,i32,i32),MoveSlice(i32,i32,i32),
     SelectionText(String),TargetText(String),FilterText(String),
     CloneDestination(String), PreviewClone,
     FillSeed(String), PreviewFill,
@@ -69,6 +92,87 @@ enum Message{
     PreviewEdit,ApplyEdit,UndoEdit,RedoEdit,DiscardEdits,Clear
 }
 impl App{
+    fn inspect_slice_view(&mut self){
+        self.slice_grid=None;
+        self.slice_result=match self.current_key() {
+            None=>"Select an indexed Java world first.".into(),
+            Some(key)=>match parse_bounds(&self.slice_area) {
+                Err(e)=>format!("Invalid 2D slice bounds: {e}"),
+                Ok(bounds)=>{
+                    let width=(bounds.maximum[0] as i64-bounds.minimum[0] as i64)+1;
+                    let depth=(bounds.maximum[2] as i64-bounds.minimum[2] as i64)+1;
+                    if bounds.minimum[1]!=bounds.maximum[1]{
+                        "2D slice view requires one Y layer.".into()
+                    }else {
+                        match self.current_session(key)
+                            .and_then(|session|session.inspect_slice(bounds)
+                                .map_err(|e|e.to_string())) {
+                            Ok(slice)=>{
+                                let legend=slice.text_map();
+                                if width<=16 && depth<=16 {
+                                    self.slice_grid=Some((key.0,key.1,slice));
+                                    format!("Interactive 2D grid ({width}x{depth}). Click a cell to inspect/select; @ = original Block Entity, ? = missing Section, · = missing chunk.\n{legend}")
+                                } else {
+                                    format!("Text-only slice ({width}x{depth}); use a 16x16 or smaller window for clickable cells.\n{legend}")
+                                }
+                            }
+                            Err(e)=>format!("2D slice read refused: {e}"),
+                        }
+                    }
+                }
+            }
+        };
+    }
+    fn pan_slice(&mut self,dx:i32,dy:i32,dz:i32){
+        match parse_bounds(&self.slice_area)
+            .map_err(|e|e.to_string())
+            .and_then(|area|shifted_slice(area,dx,dy,dz)) {
+            Ok(next)=>{
+                self.slice_area=next;
+                self.inspect_slice_view();
+            }
+            Err(e)=>self.slice_result=format!("Cannot move the slice: {e}"),
+        }
+    }
+    fn pick_slice(&mut self,x:i32,y:i32,z:i32){
+        let Some((world,dimension,slice))=self.slice_grid.as_ref() else {
+            self.slice_result="No current interactive slice to select.".into();
+            return;
+        };
+        if self.current_key()!=Some((*world,*dimension)) {
+            self.slice_grid=None;
+            self.slice_result="World or dimension switched; reload the slice.".into();
+            return;
+        }
+        if !(slice.bounds.minimum[0]..=slice.bounds.maximum[0]).contains(&x)
+            ||!(slice.bounds.minimum[2]..=slice.bounds.maximum[2]).contains(&z)
+            ||y!=slice.bounds.minimum[1]{
+            self.slice_result="Clicked coordinates outside original slice.".into();
+            return;
+        }
+        let row=(z-slice.bounds.minimum[2]) as usize;
+        let col=(x-slice.bounds.minimum[0]) as usize;
+        let Some(cell)=slice.rows.get(row).and_then(|cells|cells.get(col)) else {
+            self.slice_result="Slice contains no block at selected coordinate.".into();
+            return;
+        };
+        let detail=match cell {
+            SliceCell::MissingChunk=>"Missing original chunk; edits prohibited".into(),
+            SliceCell::MissingSection=>"Missing original Section; edits prohibited".into(),
+            SliceCell::Present {state,original_block_entity:true}=>format!(
+                "{} (ORIGINAL Block Entity: replacement prohibited)",
+                mcedit2_world::editing::render_state(state)
+            ),
+            SliceCell::Present {state,original_block_entity:false}=>
+                mcedit2_world::editing::render_state(state),
+        };
+        self.query_coordinates=format!("{x}, {y}, {z}");
+        self.edit_area=format!("{x},{y},{z};{x},{y},{z}");
+        self.prepared=None;
+        self.save_preview=None;
+        self.save_phrase.clear();
+        self.block_result=format!("Selected interactive 2D cell ({x},{y},{z}): {detail}");
+    }
     fn clear_cached_world(&mut self, root:&std::path::Path) {
         self.prepared=None;
         self.save_preview=None;
@@ -79,6 +183,7 @@ impl App{
         );
         self.block_result.clear();
         self.slice_result.clear();
+        self.slice_grid=None;
     }
     fn current_world_context(&self)->Result<(usize,usize,WorldSummary,String),String>{
         let (wi,di)=self.current_key().ok_or("Select an original world and dimension")?;
@@ -320,6 +425,7 @@ impl App{
     }
     fn apply_batch(&mut self){
         self.save_preview=None;
+        self.slice_grid=None;
         if self.readonly {
             self.edit_report="-view disallows editor changes, including the in-memory overlay.".into();
             return;
@@ -342,6 +448,7 @@ impl App{
     }
     fn history(&mut self, redo:bool){
         self.save_preview=None;
+        self.slice_grid=None;
         self.prepared=None;
         let Some(key)=self.current_key() else{return};
         let result=self.current_session(key).and_then(|editor|{
@@ -359,6 +466,8 @@ impl App{
 fn update(app:&mut App,message:Message){
     match message{
         Message::Path(x)=>app.path=x,
+        Message::PickSlice(x,y,z)=>app.pick_slice(x,y,z),
+        Message::MoveSlice(dx,dy,dz)=>app.pan_slice(dx,dy,dz),
         Message::SavePhrase(value)=>app.save_phrase=value,
         Message::RecoverRegion(value)=>app.recover_region=value,
         Message::RecoveryPhrase(value)=>app.recovery_phrase=value,
@@ -368,6 +477,7 @@ fn update(app:&mut App,message:Message){
         Message::RollbackRegion=>app.recover_region(true),
         Message::Open=>{
             app.save_preview=None;
+            app.slice_grid=None;
             if app.path.trim().is_empty(){
                 app.messages.push("Enter a Java world folder or level.dat path".into());
             } else {
@@ -386,6 +496,7 @@ fn update(app:&mut App,message:Message){
         }
         Message::Select(index)=>{
             app.save_preview=None;
+            app.slice_grid=None;
             if index<app.worlds.len(){
                 app.current=Some(index);
                 app.dimension_index=0;
@@ -397,6 +508,7 @@ fn update(app:&mut App,message:Message){
         Message::Coordinates(value)=>app.query_coordinates=value,
         Message::Dimension(index)=>{
             app.save_preview=None;
+            app.slice_grid=None;
             if app.current.and_then(|i|app.worlds.get(i))
                 .is_some_and(|w|index<w.dimensions.len()){
                 app.dimension_index=index;
@@ -428,22 +540,11 @@ fn update(app:&mut App,message:Message){
                 }
             };
         },
-        Message::SliceText(value)=>app.slice_area=value,
-        Message::InspectSlice=>{
-            app.slice_result=match app.current_key(){
-                None=>"Select an indexed Java world first.".into(),
-                Some(key)=>{
-                    match parse_bounds(&app.slice_area) {
-                        Err(e)=>format!("Invalid slice bounds: {e}"),
-                        Ok(bounds)=>match app.current_session(key).and_then(|session|
-                            session.inspect_slice(bounds).map_err(|e|e.to_string())) {
-                            Ok(slice)=>slice.text_map(),
-                            Err(e)=>format!("2D slice read refused: {e}"),
-                        }
-                    }
-                }
-            };
+        Message::SliceText(value)=>{
+            app.slice_area=value;
+            app.slice_grid=None;
         },
+        Message::InspectSlice=>app.inspect_slice_view(),
         Message::SelectionText(value)=>{
             app.edit_area=value;app.prepared=None;app.save_preview=None;app.save_phrase.clear();
         }
@@ -496,6 +597,7 @@ fn update(app:&mut App,message:Message){
         },
         Message::ImportPatch=>{
             app.save_preview=None;
+            app.slice_grid=None;
             app.prepared=None;
             if app.readonly {
                 app.edit_report="-view prohibits importing staged edits.".into();
@@ -525,6 +627,7 @@ fn update(app:&mut App,message:Message){
         Message::RedoEdit=>app.history(true),
         Message::DiscardEdits=>{
             app.save_preview=None;
+            app.slice_grid=None;
             app.prepared=None;
             if let Some(key)=app.current_key(){
                 if let Some(editor)=app.sessions.get_mut(&key){
@@ -535,6 +638,7 @@ fn update(app:&mut App,message:Message){
         }
         Message::Clear=>{
             app.save_preview=None;
+            app.slice_grid=None;
             app.recovery_phrase.clear();
             app.save_phrase.clear();
             app.path.clear();app.worlds.clear();
@@ -605,6 +709,36 @@ fn view(app:&App)->Element<'_,Message>{
                 .on_input(Message::SliceText).width(Length::Fill),
             button("Inspect 2D slice").on_press(Message::InspectSlice)
         ].spacing(8));
+        body=body.push(row![
+            button("← 16").on_press(Message::MoveSlice(-16,0,0)),
+            button("16 →").on_press(Message::MoveSlice(16,0,0)),
+            button("↑ Z").on_press(Message::MoveSlice(0,0,-16)),
+            button("↓ Z").on_press(Message::MoveSlice(0,0,16)),
+            button("Y + 1").on_press(Message::MoveSlice(0,1,0)),
+            button("Y - 1").on_press(Message::MoveSlice(0,-1,0)),
+        ].spacing(5));
+        if let Some((world_index,dimension_index,slice))=app.slice_grid.as_ref() {
+            if app.current_key()==Some((*world_index,*dimension_index)) {
+                let mut visual=column![].spacing(1);
+                for (iz,cells) in slice.rows.iter().enumerate() {
+                    let mut row_buttons=row![].spacing(1);
+                    for (ix,cell) in cells.iter().enumerate() {
+                        let x=slice.bounds.minimum[0]+ix as i32;
+                        let y=slice.bounds.minimum[1];
+                        let z=slice.bounds.minimum[2]+iz as i32;
+                        row_buttons=row_buttons.push(
+                            button(text(slice_cell_label(cell)).size(12))
+                                .width(Length::Fixed(28.0))
+                                .height(Length::Fixed(24.0))
+                                .on_press(Message::PickSlice(x,y,z))
+                        );
+                    }
+                    visual=visual.push(row_buttons);
+                }
+                body=body.push(text("Interactive 2D blocks (click to inspect and select a 1x1 edit area)"));
+                body=body.push(scrollable(visual).height(Length::Fixed(420.0)));
+            }
+        }
         if !app.slice_result.is_empty(){
             body=body.push(text(&app.slice_result).font(iced::Font::MONOSPACE));
         }
@@ -728,7 +862,29 @@ fn main()->iced::Result{
 
 #[cfg(test)]
 mod tests{
-    use super::parse_region_name;
+    use super::{parse_region_name,shifted_slice,slice_cell_label};
+    use mcedit2_world::editing::{Bounds,SliceCell};
+    use mcedit2_world::sections::State;
+    #[test]
+    fn interactive_slice_shift_and_cell_symbols_reject_overflow(){
+        let bounds=Bounds::new((-16,-64,0),(-1,-64,15)).unwrap();
+        assert_eq!(
+            shifted_slice(bounds,16,1,-16).unwrap(),
+            "0,-63,-16;15,-63,-1"
+        );
+        let edge=Bounds::new((29_999_999,320,0),(29_999_999,320,0)).unwrap();
+        assert!(shifted_slice(edge,16,0,0).is_err());
+        assert_eq!(slice_cell_label(&SliceCell::MissingChunk),"·");
+        assert_eq!(slice_cell_label(&SliceCell::MissingSection),"?");
+        assert_eq!(slice_cell_label(&SliceCell::Present {
+            state:State{name:"minecraft:oak_log".into(),properties:vec![]},
+            original_block_entity:false,
+        }),"O");
+        assert_eq!(slice_cell_label(&SliceCell::Present {
+            state:State{name:"mod:machine".into(),properties:vec![]},
+            original_block_entity:true,
+        }),"@");
+    }
     #[test]
     fn original_region_name_parser_accepts_signed_coords_and_refuses_extra_paths(){
         assert_eq!(parse_region_name("r.-1.2.mca").unwrap(),(-1,2,"mca"));

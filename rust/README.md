@@ -342,3 +342,17 @@ The stage must still be synced and the original immutable backup retained.
 Both apply and rollback use the same platform-correct file replacement.
 Do NOT edit an active Minecraft world: Windows file sharing/locking errors
 are intentionally not bypassed. Cross-region atomicity is still not offered.
+
+## Next migration batch 2/5 — clickable 2D native iced viewport
+
+The iced frontend now renders a 16x16 (or smaller) clickable grid using
+original Java block slices, original Block Entity markers, and explicit
+missing-chunk/Section cells. Clicking a cell displays its full numeric or
+named/modded BlockState and safely selects exactly that coordinate for
+normal 3D preview/stage/Undo workflows. Arrow/height-layer controls pan
+by 16 X/Z blocks or one Y level. Larger original 2D slices retain the
+read-only 64x64 text-map inspection without creating thousands of widgets.
+Stale grids are invalidated when the world/dimension changes, or after
+any in-memory mutation/Undo/Redo, so selections cannot silently use a
+previously edited viewport. This is an interactive widget grid, not yet
+a textured chunk mesh or full 3D GPU renderer. No builds or CI triggered.

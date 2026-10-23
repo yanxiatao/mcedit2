@@ -183,3 +183,11 @@ backups, and the editor refuses `-view` writes. This is experimental,
 NOT full MCEdit2 editing compatibility: it cannot write Alpha chunk files,
 external `.mcc` references, more than one Region atomically, or arbitrary
 Block Entities/entities/biomes. Testing is required before live use.
+
+### Native clickable 2D plane (migration batch 2/5)
+
+Signed X/Z and negative-Y slice planes display one clickable cell per
+original block (up to 16x16). Clicking selects a corresponding single-block
+editing region, while normal Block Entity guards still govern preview/commit.
+The full graphical 3D renderer, textured voxel meshes, visual selection
+brushes and all-version GPU lighting are still outstanding.
