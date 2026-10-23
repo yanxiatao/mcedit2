@@ -1210,3 +1210,14 @@ available and is not automatically replaced.
   and DataVersion refusals.
 - This is the 5th feature commit of the requested batch. Full CI is
   now enabled to validate all five features together.
+
+## 0.3.0a85 — BE-aware pending queue atomic grouped placement (1/5)
+
+- Native multi-file BE structure queue backend now preflights every original
+  Anvil destination together and places them in ONE Undo step.
+- The preview is read-only; BE collision, unavailable chunk/Section, duplicate
+  structure footprint, mismatched DataVersion and combined budgets fail closed.
+- No implicit last-writer-wins when queued original BE structures overlap.
+- Synthetic native Anvil Save/reopen and Undo-after-Save regression coverage.
+- Local private 1.21.1 world verified two BE targets and one Undo, without
+  modifying the original ZIP. CI intentionally deferred [skip ci].
