@@ -1156,3 +1156,20 @@ available and is not automatically replaced.
 - Added Qt6 expert File menu import/export options and targeted synthetic
   native Anvil save/reopen, post-save Undo and failure fixtures.
 - No CI for this commit [skip ci], per five-feature batch request.
+
+## 0.3.0a82 — Non-destructive source-air mask for all expert BE imports (3/5)
+
+- Added opt-in skip_air=True to original native BE structure placement,
+  Sponge v2/v3 BE, Java .nbt BE and legacy Alpha .schematic BE wrappers.
+- Skip ONLY exact source vanilla minecraft:air/cave_air/void_air without
+  properties, or for old numeric Anvil only original ID=0 and metadata=0.
+  Never infer modded "air-like" blocks; all source BE identities are
+  validated first. No write is staged for skipped cells, regardless of
+  destination, avoiding unwanted erasure by air in partial pastes.
+- The Qt6 File menu has a checkable "BE imports: skip exact source air"
+  toggle used by each expert importer. Default off preserves earlier behavior.
+  Real non-air cells and BEs continue full native preflight; one Undo,
+  Save/reopen and original region backups unchanged.
+- Added synthetic modern and numeric legacy Anvil Undo/Save regressions,
+  custom air-name non-skipping, strict invalid option refusal.
+- CI intentionally deferred while batching five feature commits [skip ci].

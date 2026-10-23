@@ -368,6 +368,10 @@ class MainWindow(QMainWindow):
                         self.import_schem_be)
         self.add_action(file_menu, "Import vanilla Java structure with BE (.nbt; expert)…", "",
                         self.import_vanilla_be_structure)
+        self.be_import_skip_air_action = QAction(
+            "BE imports: skip exact source air (preserve target blocks)", self)
+        self.be_import_skip_air_action.setCheckable(True)
+        file_menu.addAction(self.be_import_skip_air_action)
         self.add_action(file_menu, "Import original BE transfer (.nbt; expert)…", "",
                         self.import_be_transfer)
         self.add_action(file_menu, "Queue structures for later placement…", "",
@@ -1819,7 +1823,8 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.No)
             if answer == QMessageBox.StandardButton.Yes:
                 self._perform(lambda: place_classic_be(
-                    self.session, transfer, origin))
+                    self.session, transfer, origin,
+                    skip_air=self.be_import_skip_air_action.isChecked()))
         except Exception as exc:
             QMessageBox.critical(self, "Legacy BE schematic import refused", str(exc))
 
@@ -1885,7 +1890,8 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.No)
             if accepted == QMessageBox.StandardButton.Yes:
                 self._perform(lambda: place_schem_be(
-                    self.session, transfer, origin))
+                    self.session, transfer, origin,
+                    skip_air=self.be_import_skip_air_action.isChecked()))
         except Exception as exc:
             QMessageBox.critical(self, "Sponge BE import refused", str(exc))
 
@@ -1956,7 +1962,8 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.No)
             if confirmation == QMessageBox.StandardButton.Yes:
                 self._perform(lambda: place_vanilla_be_structure(
-                    self.session, transfer, origin))
+                    self.session, transfer, origin,
+                    skip_air=self.be_import_skip_air_action.isChecked()))
         except Exception as exc:
             QMessageBox.critical(self, "Standard BE import refused", str(exc))
 
@@ -2039,7 +2046,9 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.No)
             if answer == QMessageBox.StandardButton.Yes:
                 self._perform(
-                    lambda: place_be_transfer(self.session, transfer, origin))
+                    lambda: place_be_transfer(
+                        self.session, transfer, origin,
+                        skip_air=self.be_import_skip_air_action.isChecked()))
         except Exception as exc:
             QMessageBox.critical(self, "Original BE import refused", str(exc))
 

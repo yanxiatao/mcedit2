@@ -108,10 +108,10 @@ def decode_classic_be(raw: bytes) -> BETransfer:
     return transfer
 
 
-def place_classic_be(session, transfer: BETransfer, origin):
+def place_classic_be(session, transfer: BETransfer, origin, *, skip_air: bool = False):
     """Same-version native Anvil, original-air BE destination, one Undo."""
     _validate_legacy(transfer)
-    return place_be_transfer(session, transfer, origin)
+    return place_be_transfer(session, transfer, origin, skip_air=skip_air)
 
 
 def load_classic_be(path):

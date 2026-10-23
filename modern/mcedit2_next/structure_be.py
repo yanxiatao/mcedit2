@@ -23,6 +23,7 @@ from .be_nbt import relocate_payload, validate_payload
 from .core import Box, CellSnapshot, EditSession, MAX_OPERATION_BLOCKS
 from .palette import BlockState
 from . import legacy_anvil
+from .clone_mask import is_vanilla_source_air
 from .structure_io import (
     Structure, StructureError, MAX_COMPRESSED_BYTES, _area, _int_list, _triplet,
     decode_structure, encode_structure,
@@ -234,9 +235,12 @@ def save_be_transfer(path, transfer: BETransfer):
             temporary.unlink(missing_ok=True)
 
 
-def place_be_transfer(session: EditSession, transfer: BETransfer, origin):
+def place_be_transfer(session: EditSession, transfer: BETransfer, origin, *,
+                      skip_air: bool = False):
     """One guarded undoable BE import, with full preflight and no overwrites."""
     _validate_transfer(transfer)
+    if type(skip_air) is not bool:
+        raise BETransferError("skip_air must be a boolean")
     world = session.world
     is_legacy = transfer.structure.data_version < 1519
     if (getattr(world, "is_mcregion", True)
@@ -259,6 +263,13 @@ def place_be_transfer(session: EditSession, transfer: BETransfer, origin):
     payloads = dict(transfer.block_entities)
     planned = []
     for relative, state in transfer.structure.blocks:
+        # Skip only exact original air, never arbitrary modded air-like IDs.
+        if skip_air:
+            if is_legacy:
+                if legacy_anvil.id_meta(state) == (0, 0):
+                    continue
+            elif is_vanilla_source_air(state):
+                continue
         point = tuple(origin[i] + relative[i] for i in range(3))
         if any(not -2**31 <= v < 2**31 for v in point):
             raise BETransferError("Target outside NBT coordinate range")
