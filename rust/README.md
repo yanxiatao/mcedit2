@@ -420,3 +420,13 @@ incorrectly converted. The native Y/Z/X ordering, dimensions, original
 source provenance and existing BE collision/Undo checks remain intact.
 Iced provides immediate transform preview buttons, all still requiring
 explicit normal stage confirmation. No CI or application builds this round.
+
+## Migration batch 3, round 3/5 — interactive orthogonal vertical slices
+
+The native editor now supports strict original X/Y and Z/Y vertical planes
+up to 64x64 with explicit missing chunks/Sections and original BE markers.
+The top row corresponds to maximum Y; negative Y and custom Java heights
+are supported. iced shows clickable 16x16 vertical grids whose block cells
+select an exact 1x1x1 staging area; larger planes remain read-only text
+maps. Existing transaction/BE/Undo safety applies to all selections.
+This adds a second graphical projection, not textured 3D GPU rendering.

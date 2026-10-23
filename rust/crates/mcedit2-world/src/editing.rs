@@ -259,6 +259,62 @@ impl Slice {
 /// Verified, UNSAVED original-byte chunk patch candidate. A future writer
 /// MUST recheck the original NBT digest, region sector layout, backups,
 /// heightmaps, lighting and transaction integrity before any disk write.
+
+/// Orthogonal vertical inspection plane, Y always runs from highest row
+/// to lowest, with exactly one horizontal axis varying. Missing original
+/// source cells are NOT generated as air.
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+pub enum VerticalAxis { AlongX, AlongZ }
+#[derive(Debug,Clone)]
+pub struct VerticalSlice {
+    pub bounds:Bounds,
+    pub axis:VerticalAxis,
+    pub source_chunks:usize,
+    pub block_entities:usize,
+    pub missing_chunks:usize,
+    pub missing_sections:usize,
+    pub rows:Vec<Vec<SliceCell>>,
+}
+impl VerticalSlice {
+    pub fn coordinate(&self,row:usize,column:usize)->Option<(i32,i32,i32)>{
+        let height=(self.bounds.maximum[1]-self.bounds.minimum[1]+1) as usize;
+        let width=match self.axis{
+            VerticalAxis::AlongX=>(self.bounds.maximum[0]-self.bounds.minimum[0]+1) as usize,
+            VerticalAxis::AlongZ=>(self.bounds.maximum[2]-self.bounds.minimum[2]+1) as usize,
+        };
+        if row>=height||column>=width{return None;}
+        let y=self.bounds.maximum[1]-row as i32;
+        match self.axis{
+            VerticalAxis::AlongX=>Some((
+                self.bounds.minimum[0]+column as i32,y,self.bounds.minimum[2],
+            )),
+            VerticalAxis::AlongZ=>Some((
+                self.bounds.minimum[0],y,self.bounds.minimum[2]+column as i32,
+            )),
+        }
+    }
+    pub fn text_map(&self)->String{
+        let mut out=format!(
+            "Vertical {:?} original plane; BE={}, missing chunks={}, missing Sections={}\n",
+            self.axis,self.block_entities,self.missing_chunks,self.missing_sections
+        );
+        for (line,row) in self.rows.iter().enumerate(){
+            out.push_str(&format!("Y={:>5} |",self.bounds.maximum[1]-line as i32));
+            for cell in row{
+                let glyph=match cell{
+                    SliceCell::MissingChunk=>' ',
+                    SliceCell::MissingSection=>'?',
+                    SliceCell::Present {original_block_entity:true,..}=>'@',
+                    SliceCell::Present {state,..}=>state.name.chars().last().unwrap_or('*'),
+                };
+                out.push(glyph);
+            }
+            out.push_str("|\n");
+        }
+        out
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct NativeChunkCandidate {
     pub chunk_x: i32,
@@ -444,6 +500,64 @@ impl Session {
         }
         Ok(Slice {bounds,source_chunks:chunks.len(),present,missing_chunks,
             missing_sections,block_entities,rows})
+    }
+    /// Inspect an X/Y or Z/Y vertical plane (up to 64x64). Only existing
+    /// original chunks/Sections are read. No edits and no world writes.
+    pub fn inspect_vertical_slice(&self,bounds:Bounds)->Result<VerticalSlice,WorldError>{
+        let x_static=bounds.minimum[0]==bounds.maximum[0];
+        let z_static=bounds.minimum[2]==bounds.maximum[2];
+        if !x_static && !z_static {
+            return Err(refuse("Vertical slice must keep X or Z fixed"));
+        }
+        let axis=if z_static{VerticalAxis::AlongX}else{VerticalAxis::AlongZ};
+        let width=match axis{
+            VerticalAxis::AlongX=>(bounds.maximum[0]-bounds.minimum[0]+1) as usize,
+            VerticalAxis::AlongZ=>(bounds.maximum[2]-bounds.minimum[2]+1) as usize,
+        };
+        let height=(bounds.maximum[1]-bounds.minimum[1]+1) as usize;
+        if width>64||height>64||bounds.volume()?>MAX_CELLS{
+            return Err(refuse("Vertical original plane exceeds 64x64 cells"));
+        }
+        let mut cache:BTreeMap<ChunkPos,Option<Chunk>>=BTreeMap::new();
+        let (mut be,mut missing_chunks,mut missing_sections)=(0,0,0);
+        let mut rows=Vec::with_capacity(height);
+        for y in (bounds.minimum[1]..=bounds.maximum[1]).rev(){
+            let mut line=Vec::with_capacity(width);
+            for offset in 0..width{
+                let (x,z)=match axis{
+                    VerticalAxis::AlongX=>(bounds.minimum[0]+offset as i32,bounds.minimum[2]),
+                    VerticalAxis::AlongZ=>(bounds.minimum[0],bounds.minimum[2]+offset as i32),
+                };
+                let key=(x.div_euclid(16),z.div_euclid(16));
+                if !cache.contains_key(&key){
+                    cache.insert(key,read_world_chunk(
+                        &self.world,&self.dimension,key.0,key.1
+                    )?);
+                }
+                let cell=match cache.get(&key).and_then(Option::as_ref){
+                    None=>{missing_chunks+=1;SliceCell::MissingChunk},
+                    Some(chunk)=>match chunk.block(
+                        x.rem_euclid(16) as u8,y,z.rem_euclid(16) as u8
+                    ){
+                        None=>{missing_sections+=1;SliceCell::MissingSection},
+                        Some(original)=>{
+                            let is_be=chunk.has_block_entity(x,y,z);
+                            if is_be{be+=1;}
+                            SliceCell::Present{
+                                state:self.overlay.get(&(x,y,z)).unwrap_or(original).clone(),
+                                original_block_entity:is_be,
+                            }
+                        }
+                    },
+                };
+                line.push(cell);
+            }
+            rows.push(line);
+        }
+        Ok(VerticalSlice {
+            bounds,axis,source_chunks:cache.len(),
+            block_entities:be,missing_chunks,missing_sections,rows,
+        })
     }
     /// Bounded 6-neighbor flood fill over the *effective* unsaved block
     /// states. All cells are read before preview; no BEs are mutated.

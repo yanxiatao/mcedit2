@@ -3,7 +3,7 @@ use iced::widget::{button,column,container,row,scrollable,text,text_input};
 use iced::{Element,Length,Theme};
 use mcedit2_world::{compatibility_label,inspect_input,launch,WorldSummary};
 use mcedit2_world::block_lookup::{parse_xyz,read_world_block};
-use mcedit2_world::editing::{parse_bounds,parse_state,Bounds,Preview,Session,Slice,SliceCell};
+use mcedit2_world::editing::{parse_bounds,parse_state,Bounds,Preview,Session,Slice,SliceCell,VerticalSlice};
 use mcedit2_world::region_plan::NativeRegionCandidate;
 use mcedit2_world::clipboard::HorizontalTransform;
 use mcedit2_world::region_transaction::{apply_single_region,finalize_single_region,rollback_pending_region};
@@ -57,6 +57,9 @@ fn shifted_slice(bounds:Bounds,dx:i32,dy:i32,dz:i32)->Result<String,String>{
 struct App{
     path:String,
     slice_grid:Option<(usize,usize,Slice)>,
+    vertical_grid:Option<(usize,usize,VerticalSlice)>,
+    vertical_area:String,
+    vertical_report:String,
     worlds:Vec<WorldSummary>,
     current:Option<usize>,
     dimension_index:usize,
@@ -88,6 +91,7 @@ struct App{
 enum Message{
     Path(String),Open,Select(usize),Coordinates(String),Dimension(usize),
     InspectBlock,InspectOriginalBlockEntity,SliceText(String),InspectSlice,PickSlice(i32,i32,i32),MoveSlice(i32,i32,i32),
+    VerticalText(String),InspectVertical,PickVertical(usize,usize),
     SelectionText(String),TargetText(String),FilterText(String),
     CloneDestination(String), PreviewClone,
     FillSeed(String), PreviewFill,
@@ -101,6 +105,45 @@ enum Message{
     PreviewEdit,ApplyEdit,UndoEdit,RedoEdit,DiscardEdits,Clear
 }
 impl App{
+    fn inspect_vertical_view(&mut self){
+        self.vertical_grid=None;
+        self.vertical_report=match self.current_key(){
+            None=>"Select a Java world first.".into(),
+            Some(key)=>match parse_bounds(&self.vertical_area){
+                Err(e)=>format!("Invalid vertical area: {e}"),
+                Ok(bounds)=>match self.current_session(key)
+                    .and_then(|editor|editor.inspect_vertical_slice(bounds)
+                        .map_err(|e|e.to_string())){
+                    Ok(slice)=>{
+                        let explanation=slice.text_map();
+                        let h=slice.rows.len();
+                        let width=slice.rows.first().map_or(0,Vec::len);
+                        if width<=16&&h<=16 {
+                            self.vertical_grid=Some((key.0,key.1,slice));
+                            format!("Clickable {width}x{h} original vertical plane. Select exact blocks below.\n{explanation}")
+                        }else{
+                            format!("Text-only {width}x{h} original plane; use <=16x16 for clickable cells.\n{explanation}")
+                        }
+                    },
+                    Err(e)=>format!("Vertical inspection refused: {e}"),
+                }
+            }
+        };
+    }
+    fn pick_vertical(&mut self,row:usize,col:usize){
+        let Some((wi,di,plane))=self.vertical_grid.as_ref() else{return};
+        if self.current_key()!=Some((*wi,*di)){
+            self.vertical_grid=None;
+            self.vertical_report="Vertical plane stale; re-inspect selected dimension.".into();
+            return;
+        }
+        let Some((x,y,z))=plane.coordinate(row,col) else{return};
+        self.edit_area=format!("{x},{y},{z};{x},{y},{z}");
+        self.query_coordinates=format!("{x}, {y}, {z}");
+        self.save_preview=None;
+        self.prepared=None;
+        self.block_result=format!("Selected vertical plane original block at ({x},{y},{z}); inspect the source Block Entity before editing.");
+    }
     fn inspect_slice_view(&mut self){
         self.slice_grid=None;
         self.slice_result=match self.current_key() {
@@ -193,6 +236,7 @@ impl App{
         self.block_result.clear();
         self.slice_result.clear();
         self.slice_grid=None;
+        self.vertical_grid=None;
     }
     fn current_world_context(&self)->Result<(usize,usize,WorldSummary,String),String>{
         let (wi,di)=self.current_key().ok_or("Select an original world and dimension")?;
@@ -338,7 +382,8 @@ impl App{
             edit_target:"minecraft:stone".into(),
             clone_destination:"0, 64, 0".into(),
             fill_seed:"0, 64, 0".into(),
-            clipboard_destination:"0, 64, 0".into(),..Default::default()
+            clipboard_destination:"0, 64, 0".into(),
+            vertical_area:"0,-64,0;15,-49,0".into(),..Default::default()
         };
         for path in &args.worlds {
             match inspect_input(path) {
@@ -436,6 +481,7 @@ impl App{
     fn apply_batch(&mut self){
         self.save_preview=None;
         self.slice_grid=None;
+        self.vertical_grid=None;
         if self.readonly {
             self.edit_report="-view disallows editor changes, including the in-memory overlay.".into();
             return;
@@ -459,6 +505,7 @@ impl App{
     fn history(&mut self, redo:bool){
         self.save_preview=None;
         self.slice_grid=None;
+        self.vertical_grid=None;
         self.prepared=None;
         let Some(key)=self.current_key() else{return};
         let result=self.current_session(key).and_then(|editor|{
@@ -609,6 +656,7 @@ fn update(app:&mut App,message:Message){
         Message::Open=>{
             app.save_preview=None;
             app.slice_grid=None;
+            app.vertical_grid=None;
             if app.path.trim().is_empty(){
                 app.messages.push("Enter a Java world folder or level.dat path".into());
             } else {
@@ -628,6 +676,7 @@ fn update(app:&mut App,message:Message){
         Message::Select(index)=>{
             app.save_preview=None;
             app.slice_grid=None;
+            app.vertical_grid=None;
             if index<app.worlds.len(){
                 app.current=Some(index);
                 app.dimension_index=0;
@@ -640,6 +689,7 @@ fn update(app:&mut App,message:Message){
         Message::Dimension(index)=>{
             app.save_preview=None;
             app.slice_grid=None;
+            app.vertical_grid=None;
             if app.current.and_then(|i|app.worlds.get(i))
                 .is_some_and(|w|index<w.dimensions.len()){
                 app.dimension_index=index;
@@ -685,6 +735,11 @@ fn update(app:&mut App,message:Message){
             })();
             app.block_result=result.unwrap_or_else(|e|format!("Block Entity inspection refused: {e}"));
         },
+        Message::VerticalText(value)=>{
+            app.vertical_area=value;app.vertical_grid=None;
+        },
+        Message::InspectVertical=>app.inspect_vertical_view(),
+        Message::PickVertical(row,col)=>app.pick_vertical(row,col),
         Message::SliceText(value)=>{
             app.slice_area=value;
             app.slice_grid=None;
@@ -743,6 +798,7 @@ fn update(app:&mut App,message:Message){
         Message::ImportPatch=>{
             app.save_preview=None;
             app.slice_grid=None;
+            app.vertical_grid=None;
             app.prepared=None;
             if app.readonly {
                 app.edit_report="-view prohibits importing staged edits.".into();
@@ -773,6 +829,7 @@ fn update(app:&mut App,message:Message){
         Message::DiscardEdits=>{
             app.save_preview=None;
             app.slice_grid=None;
+            app.vertical_grid=None;
             app.prepared=None;
             if let Some(key)=app.current_key(){
                 if let Some(editor)=app.sessions.get_mut(&key){
@@ -784,6 +841,7 @@ fn update(app:&mut App,message:Message){
         Message::Clear=>{
             app.save_preview=None;
             app.slice_grid=None;
+            app.vertical_grid=None;
             app.recovery_phrase.clear();
             app.save_phrase.clear();
             app.path.clear();app.worlds.clear();
@@ -887,6 +945,34 @@ fn view(app:&App)->Element<'_,Message>{
         }
         if !app.slice_result.is_empty(){
             body=body.push(text(&app.slice_result).font(iced::Font::MONOSPACE));
+        }
+        body=body.push(row![
+            text_input("Vertical X/Y or Z/Y plane: X1,Y1,Z1; X2,Y2,Z2",
+                &app.vertical_area)
+                .on_input(Message::VerticalText).width(Length::Fill),
+            button("Inspect vertical plane").on_press(Message::InspectVertical)
+        ].spacing(8));
+        if let Some((wi,di,plane))=app.vertical_grid.as_ref(){
+            if app.current_key()==Some((*wi,*di)){
+                let mut rows=column![].spacing(1);
+                for (y_index,line) in plane.rows.iter().enumerate(){
+                    let mut cells=row![].spacing(1);
+                    for (x_index,cell) in line.iter().enumerate(){
+                        cells=cells.push(
+                            button(text(slice_cell_label(cell)).size(12))
+                                .width(Length::Fixed(28.0))
+                                .height(Length::Fixed(24.0))
+                                .on_press(Message::PickVertical(y_index,x_index))
+                        );
+                    }
+                    rows=rows.push(cells);
+                }
+                body=body.push(text("Vertical slice: top row is highest Y, @ indicates original BE."));
+                body=body.push(scrollable(rows).height(Length::Fixed(420.0)));
+            }
+        }
+        if !app.vertical_report.is_empty(){
+            body=body.push(text(&app.vertical_report).font(iced::Font::MONOSPACE));
         }
         let editing_inputs=column![
             text("3D block edit overlay — preview, stage and Undo/Redo (NOT SAVED)").size(19),

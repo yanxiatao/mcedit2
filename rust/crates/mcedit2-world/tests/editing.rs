@@ -899,3 +899,26 @@ fn opaque_original_block_entity_inspection_preserves_moded_fields_verbatim(){
     assert!(editor.inspect_original_block_entity((1,-64,3)).unwrap().is_none());
     assert_eq!(fixture.bytes_now(),original);
 }
+
+#[test]
+fn original_vertical_plane_reports_negative_y_missing_sections_and_exact_block_selection(){
+    use mcedit2_world::editing::{VerticalAxis,SliceCell};
+    let world=NativeWorld::create(true);
+    let editor=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    let area=Bounds::new((0,-65,0),(2,-63,0)).unwrap();
+    let plane=editor.inspect_vertical_slice(area).unwrap();
+    assert_eq!(plane.axis,VerticalAxis::AlongX);
+    assert_eq!(plane.rows.len(),3);
+    assert_eq!(plane.rows[0].len(),3);
+    assert_eq!(plane.coordinate(0,2),Some((2,-63,0)));
+    assert_eq!(plane.coordinate(2,0),Some((0,-65,0)));
+    assert_eq!(plane.coordinate(3,0),None);
+    assert_eq!(plane.missing_sections,3);
+    assert!(matches!(plane.rows[2][0],SliceCell::MissingSection));
+    assert_eq!(world.bytes_now(),world.original_region);
+    let z_plane=editor.inspect_vertical_slice(
+        Bounds::new((0,-64,0),(0,-63,2)).unwrap()
+    ).unwrap();
+    assert_eq!(z_plane.axis,VerticalAxis::AlongZ);
+    assert_eq!(z_plane.coordinate(0,2),Some((0,-63,2)));
+}
