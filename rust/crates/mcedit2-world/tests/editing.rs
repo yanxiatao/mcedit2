@@ -922,3 +922,56 @@ fn original_vertical_plane_reports_negative_y_missing_sections_and_exact_block_s
     assert_eq!(z_plane.axis,VerticalAxis::AlongZ);
     assert_eq!(z_plane.coordinate(0,2),Some((0,-63,2)));
 }
+
+#[test]
+fn original_numeric_and_named_moves_clear_source_preserve_overlap_and_undo(){
+    for modern in [false,true] {
+        let world=NativeWorld::create(modern);
+        let unchanged=world.bytes_now();
+        let mut editor=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+        let y=if modern{-64}else{64};
+        let source=Bounds::new((0,y,0),(1,y,0)).unwrap();
+        let replacement=parse_state(if modern{
+            "minecraft:gold_block"
+        }else{"numeric:5[data=2]"}).unwrap();
+        editor.commit(editor.prepare(source,&replacement,None).unwrap()).unwrap();
+        let preview=editor.prepare_move(source,(1,y,0)).unwrap();
+        assert!(preview.is_move);
+        assert!(preview.changed()>0);
+        editor.commit(preview).unwrap();
+        let air=if modern{
+            parse_state("minecraft:air").unwrap()
+        }else{
+            parse_state("numeric:0[data=0]").unwrap()
+        };
+        match editor.visible_block((0,y,0)).unwrap() {
+            Lookup::Present(details)=>assert_eq!(details.state,air),
+            other=>panic!("Missing moved-source block {other:?}"),
+        }
+        for x in [1,2]{
+            match editor.visible_block((x,y,0)).unwrap(){
+                Lookup::Present(details)=>assert_eq!(details.state,replacement),
+                other=>panic!("Missing move destination {other:?}"),
+            }
+        }
+        assert!(editor.undo().unwrap());
+        match editor.visible_block((0,y,0)).unwrap(){
+            Lookup::Present(details)=>assert_eq!(details.state,replacement),
+            other=>panic!("Failed to undo moved source {other:?}"),
+        }
+        assert_eq!(world.bytes_now(),unchanged);
+    }
+}
+#[test]
+fn original_be_refuses_move_of_source_or_destination_without_partial_stage(){
+    let world=NativeWorld::create(true);
+    overwrite_region(&world,&chunk_with_be("minecraft:stone",(1,-64,0)));
+    let original=world.bytes_now();
+    let editor=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    let source=Bounds::new((0,-64,0),(1,-64,0)).unwrap();
+    assert!(editor.prepare_move(source,(3,-64,0)).is_err());
+    let from=Bounds::new((2,-64,0),(2,-64,0)).unwrap();
+    assert!(editor.prepare_move(from,(1,-64,0)).is_err());
+    assert_eq!(editor.pending_cells(),0);
+    assert_eq!(world.bytes_now(),original);
+}

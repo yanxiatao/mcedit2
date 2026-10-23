@@ -165,6 +165,7 @@ pub struct Preview {
     changes: Vec<Change>,
     source_checks: Vec<SourceCheck>,
     pub is_copy: bool,
+    pub is_move: bool,
     pub is_fill: bool,
     pub examined: usize,
     pub matched: usize,
@@ -178,7 +179,8 @@ impl Preview {
             "{}: {} original cells checked; {} matching filter; \
              {} staged block changes; {} unaffected; {} original chunks. \
              This is an IN-MEMORY transaction; the world is not saved.",
-            if self.is_copy { "3D block-only clone" }
+            if self.is_move { "3D block-only move" }
+                else if self.is_copy { "3D block-only clone" }
                 else if self.is_fill { "Connected 3D fill" } else { "3D selection" },
             self.examined, self.matched, self.changed(), self.skipped, self.source_chunks
         )
@@ -453,7 +455,7 @@ impl Session {
         Ok(Preview {
             root: self.world.root.clone(), dimension: self.dimension.clone(),
             data_version: self.world.data_version, changes,
-            source_checks: Vec::new(), is_copy: false, is_fill: false, examined, matched,
+            source_checks: Vec::new(), is_copy: false, is_move:false, is_fill: false, examined, matched,
             skipped: examined - matched, source_chunks: chunks.len(),
         })
     }
@@ -625,7 +627,7 @@ impl Session {
         Ok(Preview {
             root:self.world.root.clone(),dimension:self.dimension.clone(),
             data_version:self.world.data_version,changes,
-            source_checks:Vec::new(),is_copy:false,is_fill:true,
+            source_checks:Vec::new(),is_copy:false,is_move:false,is_fill:true,
             examined:volume,matched,skipped:volume-matched,
             source_chunks:chunks.len(),
         })
@@ -712,9 +714,108 @@ impl Session {
             root: self.world.root.clone(),
             dimension: self.dimension.clone(),
             data_version: self.world.data_version,
-            changes, source_checks, is_copy: true, is_fill: false,
+            changes, source_checks, is_copy: true, is_move:false, is_fill: false,
             examined: volume, matched: volume,
             skipped: 0, source_chunks: chunks.len(),
+        })
+    }
+    /// Atomic block-only MOVE, including overlapping source and destination.
+    /// Read the whole original and EFFECTIVE source first, then construct
+    /// a frozen final map: source -> actual air, destination -> source state.
+    /// Every original Block Entity in either area refuses the entire move.
+    pub fn prepare_move(
+        &self,source:Bounds,destination_min:Position,
+    )->Result<Preview,WorldError>{
+        let volume=source.volume()?;
+        let offsets=[
+            source.maximum[0]-source.minimum[0],
+            source.maximum[1]-source.minimum[1],
+            source.maximum[2]-source.minimum[2],
+        ];
+        let max=(
+            destination_min.0.checked_add(offsets[0])
+                .ok_or_else(||refuse("Move X coordinate overflow"))?,
+            destination_min.1.checked_add(offsets[1])
+                .ok_or_else(||refuse("Move Y coordinate overflow"))?,
+            destination_min.2.checked_add(offsets[2])
+                .ok_or_else(||refuse("Move Z coordinate overflow"))?,
+        );
+        let destination=Bounds::new(destination_min,max)?;
+        if destination.minimum!=[destination_min.0,destination_min.1,destination_min.2]{
+            return Err(refuse("Move destination bounds were reversed"));
+        }
+        let mut chunks:BTreeMap<ChunkPos,Option<Chunk>>=BTreeMap::new();
+        let mut source_checks=Vec::with_capacity(volume);
+        let mut snapshots=Vec::with_capacity(volume);
+        let mut final_states:BTreeMap<Position,State>=BTreeMap::new();
+        for y in source.minimum[1]..=source.maximum[1]{
+            for z in source.minimum[2]..=source.maximum[2]{
+                for x in source.minimum[0]..=source.maximum[0]{
+                    let pos=(x,y,z);
+                    let chunk=original_chunk(&mut chunks,&self.world,&self.dimension,pos)?;
+                    if chunk.has_block_entity(x,y,z){
+                        return Err(refuse("Cannot move original Block Entity without preserving full opaque NBT"));
+                    }
+                    let original=chunk.block(x.rem_euclid(16) as u8,
+                        y,z.rem_euclid(16) as u8)
+                        .ok_or_else(||refuse("Move source missing original Section"))?;
+                    let effective=self.overlay.get(&pos).unwrap_or(original).clone();
+                    let air=if matches!(chunk.layout,Layout::McRegion128|Layout::NumericAnvil112){
+                        parse_state("numeric:0[data=0]")?
+                    }else{
+                        parse_state("minecraft:air")?
+                    };
+                    source_checks.push(SourceCheck{
+                        position:pos,original:original.clone(),effective:effective.clone(),
+                    });
+                    snapshots.push((pos,effective));
+                    final_states.insert(pos,air);
+                }
+            }
+        }
+        for (position,state) in snapshots{
+            let target=(
+                destination_min.0+(position.0-source.minimum[0]),
+                destination_min.1+(position.1-source.minimum[1]),
+                destination_min.2+(position.2-source.minimum[2]),
+            );
+            let target_chunk=original_chunk(&mut chunks,&self.world,&self.dimension,target)?;
+            if target_chunk.has_block_entity(target.0,target.1,target.2){
+                return Err(refuse("Cannot overwrite original Block Entity with moved blocks"));
+            }
+            let source_numeric=state.name.starts_with("numeric:");
+            let dest_numeric=matches!(target_chunk.layout,Layout::McRegion128|Layout::NumericAnvil112);
+            if source_numeric!=dest_numeric{
+                return Err(refuse("Move crosses incompatible numeric/named original chunk layouts"));
+            }
+            if target_chunk.block(target.0.rem_euclid(16) as u8,target.1,
+                target.2.rem_euclid(16) as u8).is_none(){
+                return Err(refuse("Move destination original Section does not exist"));
+            }
+            final_states.insert(target,state);
+        }
+        if final_states.len()>MAX_CELLS {
+            return Err(refuse("Combined Move source/destination exceeds 4096 changed candidate cells"));
+        }
+        let mut changes=Vec::new();
+        for (position,after) in final_states{
+            let chunk=original_chunk(&mut chunks,&self.world,&self.dimension,position)?;
+            let original=chunk.block(position.0.rem_euclid(16) as u8,
+                position.1,position.2.rem_euclid(16) as u8)
+                .ok_or_else(||refuse("Move affected original Section disappeared"))?;
+            let before=self.overlay.get(&position).unwrap_or(original);
+            if before!=&after{
+                changes.push(Change{
+                    position,original:original.clone(),
+                    before:before.clone(),after,
+                });
+            }
+        }
+        Ok(Preview {
+            root:self.world.root.clone(),
+            dimension:self.dimension.clone(),data_version:self.world.data_version,
+            changes,source_checks,is_copy:false,is_move:true,is_fill:false,
+            examined:volume,matched:volume,skipped:0,source_chunks:chunks.len(),
         })
     }
     fn set_effective(&mut self, change: &Change, state: &State) {
@@ -955,7 +1056,7 @@ impl Session {
         Ok(Preview{
             root:self.world.root.clone(),dimension:self.dimension.clone(),
             data_version:self.world.data_version,
-            changes,source_checks:Vec::new(),is_copy:true,is_fill:false,
+            changes,source_checks:Vec::new(),is_copy:true,is_move:false,is_fill:false,
             examined:index,matched:index,skipped:0,source_chunks:chunks.len(),
         })
     }

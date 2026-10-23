@@ -93,7 +93,7 @@ enum Message{
     InspectBlock,InspectOriginalBlockEntity,SliceText(String),InspectSlice,PickSlice(i32,i32,i32),MoveSlice(i32,i32,i32),
     VerticalText(String),InspectVertical,PickVertical(usize,usize),
     SelectionText(String),TargetText(String),FilterText(String),
-    CloneDestination(String), PreviewClone,
+    CloneDestination(String), PreviewClone,PreviewMove,
     FillSeed(String), PreviewFill,
     PatchPath(String),ExportPatch,ImportPatch,AnalyzeNativePatch,AnalyzeRegionPlan,
     ClipboardPath(String),ClipboardDestination(String),ExportClipboard,PreviewPasteClipboard,
@@ -435,6 +435,31 @@ impl App{
                 self.prepared=Some((key.0,key.1,preview));
             }
             Err(error)=>self.edit_report=format!("Edit preview REFUSED: {error}"),
+        }
+    }
+    fn prepare_move(&mut self){
+        self.prepared=None;
+        self.save_preview=None;
+        self.slice_grid=None;
+        self.vertical_grid=None;
+        let result=(||->Result<Preview,String>{
+            let area=parse_bounds(&self.edit_area).map_err(|e|e.to_string())?;
+            let dest=parse_xyz(&self.clone_destination).map_err(|e|e.to_string())?;
+            let key=self.current_key().ok_or("Select an original Java world")?;
+            self.current_session(key)?
+                .prepare_move(area,dest).map_err(|e|e.to_string())
+        })();
+        match result {
+            Ok(preview)=>{
+                self.edit_report=format!(
+                    "Move preview: {}. Source will be filled with air, overlapping destination wins. No original BE NBT is moved.",
+                    preview.summary()
+                );
+                if let Some((wi,di))=self.current_key(){
+                    self.prepared=Some((wi,di,preview));
+                }
+            },
+            Err(e)=>self.edit_report=format!("3D Move refused: {e}"),
         }
     }
     fn prepare_clone(&mut self){
@@ -822,6 +847,7 @@ fn update(app:&mut App,message:Message){
             app.clone_destination=value;app.prepared=None;app.save_preview=None;app.save_phrase.clear();
         }
         Message::PreviewClone=>app.prepare_clone(),
+        Message::PreviewMove=>app.prepare_move(),
         Message::PreviewEdit=>app.prepare_batch(),
         Message::ApplyEdit=>app.apply_batch(),
         Message::UndoEdit=>app.history(false),
@@ -989,7 +1015,8 @@ fn view(app:&App)->Element<'_,Message>{
         body=body.push(row![
             text_input("Clone target minimum X,Y,Z", &app.clone_destination)
                 .on_input(Message::CloneDestination).width(Length::Fill),
-            button("Preview block-only clone").on_press(Message::PreviewClone)
+            button("Preview block-only clone").on_press(Message::PreviewClone),
+            button("Preview block-only MOVE").on_press(Message::PreviewMove)
         ].spacing(8));
         body=body.push(row![
             text_input("Flood-fill seed X,Y,Z inside selection", &app.fill_seed)

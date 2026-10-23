@@ -430,3 +430,15 @@ are supported. iced shows clickable 16x16 vertical grids whose block cells
 select an exact 1x1x1 staging area; larger planes remain read-only text
 maps. Existing transaction/BE/Undo safety applies to all selections.
 This adds a second graphical projection, not textured 3D GPU rendering.
+
+## Migration batch 3, round 4/5 — overlap-safe original block MOVE
+
+The Rust Session now previews a true block-only Move: freezing source
+blocks, setting the vacated source to the correct original-layout air,
+and overlaying the frozen blocks at the destination. Source/destination
+overlap is deterministic and the full move is one Undo/Redo group. All
+original source and destination Sections, BE coordinates and numeric-vs-
+named identities must pass strict preflight; moves touching opaque BE NBT
+are refused. Combined source/destination changes remain bounded to 4096
+cells. iced exposes a Move preview button next to the existing Clone.
+Original Minecraft disk content is never changed by a Move preview.
