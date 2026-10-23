@@ -63,7 +63,14 @@ class SpongeEntityTransferTests(unittest.TestCase):
                 save_sponge_entity_structure(
                     path, transfer, schematic_version=version)
                 loaded = load_sponge_entity_structure(path)
-                self.assertEqual(loaded.blocks.structure, transfer.blocks.structure)
+                self.assertEqual(
+                    loaded.blocks.structure.size, transfer.blocks.structure.size)
+                self.assertEqual(
+                    loaded.blocks.structure.data_version,
+                    transfer.blocks.structure.data_version)
+                self.assertEqual(
+                    dict(loaded.blocks.structure.blocks),
+                    dict(transfer.blocks.structure.blocks))
                 self.assertEqual(
                     [(p, _without_xyz(payload))
                      for p, payload in loaded.blocks.block_entities],
