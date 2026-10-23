@@ -489,6 +489,39 @@ class EditSession:
                 "refusing the entire filtered replacement")
         return self._commit(updates)
 
+    def preview_batch_replace(self, box: Box, rules, *,
+                              exact_state: bool = False,
+                              skip_block_entities: bool = True):
+        """Plan simultaneous native replacements without staging any edits."""
+        from .batch_replace import plan_batch_replace
+        self._check_size(box.volume)
+        preview, _ = plan_batch_replace(
+            self.world, box, rules, exact_state=exact_state,
+            skip_block_entities=skip_block_entities)
+        return preview
+
+    def batch_replace(self, box: Box, rules, *,
+                      exact_state: bool = False,
+                      skip_block_entities: bool = True) -> int:
+        """Stage one multi-rule undo; never overwrite original Block Entities.
+
+        All targets derive from the same pre-operation block-state snapshot.
+        A change rejected by any native Section/BE/ID preflight aborts the
+        entire batch without applying an earlier rule.
+        """
+        from .batch_replace import plan_batch_replace
+        self._check_size(box.volume)
+        preview, updates = plan_batch_replace(
+            self.world, box, rules, exact_state=exact_state,
+            skip_block_entities=skip_block_entities)
+        if preview.protected_be and not skip_block_entities:
+            raise ValueError(
+                f"{preview.protected_be} matching Block Entity locations; "
+                "entire replacement refused (enable BE skip to preserve them)")
+        if not updates:
+            return 0
+        return self._commit(updates)
+
     def replace(self, box: Box, source: Any, target: Any) -> int:
         self._check_size(box.volume)
         return self._commit([(p, target) for p in box.points()

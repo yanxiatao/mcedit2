@@ -454,6 +454,8 @@ class MainWindow(QMainWindow):
         self.add_action(edit_menu, "Replace selection", "Ctrl+R", self.replace)
         self.add_action(edit_menu, "Filtered replace by native block ID…", "",
                         self.filtered_replace_dialog)
+        self.add_action(edit_menu, "Batch replace native BlockStates…", "",
+                        self.batch_replace_dialog)
         self.add_action(edit_menu, "Find blocks in selection…", "Ctrl+Shift+F",
                         self.find_blocks_in_selection)
         self.add_action(edit_menu, "Selection block statistics…", "",
@@ -3748,6 +3750,86 @@ class MainWindow(QMainWindow):
         # preview that may have become stale while the confirmation was open.
         self._perform(lambda: self.session.replace_matching(
             box, before, after, exact_state=exact_state))
+
+    def batch_replace_dialog(self):
+        """Multi-rule original-state replacement as a single BE-safe edit."""
+        if self.session is None or self.view.selection is None:
+            QMessageBox.information(
+                self, "Batch replace", "Open a Java world and select a 3D region first.")
+            return
+        from PySide6.QtWidgets import QPlainTextEdit
+        from .batch_replace import parse_batch_rules
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Batch replace native BlockStates")
+        dialog.resize(590, 395)
+        form = QFormLayout(dialog)
+        form.addRow(QLabel(
+            "One rule per line: original block -> replacement block. "
+            "A # line is a comment. Maximum 32 rules. All rules match "
+            "the original selection snapshot (no cascading)."))
+        rules = QPlainTextEdit(dialog)
+        rules.setObjectName("native_batch_replace_rules")
+        try:
+            sample = str(self.world.get_block(*self._box().minimum))
+        except Exception:
+            sample = "minecraft:stone"
+        rules.setPlainText(f"{sample} -> {self.block_text.text()}")
+        form.addRow("Original native BlockStates", rules)
+        exact = QCheckBox("Match exact BlockState properties / numeric metadata", dialog)
+        form.addRow(exact)
+        skip_be = QCheckBox("Skip and preserve original Block Entities", dialog)
+        skip_be.setChecked(True)
+        form.addRow(skip_be)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel, parent=dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            box = self._box()
+            native_rules = parse_batch_rules(
+                rules.toPlainText(), self.world.make_block)
+            exact_state = exact.isChecked()
+            skip_protected = skip_be.isChecked()
+            summary = self.session.preview_batch_replace(
+                box, native_rules, exact_state=exact_state,
+                skip_block_entities=skip_protected)
+        except Exception as exc:
+            QMessageBox.warning(self, "Batch replace refused", str(exc))
+            return
+        if summary.protected_be and not skip_protected:
+            QMessageBox.warning(
+                self, "Batch replace refused",
+                f"{summary.protected_be:,} original Block Entities would change. "
+                "Enable BE skipping; no edits were staged.")
+            return
+        if not summary.changes:
+            QMessageBox.information(
+                self, "Batch replace",
+                f"No writable changes. Matched {summary.matches:,}; "
+                f"skipped {summary.skipped_be:,} protected Block Entities.")
+            return
+        answer = QMessageBox.question(
+            self, "Confirm native batch replacement",
+            f"Rules: {summary.rules:,}\n"
+            f"Selection blocks: {summary.total_blocks:,}\n"
+            f"Original matching blocks: {summary.matches:,}\n"
+            f"Skipped original Block Entities: {summary.skipped_be:,}\n"
+            f"Actual native block writes: {summary.changes:,}\n\n"
+            "Stage all writes as ONE Undo step? Original light/heightmap "
+            "data is preserved, not recalculated.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        # Re-scan and rerun native preflight after confirmation. A stale
+        # preview must never authorize previously protected destinations.
+        self._perform(lambda: self.session.batch_replace(
+            box, native_rules, exact_state=exact_state,
+            skip_block_entities=skip_protected))
 
     def replace(self):
         def operation():

@@ -1047,3 +1047,24 @@ available and is not automatically replaced.
   (100 migrated modules/903 tests passed). Long-term
   GUI migration and Minecraft in-game semantic testing
   remain separate goals.
+
+## 0.3.0a77 — Multi-rule original-native BlockState replacement
+
+- Added a Qt6 Edit menu **Batch replace native BlockStates…** command
+  accepting up to 32 explicit source -> target rules, with exact-state
+  versus native-ID matching, read-only preview and confirmation.
+- Matching is simultaneous against the original staged state of each
+  selected cell: transformations **do not cascade** between rules.
+  Duplicate source patterns are rejected instead of applying ambiguous
+  precedence, including legacy numeric metadata identity.
+- Requires a backend with original Block Entity position detection.
+  Skip & preserve protected BEs is enabled by default; a strict option
+  rejects the entire operation on any matching changed BE.
+- Validated native destination writes are staged through the existing
+  all-or-nothing EditSession preflight, one Undo/Redo history entry and
+  original Anvil region backups. Existing opaque BE NBT and unrelated
+  chunk tags remain unchanged. No mod-specific semantic rewrite,
+  lighting recalculation or Minecraft in-game load is claimed.
+- Added native Anvil save/reopen/opaque-BE regression, non-cascading,
+  duplicate refusal, atomic preflight rejection and offscreen Qt6
+  dialog smoke coverage.
