@@ -997,3 +997,22 @@ fn legacy_numeric_schematic_export_import_roundtrips_addblocks_and_meta(){
     fs::remove_file(path).unwrap();
     assert_eq!(world.bytes_now(),original);
 }
+
+#[test]
+fn bounded_isometric_voxel_surface_uses_original_height_and_overlay_without_world_writes(){
+    let world=NativeWorld::create(true);
+    let original=world.bytes_now();
+    let mut editor=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    assert!(editor.inspect_surface(0,0,-64,-33,16,16).is_ok());
+    assert!(editor.inspect_surface(0,0,-64,-32,16,16).is_err());
+    assert!(editor.inspect_surface(0,0,-64,-33,17,16).is_err());
+    let view=editor.inspect_surface(0,0,-64,-63,2,2).unwrap();
+    assert_eq!(view.voxels.len(),4);
+    assert_eq!(view.missing_columns,0);
+    assert_eq!(view.voxels[0].y,-63);
+    let area=Bounds::new((0,-63,0),(0,-63,0)).unwrap();
+    editor.commit(editor.prepare(area,&parse_state("minecraft:gold_block").unwrap(),None).unwrap()).unwrap();
+    let changed=editor.inspect_surface(0,0,-64,-63,2,2).unwrap();
+    assert_eq!(changed.voxels[0].state.name,"minecraft:gold_block");
+    assert_eq!(world.bytes_now(),original);
+}

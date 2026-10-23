@@ -1,5 +1,8 @@
 //! Native Rust + iced desktop with legacy MCEdit2 positional world arguments.
-use iced::widget::{button,column,container,row,scrollable,text,text_input};
+mod isometric;
+use iced::widget::{button,canvas,column,container,row,scrollable,text,text_input};
+use mcedit2_world::surface::SurfaceView;
+use isometric::IsometricSurface;
 use iced::{Element,Length,Theme};
 use mcedit2_world::{compatibility_label,inspect_input,launch,WorldSummary};
 use mcedit2_world::block_lookup::{parse_xyz,read_world_block};
@@ -56,6 +59,9 @@ fn shifted_slice(bounds:Bounds,dx:i32,dy:i32,dz:i32)->Result<String,String>{
 #[derive(Default)]
 struct App{
     path:String,
+    surface_area:String,
+    surface:Option<(usize,usize,SurfaceView)>,
+    surface_report:String,
     slice_grid:Option<(usize,usize,Slice)>,
     vertical_grid:Option<(usize,usize,VerticalSlice)>,
     vertical_area:String,
@@ -90,6 +96,7 @@ struct App{
 #[derive(Debug,Clone)]
 enum Message{
     Path(String),Open,Select(usize),Coordinates(String),Dimension(usize),
+    SurfaceArea(String),InspectSurface,PickSurface(i32,i32,i32),
     InspectBlock,InspectOriginalBlockEntity,SliceText(String),InspectSlice,PickSlice(i32,i32,i32),MoveSlice(i32,i32,i32),
     VerticalText(String),InspectVertical,PickVertical(usize,usize),
     SelectionText(String),TargetText(String),FilterText(String),
@@ -105,6 +112,54 @@ enum Message{
     PreviewEdit,ApplyEdit,UndoEdit,RedoEdit,DiscardEdits,Clear
 }
 impl App{
+    fn inspect_surface(&mut self){
+        self.surface=None;
+        self.surface_report=match self.current_key(){
+            None=>"Select a Java world first.".into(),
+            Some(key)=>match parse_bounds(&self.surface_area){
+                Err(e)=>format!("Invalid 3D surface bounds: {e}"),
+                Ok(bounds)=>{
+                    let w=bounds.maximum[0] as i64-bounds.minimum[0] as i64+1;
+                    let depth=bounds.maximum[2] as i64-bounds.minimum[2] as i64+1;
+                    if w<=0 || w>16 || depth<=0 || depth>16{
+                        "Original 3D surface footprint must fit 16x16.".into()
+                    }else{
+                        match self.current_session(key).and_then(|session|
+                            session.inspect_surface(
+                                bounds.minimum[0],bounds.minimum[2],
+                                bounds.minimum[1],bounds.maximum[1],
+                                w as u8,depth as u8
+                            ).map_err(|e|e.to_string())){
+                            Ok(result)=>{
+                                let message=format!(
+                                    "3D voxel surface: {} visible columns, {} missing source columns across {} chunks. Click a polygon to inspect/select its exact XYZ. @BlockEntities are preserved.",
+                                    result.voxels.len(),result.missing_columns,result.source_chunks
+                                );
+                                self.surface=Some((key.0,key.1,result));
+                                message
+                            },
+                            Err(e)=>format!("3D surface refused: {e}"),
+                        }
+                    }
+                }
+            }
+        };
+    }
+    fn pick_surface(&mut self,x:i32,y:i32,z:i32){
+        let Some((wi,di,view))=self.surface.as_ref() else{return};
+        if self.current_key()!=Some((*wi,*di))
+            ||!view.voxels.iter().any(|v|v.x==x&&v.y==y&&v.z==z){
+            self.surface=None;
+            self.surface_report="3D view changed; reload before editing.".into();
+            return;
+        }
+        self.query_coordinates=format!("{x}, {y}, {z}");
+        self.edit_area=format!("{x},{y},{z};{x},{y},{z}");
+        self.save_preview=None;self.prepared=None;
+        self.surface_report=format!(
+            "Selected exact original 3D voxel ({x},{y},{z}). Edits still require normal guarded preview and Apply."
+        );
+    }
     fn inspect_vertical_view(&mut self){
         self.vertical_grid=None;
         self.vertical_report=match self.current_key(){
@@ -237,6 +292,7 @@ impl App{
         self.slice_result.clear();
         self.slice_grid=None;
         self.vertical_grid=None;
+        self.surface=None;
     }
     fn current_world_context(&self)->Result<(usize,usize,WorldSummary,String),String>{
         let (wi,di)=self.current_key().ok_or("Select an original world and dimension")?;
@@ -383,7 +439,8 @@ impl App{
             clone_destination:"0, 64, 0".into(),
             fill_seed:"0, 64, 0".into(),
             clipboard_destination:"0, 64, 0".into(),
-            vertical_area:"0,-64,0;15,-49,0".into(),..Default::default()
+            vertical_area:"0,-64,0;15,-49,0".into(),
+            surface_area:"0,-64,0;15,-49,15".into(),..Default::default()
         };
         for path in &args.worlds {
             match inspect_input(path) {
@@ -504,6 +561,7 @@ impl App{
         }
     }
     fn apply_batch(&mut self){
+        self.surface=None;
         self.save_preview=None;
         self.slice_grid=None;
         self.vertical_grid=None;
@@ -528,6 +586,7 @@ impl App{
         };
     }
     fn history(&mut self, redo:bool){
+        self.surface=None;
         self.save_preview=None;
         self.slice_grid=None;
         self.vertical_grid=None;
@@ -548,6 +607,9 @@ impl App{
 fn update(app:&mut App,message:Message){
     match message{
         Message::Path(x)=>app.path=x,
+        Message::SurfaceArea(value)=>{app.surface_area=value;app.surface=None;},
+        Message::InspectSurface=>app.inspect_surface(),
+        Message::PickSurface(x,y,z)=>app.pick_surface(x,y,z),
         Message::ClipboardPath(value)=>app.clipboard_path=value,
         Message::SchematicPath(value)=>app.schematic_path=value,
         Message::SpongePath(value)=>app.sponge_path=value,
@@ -695,6 +757,7 @@ fn update(app:&mut App,message:Message){
         Message::FinalizeRegion=>app.recover_region(false),
         Message::RollbackRegion=>app.recover_region(true),
         Message::Open=>{
+            app.surface=None;
             app.save_preview=None;
             app.slice_grid=None;
             app.vertical_grid=None;
@@ -715,6 +778,7 @@ fn update(app:&mut App,message:Message){
             }
         }
         Message::Select(index)=>{
+            app.surface=None;
             app.save_preview=None;
             app.slice_grid=None;
             app.vertical_grid=None;
@@ -728,6 +792,7 @@ fn update(app:&mut App,message:Message){
         }
         Message::Coordinates(value)=>app.query_coordinates=value,
         Message::Dimension(index)=>{
+            app.surface=None;
             app.save_preview=None;
             app.slice_grid=None;
             app.vertical_grid=None;
@@ -837,6 +902,7 @@ fn update(app:&mut App,message:Message){
             };
         },
         Message::ImportPatch=>{
+            app.surface=None;
             app.save_preview=None;
             app.slice_grid=None;
             app.vertical_grid=None;
@@ -869,6 +935,7 @@ fn update(app:&mut App,message:Message){
         Message::UndoEdit=>app.history(false),
         Message::RedoEdit=>app.history(true),
         Message::DiscardEdits=>{
+            app.surface=None;
             app.save_preview=None;
             app.slice_grid=None;
             app.vertical_grid=None;
@@ -881,6 +948,7 @@ fn update(app:&mut App,message:Message){
             app.edit_report="Discarded all staged edits for this world/dimension; original disk untouched.".into();
         }
         Message::Clear=>{
+            app.surface=None;
             app.save_preview=None;
             app.slice_grid=None;
             app.vertical_grid=None;
@@ -949,6 +1017,20 @@ fn view(app:&App)->Element<'_,Message>{
         body=body.push(lookup);
         if !app.block_result.is_empty(){
             body=body.push(text(&app.block_result));
+        }
+        body=body.push(row![
+            text_input("3D voxel surface X1,Y1,Z1;X2,Y2,Z2 (16x16x32 max)",
+                &app.surface_area).on_input(Message::SurfaceArea).width(Length::Fill),
+            button("Inspect original 3D voxels").on_press(Message::InspectSurface)
+        ].spacing(8));
+        if let Some((wi,di,view))=&app.surface{
+            if app.current_key()==Some((*wi,*di)){
+                body=body.push(canvas(IsometricSurface{surface:view.clone()})
+                    .width(Length::Fill).height(Length::Fixed(440.0)));
+            }
+        }
+        if !app.surface_report.is_empty(){
+            body=body.push(text(&app.surface_report));
         }
         body=body.push(row![
             text_input("2D X/Z map: X1,Y,Z1; X2,Y,Z2",&app.slice_area)

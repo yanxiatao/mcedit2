@@ -350,6 +350,13 @@ impl Session {
     pub fn redo_depth(&self) -> usize { self.redo.len() }
     pub fn has_pending_changes(&self) -> bool { !self.overlay.is_empty() }
     /// Reads actual original world NBT only when there is no staged overlay.
+    /// Inspect a small original-world 3D voxel surface without writing data.
+    pub fn inspect_surface(
+        &self,x:i32,z:i32,y_min:i32,y_max:i32,
+        width:u8,depth:u8,
+    )->Result<crate::surface::SurfaceView,WorldError>{
+        crate::surface::inspect_surface(self,x,z,y_min,y_max,width,depth)
+    }
     pub fn visible_block(&self, position: Position) -> Result<Lookup, WorldError> {
         if let Some(state) = self.overlay.get(&position) {
             return Ok(Lookup::Present(crate::block_lookup::BlockDetails {

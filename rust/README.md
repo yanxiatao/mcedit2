@@ -455,3 +455,15 @@ up to 4096 cells; iced supports export alongside classic import and modern
 Sponge v2. The five feature milestones are complete; the planned next step
 is ONE consolidated Linux/Windows `cargo check` + `cargo test` run, with no
 application binary building or packaging.
+
+## Migration batch 4, round 1/5 — interactive isometric 3D viewport
+
+A native iced 0.14 canvas now paints a real-height, isometric 3D projection
+of existing Java block columns (up to 16x16 footprint and 32 Y layers).
+It uses per-state untextured shaded cube polygons, original BE highlighting,
+negative Y coordinates, exact world XYZ selection and an event-driven mouse
+picker; chunk/Section absence is not silently generated as air. The surface
+is frozen for UI consistency and invalidated whenever sessions change.
+This is the initial interactive 3D editor surface, not yet texture-atlas
+rendering, full occlusion-aware terrain meshing, perspective rotation or
+GPU-optimized chunk rendering. No application builds or CI before 5 rounds.
