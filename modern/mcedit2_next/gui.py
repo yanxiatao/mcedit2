@@ -369,6 +369,8 @@ class MainWindow(QMainWindow):
                         self.import_schem_be)
         self.add_action(file_menu, "Import vanilla Java structure with BE (.nbt; expert)…", "",
                         self.import_vanilla_be_structure)
+        self.add_action(file_menu, "Import Java structure with BE + standalone entities (.nbt; expert)…", "",
+                        self.import_java_entity_structure)
         self.be_import_skip_air_action = QAction(
             "BE imports: skip exact source air (preserve target blocks)", self)
         self.be_import_skip_air_action.setCheckable(True)
@@ -388,6 +390,8 @@ class MainWindow(QMainWindow):
                         self.export_schem_be)
         self.add_action(file_menu, "Export vanilla Java structure with BE (.nbt; expert)…", "",
                         self.export_vanilla_be_structure)
+        self.add_action(file_menu, "Export selection with BE + standalone entities (.nbt; expert)…", "",
+                        self.export_java_entity_structure)
         self.add_action(file_menu, "Export selection with original BE NBT (.nbt; expert)…", "",
                         self.export_be_transfer)
         self.add_action(file_menu, "Save…", "Ctrl+S", self.save_world)
@@ -1917,6 +1921,86 @@ class MainWindow(QMainWindow):
                     only_replace_air=self.be_import_target_air_action.isChecked()))
         except Exception as exc:
             QMessageBox.critical(self, "Sponge BE import refused", str(exc))
+
+    def export_java_entity_structure(self):
+        """Unmarked Java .nbt containing verified independent entities and BEs."""
+        if self.world is None or self.session is None or not self.view.selection:
+            QMessageBox.information(
+                self, "Java entity structure", "Open Java 1.13+ Anvil and select a 3D area.")
+            return
+        answer = QMessageBox.warning(
+            self, "Original Java entity structure export (expert)",
+            "Export exact native block states and opaque BE NBT together with "
+            "original independent dropped items / XP orbs. Their existing "
+            "UUID and Pos will be made relative in the standard .nbt file. "
+            "Mobs, linked/passenger entities, unknown modded entity types "
+            "and entity references are rejected, not silently omitted. "
+            "THIS FILE KEEPS ORIGINAL ENTITY UUIDs and must not be placed "
+            "directly with vanilla structure blocks or unrelated editors: "
+            "duplicate identity may result. MCEdit2 expert import always "
+            "generates NEW UUIDs. Use offline world backups.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Export Java BE + standalone entity structure", "",
+            "Java structure with safe entities (*.nbt)")
+        if not filename:
+            return
+        try:
+            from .java_entity_structure import (
+                capture_java_entity_structure, save_java_entity_structure)
+            structure = capture_java_entity_structure(
+                self.world, self._box(), self.session.max_blocks)
+            save_java_entity_structure(filename, structure)
+            self.statusBar().showMessage(
+                f"Exported {len(structure.blocks.structure.blocks):,} native cells, "
+                f"{len(structure.blocks.block_entities)} original BEs and "
+                f"{len(structure.entities)} standalone entities")
+        except Exception as exc:
+            QMessageBox.critical(self, "Java entity structure export refused", str(exc))
+
+    def import_java_entity_structure(self):
+        """Preflight blocks, BEs and independent entities before one Undo."""
+        if self.world is None or self.session is None:
+            QMessageBox.information(self, "Java entity structure", "Open Java Anvil first.")
+            return
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Import Java structure with original BE + independent entities",
+            "", "Java entity-bearing structure (*.nbt)")
+        if not filename:
+            return
+        try:
+            from .java_entity_structure import (
+                load_java_entity_structure, preview_java_entity_structure,
+                place_java_entity_structure)
+            structure = load_java_entity_structure(filename)
+            origin = (self._box().minimum if self.view.selection else
+                      (self.view.center_x, self.y_spin.value(),
+                       self.view.center_z))
+            source_air = self.be_import_skip_air_action.isChecked()
+            target_air = self.be_import_target_air_action.isChecked()
+            preview = preview_java_entity_structure(
+                self.session, structure, origin,
+                skip_air=source_air, only_replace_air=target_air)
+            answer = QMessageBox.warning(
+                self, "Confirm Java BE + entity import (expert)",
+                preview.summary() +
+                "\n\nBoth original terrain Sections and every destination "
+                "entity chunk must already exist. DataVersion must match. "
+                "No BE overwrite, linked or modded entity graph rewrite, "
+                "DataFixer conversion or chunk generation occurs. "
+                "One Undo before Save; entity structural history clears "
+                "after Save. Use an OFFLINE disposable world copy.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer == QMessageBox.StandardButton.Yes:
+                self._perform(lambda: place_java_entity_structure(
+                    self.session, structure, origin,
+                    skip_air=source_air, only_replace_air=target_air))
+        except Exception as exc:
+            QMessageBox.critical(self, "Java entity structure import refused", str(exc))
 
     def export_vanilla_be_structure(self):
         """Export ordinary unmarked Java 1.13+ .nbt with BE compounds."""

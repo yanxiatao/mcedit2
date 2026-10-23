@@ -1297,3 +1297,38 @@ available and is not automatically replaced.
   unsupported entities and GUI dialog interactions.
 - **Major feature 1 of 5** in the new CI batch. No CI until all five
   substantial feature commits are complete. [skip ci]
+
+## 0.3.0a91 — Major feature 2/5: standard Java structures with standalone entities and BEs
+
+- Added separate **unmarked standard Java .nbt import/export** for one
+  selection containing native blocks, opaque original Block Entities and
+  standalone dropped items / XP orbs, all in a single expert file.
+  Normal block-only import and BE-only import remain fail-closed for
+  nonempty entities, never silently discard original entity contents.
+- Export stores vanilla entities[] records with relative TAG_List[Double]
+  pos, relative TAG_List[Int] blockPos and original entity NBT Compound.
+  Only existing entity Pos is rewritten relative; unknown opaque ItemStack
+  and mod-specific members remain byte-exact. Files retain original UUIDs
+  and MUST NOT be pasted by vanilla structure blocks or unrelated tools,
+  to avoid duplicate UUID identities.
+- Import accepts **Java 1.13+ named Anvil with exact original DataVersion**.
+  Every entity MUST be a known independent vanilla item/XP orb with
+  complete original Pos+UUID and no linked owner/passenger/reference graph.
+  Unsupported/missing entities, other wrapper members and malformed
+  coordinate/UUID tags fail closed. Import relocates Pos and issues an
+  independent UUIDv4 per new entity, preserving other NBT bytes.
+- Mandatory read-only atomic preflight spans **all blocks, BEs and entities**:
+  target Sections, existing entity chunks, BE collisions, entity UUID
+  conflicts, size and 128-entity/8-MiB budgets. Missing chunks are not
+  generated. Commit revalidates then stages ONE Undo transaction; entity
+  structural history clears after Save, with original region backups.
+- Added two Qt6 File menu expert options with explicit high-risk warnings,
+  3D selection export, target-origin import and native counts/previews.
+  Includes disk-backed synthetic region tests for encode/decode, opaque NBT,
+  saved world reopen, backup/Undo/Redo, repeated fresh UUIDs, BE conflict,
+  version mismatch, missing entity storage and GUI behaviors.
+- No generic mob/vehicle/passenger cloning, structure entity graphs,
+  cross-dimension edits, DataFixer mappings or direct vanilla-game
+  structure-placement safety is asserted.
+- **Major feature 2 of 5** in current batch; CI intentionally deferred
+  [skip ci], to be run after major feature 5.
