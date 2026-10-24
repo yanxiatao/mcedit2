@@ -23,6 +23,7 @@ pub mod region_plan;
 pub mod region_transaction;
 mod patch;
 mod oldnumeric;
+mod lz4_block;
 
 use flate2::read::{GzDecoder, ZlibDecoder};
 use std::fmt;
@@ -185,7 +186,7 @@ impl RegionIndex {
             if length!=1||slot.sector_count!=1{
                 return Err(invalid("Malformed external Java chunk marker"));
             }
-            if !matches!(method,1|2|3){
+            if !matches!(method,1|2|3|4){
                 return Err(invalid(format!(
                     "Unsupported external compression method {method}"
                 )));
@@ -219,6 +220,7 @@ impl RegionIndex {
             1 => decompress_bounded(GzDecoder::new(&payload[..]))?,
             2 => decompress_bounded(ZlibDecoder::new(&payload[..]))?,
             3 if payload.len() as u64 <= MAX_NBT => payload,
+            4 => lz4_block::decode(&payload)?,
             3 => return Err(invalid("Uncompressed chunk NBT exceeds safety budget")),
             flag => return Err(invalid(format!(
                 "Unsupported original chunk compression type {flag}; do not modify"
@@ -679,6 +681,41 @@ mod tests {
         assert_eq!(safe.chunk_count(),2);
         assert_eq!(safe.slot(1,0).unwrap().start_sector,3);
         assert_eq!(fs::read(&path).unwrap(),partial);
+    }
+    #[test]
+    fn original_region_method_four_decodes_inline_and_external_lz4(){
+        let temp=Fixture::new();
+        let raw=write_fixture_world(&temp);
+        let path=temp.0.join("region/r.0.0.mca");
+        let mut stream=b"LZ4Block".to_vec();
+        stream.push(0x16); // Java raw LZ4Block
+        stream.extend_from_slice(&(raw.len() as u32).to_le_bytes());
+        stream.extend_from_slice(&(raw.len() as u32).to_le_bytes());
+        let checksum=xxhash_rust::xxh32::xxh32(&raw,0x9747_b28c)
+            &0x0fff_ffff;
+        stream.extend_from_slice(&checksum.to_le_bytes());
+        stream.extend_from_slice(&raw);
+        stream.extend_from_slice(b"LZ4Block");
+        stream.push(0x16);
+        stream.extend_from_slice(&[0u8;12]);
+        let mut bytes=fs::read(&path).unwrap();
+        let at=(2*SECTOR) as usize;
+        assert!(stream.len()+5<SECTOR as usize);
+        bytes[at..at+4].copy_from_slice(&((stream.len()+1) as u32).to_be_bytes());
+        bytes[at+4]=4;
+        bytes[at+5..at+5+stream.len()].copy_from_slice(&stream);
+        fs::write(&path,&bytes).unwrap();
+        assert_eq!(RegionIndex::open(&path).unwrap()
+            .read_chunk_at(0,0).unwrap().unwrap(),raw);
+        bytes[at..at+4].copy_from_slice(&1u32.to_be_bytes());
+        bytes[at+4]=0x84; // external Java method 4
+        fs::write(&path,&bytes).unwrap();
+        let sidecar=temp.0.join("region/c.0.0.mcc");
+        fs::write(&sidecar,&stream).unwrap();
+        assert_eq!(RegionIndex::open(&path).unwrap()
+            .read_chunk_at(0,0).unwrap().unwrap(),raw);
+        assert_eq!(fs::read(&sidecar).unwrap(),stream);
+        assert_eq!(fs::read(&path).unwrap(),bytes);
     }
     #[test]
     fn java_external_mcc_is_read_only_and_rejects_bad_marker(){

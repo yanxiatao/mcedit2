@@ -1325,3 +1325,18 @@ areas are not filled in and approximate LOD terrain cannot be picked or
 edited. Pan/zoom buttons and wheel retain existing read-only navigation.
 Regression tests cover source world-border coordinates and far LOD
 selection refusal. CI, compiler checks and packaging were not run.
+
+## Java 1.20.5+ source Region compression method 4 (LZ4Block)
+
+Original chunks using vanilla Region compression ID 4 now decode the
+**lz4-java LZ4Block stream**, not an incompatible standard LZ4 Frame.
+The bounded native reader supports both compressed and raw blocks,
+checks each declared block length, compares masked xxHash32 checksums,
+requires an exact terminal header and rejects trailing/ambiguous bytes.
+Expanded NBT remains limited to 64 MiB. This also applies to valid
+external .mcc sidecar streams with the method-4 marker. Custom third-party
+compression ID 127 remains unsupported and is refused; native writer
+preflight still refuses rewriting original LZ4 or sidecar chunks.
+Regression tests include raw/compressed blocks, invalid checksums,
+overlong sizes and malformed termination. Cargo dependencies were added
+but neither resolved nor compiled in this turn; CI/build remain deferred.
