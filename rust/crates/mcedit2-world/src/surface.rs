@@ -132,6 +132,32 @@ fn is_air(state:&State)->bool{
         "minecraft:air"|"minecraft:cave_air"|"minecraft:void_air"|
         "numeric:0")
 }
+/// Use only verified original neighboring surface columns for near-field
+/// occlusion. Unknown source cells are never treated as known air.
+fn top_faces(voxel:&SurfaceVoxel,x0:i32,z0:i32,x1:i32,z1:i32,
+    columns:&BTreeMap<(i32,i32),Option<(i32,State,VoxelMaterial)>>)->u8{
+    let mut faces=FACE_TOP;
+    for (dx,dz,flag) in [(1,0,FACE_POS_X),(-1,0,FACE_NEG_X),
+        (0,1,FACE_POS_Z),(0,-1,FACE_NEG_Z)]{
+        let nx=voxel.x+dx;let nz=voxel.z+dz;
+        if nx<x0||nx>x1||nz<z0||nz>z1{
+            faces|=flag;
+            continue;
+        }
+        match columns.get(&(nx,nz)){
+            Some(None)=>faces|=flag,
+            Some(Some((height,state,kind)))=>{
+                if *height<voxel.y || (*height==voxel.y &&
+                    exposed_against(&voxel.state,voxel.kind,
+                        Some(&(state.clone(),*kind)))){
+                    faces|=flag;
+                }
+            }
+            None=>{} // absent source, not transparent or air
+        }
+    }
+    faces
+}
 /// Render a true-height voxel column surface from the current in-memory
 /// overlay. Bounded to 64x64 footprint by 48 Y levels (196608 reads).
 /// Each original chunk is decoded at most once within a request. No
@@ -152,6 +178,8 @@ pub fn inspect_surface(
     let mut cache:BTreeMap<(i32,i32),Option<Chunk>>=BTreeMap::new();
     let mut region_reader=ReadOnlyRegionCache::new(session.original_world(),session.dimension())?;
     let mut voxels=Vec::new();
+    let mut columns:BTreeMap<(i32,i32),Option<(i32,State,VoxelMaterial)>>=
+        BTreeMap::new();
     let mut missing_columns=0;
     let mut tiles:BTreeMap<(i32,i32),SourceChunkTile>=BTreeMap::new();
     for dz in 0..depth as i32{
@@ -170,31 +198,34 @@ pub fn inspect_surface(
                 missing_columns+=1;tile.unknown_columns+=1;continue;
             };
             let mut chosen=None;
-            let mut fallback=None;
+            let mut known=false;
             for y in (y_min..=y_max).rev(){
                 let Some(original)=chunk.block(wx.rem_euclid(16) as u8,y,
                     wz.rem_euclid(16) as u8) else{continue};
+                known=true;
                 let state=session.effective_state((wx,y,wz),original);
-                let kind=material(&state);
-                let voxel=SurfaceVoxel{
-                    x:wx,y,z:wz,state,
-                    original_block_entity:chunk.has_block_entity(wx,y,wz),
-                    faces:ALL_FACES,kind,staged:session.is_staged_block((wx,y,wz)),span:1,
-                };
-                if fallback.is_none(){fallback=Some(voxel.clone());}
-                if !is_air(&voxel.state){
-                    chosen=Some(voxel);break;
+                if !is_air(&state){
+                    let kind=material(&state);
+                    chosen=Some(SurfaceVoxel{
+                        x:wx,y,z:wz,state,
+                        original_block_entity:chunk.has_block_entity(wx,y,wz),
+                        faces:FACE_TOP,kind,staged:session.is_staged_block((wx,y,wz)),span:1,
+                    });
+                    break;
                 }
             }
-            if let Some(voxel)=chosen.or(fallback){
+            if known{
                 tile.known_columns+=1;
-                voxels.push(voxel);
+                columns.insert((wx,wz),chosen.as_ref().map(|v|
+                    (v.y,v.state.clone(),v.kind)));
+                if let Some(voxel)=chosen{voxels.push(voxel);}
             }else{
                 missing_columns+=1;tile.unknown_columns+=1;
             }
         }
     }
-    for voxel in &voxels{
+    for voxel in &mut voxels{
+        voxel.faces=top_faces(voxel,x,z,far_x,far_z,&columns);
         if let Some(tile)=tiles.get_mut(&(voxel.x.div_euclid(16),voxel.z.div_euclid(16))){
             tile.exposed_voxels+=1;
         }
@@ -305,6 +336,27 @@ pub fn inspect_exposed_volume_cutaway(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn exact_surface_culls_known_neighbors_but_not_unknown_source(){
+        let state=State{name:"minecraft:stone".into(),properties:vec![]};
+        let voxel=SurfaceVoxel{x:0,y:64,z:0,state:state.clone(),
+            original_block_entity:false,faces:0,kind:VoxelMaterial::Solid,
+            staged:false,span:1};
+        let mut columns=BTreeMap::new();
+        columns.insert((0,0),Some((64,state.clone(),VoxelMaterial::Solid)));
+        columns.insert((1,0),Some((64,state.clone(),VoxelMaterial::Solid)));
+        columns.insert((-1,0),Some((63,state.clone(),VoxelMaterial::Solid)));
+        columns.insert((0,1),None);
+        let mask=top_faces(&voxel,-1,-1,1,1,&columns);
+        assert_eq!(mask&FACE_POS_X,0);
+        assert_eq!(mask&FACE_NEG_Z,0); // unknown neighbor not air
+        assert_ne!(mask&FACE_NEG_X,0);
+        assert_ne!(mask&FACE_POS_Z,0); // known air
+        assert_ne!(mask&FACE_TOP,0);
+        assert_eq!(top_faces(&voxel,0,0,0,0,&columns)&
+            (FACE_POS_X|FACE_NEG_X|FACE_POS_Z|FACE_NEG_Z),
+            FACE_POS_X|FACE_NEG_X|FACE_POS_Z|FACE_NEG_Z);
+    }
     #[test]
     fn only_recognized_partial_vanilla_shapes_refuse_full_face_occlusion(){
         let solid=State{name:"minecraft:stone".into(),properties:vec![]};

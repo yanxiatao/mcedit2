@@ -1287,3 +1287,15 @@ old world data. This bounds source I/O, decoded chunk memory and native
 threads under frequent interactions. Worker errors release the same slot.
 No more than one pending near-field view is retained in memory; far terrain
 maintains its independent bounded progressive reader. No CI was triggered.
+
+## Exact top-surface 3D known-air and occlusion correction
+
+In the earlier near-field heightmap reader a source column containing
+only air was represented by a synthetic-looking air voxel. A known
+all-air column is now recorded as known original source with **no
+renderable cube**. Missing chunks/Sections remain unknown. Top 3D
+sides are culled against verified same-height neighbor solids and kept
+only for genuine view boundaries, lower verified source surfaces, or
+verified air/partial neighbors. Unknown neighbors do not imply source
+air. Exact blockstate and BE provenance remain unchanged; no writes or
+entity rendering. New tests have been added but not executed.
