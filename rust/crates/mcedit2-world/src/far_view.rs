@@ -10,7 +10,12 @@ use crate::surface::{
 use crate::{WorldError};
 
 pub const MAX_DISTANCE_CHUNKS:u16=1024;
-pub const FAR_BATCH_CHUNKS:usize=12;
+pub const FAR_BATCH_CHUNKS:usize=128;
+/// Limit decoded source chunks per batch, but amortize UI refreshes for
+/// distant one-sample LODs. Only one background read batch runs at a time.
+pub fn batch_size_for(span:u8)->usize{
+    match span {1=>12,4=>32,8=>64,_=>FAR_BATCH_CHUNKS}
+}
 pub const MAX_PLANNED_CHUNKS:usize=36_000;
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub struct FarChunkRequest{
@@ -190,6 +195,14 @@ pub fn append_chunk(view:&mut SurfaceView,patch:FarChunkPatch){
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn asynchronous_batch_budget_grows_only_as_source_sample_density_falls(){
+        assert_eq!(batch_size_for(1),12);
+        assert_eq!(batch_size_for(4),32);
+        assert_eq!(batch_size_for(8),64);
+        assert_eq!(batch_size_for(16),128);
+        assert!(batch_size_for(16)<=FAR_BATCH_CHUNKS);
+    }
     #[test]
     fn far_view_plans_distant_horizon_without_scanning_every_cell(){
         let p=plan_far_chunks(0,0,128).unwrap();

@@ -15,7 +15,9 @@ use std::collections::HashMap;
 
 #[derive(Debug,Clone)]
 pub struct IsometricSurface {
-    pub surface:SurfaceView,
+    /// Shared read-only source snapshot; GPU/Canvas clones must not copy
+    /// thousands of distant voxels on every hovered-pixel redraw.
+    pub surface:Arc<SurfaceView>,
     pub texture_bank:Option<Arc<TextureBank>>,
     pub show_textures:bool,
     pub camera_quarters:u8,
@@ -150,6 +152,43 @@ fn prune_nearest_faces(faces:&mut Vec<RenderFace>,limit:usize){
     // O(N) selection, no unbounded full sort for dense multipart models.
     faces.select_nth_unstable_by(limit,face_nearest_first);
     faces.truncate(limit);
+}
+/// Keep far sampled terrain visible even when nearby multipart geometry
+/// produces more faces than the frame can upload. Without distinct quotas,
+/// center-priority truncation can permanently eliminate the distant horizon.
+fn scene_lod_layer(face:&RenderFace,view:&SurfaceView)->usize{
+    let voxel=&view.voxels[face.voxel_index];
+    if voxel.span==1{return 0;}
+    let center_x=view.x as i64+view.width as i64/2;
+    let center_z=view.z as i64+view.depth as i64/2;
+    let radius=(view.width as i64/2).max(view.depth as i64/2).max(1);
+    let offset=(face.pos.0 as i64-center_x).abs()
+        .max((face.pos.2 as i64-center_z).abs());
+    if offset>=radius*3/4 {2}else{1}
+}
+fn prune_scene_faces(faces:&mut Vec<RenderFace>,view:&SurfaceView,limit:usize){
+    if faces.len()<=limit{return;}
+    if limit==0{faces.clear();return;}
+    let mut layers:[Vec<RenderFace>;3]=std::array::from_fn(|_|Vec::new());
+    for face in faces.drain(..){
+        let layer=scene_lod_layer(&face,view);
+        layers[layer].push(face);
+    }
+    // A near/middle/horizon frame split, with all unused capacity flowing
+    // back to other layers instead of reserving memory for empty rings.
+    let budgets=[limit*2/3,limit/5,limit-limit*2/3-limit/5];
+    let mut keep=[0usize;3];
+    for index in 0..3{keep[index]=layers[index].len().min(budgets[index]);}
+    let mut spare=limit-keep.iter().sum::<usize>();
+    for index in [0,1,2]{
+        let extra=(layers[index].len()-keep[index]).min(spare);
+        keep[index]+=extra;
+        spare-=extra;
+    }
+    for (index,mut layer) in layers.into_iter().enumerate(){
+        prune_nearest_faces(&mut layer,keep[index]);
+        faces.append(&mut layer);
+    }
 }
 /// Face lighting in global world directions after JSON element and
 /// variant transforms. Axis-aligned cube faces keep their previous shades;
@@ -499,6 +538,10 @@ impl IsometricSurface{
             };
             for (index,element) in boxes.iter().enumerate(){
               for face in [Face::Top,Face::Bottom,Face::PosX,Face::NegX,Face::PosZ,Face::NegZ]{
+                // Distant LOD columns encode one sampled terrain height, not
+                // a full 3D solid column. Their invented vertical walls
+                // create false cliffs and unnecessary triangles at horizons.
+                if voxel.span>1 && face!=Face::Top{continue;}
                 // Reuse exact JSON metadata across thousands of voxels with
                 // the same original state and model element.
                 let descriptor=if voxel.span>1{(None,None,false)}else{
@@ -576,12 +619,12 @@ impl IsometricSurface{
                     staged:voxel.staged,
                 });
                 if out.len()>=MAX_RENDER_FACES+4096{
-                    prune_nearest_faces(&mut out,MAX_RENDER_FACES);
+                    prune_scene_faces(&mut out,&self.surface,MAX_RENDER_FACES);
                 }
               }
             }
         }
-        prune_nearest_faces(&mut out,MAX_RENDER_FACES);
+        prune_scene_faces(&mut out,&self.surface,MAX_RENDER_FACES);
         // Painter's algorithm: far to near. Same ordering is used for picking.
         out.sort_by(|a,b|a.depth.total_cmp(&b.depth)
             // Render alpha-blended surfaces last at identical depth, while
@@ -767,7 +810,7 @@ mod tests{
     use mcedit2_world::sections::State;
     fn example()->IsometricSurface{
         IsometricSurface{
-            surface:SurfaceView{
+            surface:Arc::new(SurfaceView{
                 x:2,z:3,y_min:-64,y_max:-49,width:1,depth:1,
                 voxels:vec![SurfaceVoxel{
                     x:2,y:-63,z:3,
@@ -780,7 +823,7 @@ mod tests{
                     chunk_x:0,chunk_z:0,source_present:true,
                     known_columns:1,unknown_columns:0,exposed_voxels:1,
                 }],
-            },
+            }),
             camera_quarters:0,yaw_degrees:45,pitch_degrees:35,
             texture_bank:None,show_textures:false,
             zoom:1.0,pan_x:0.0,pan_y:0.0,selected:None,
@@ -831,6 +874,18 @@ mod tests{
         assert_eq!(triangle_depth(p,[p,p,p],[0.0,1.0,2.0]),None);
     }
     #[test]
+    fn gpu_canvas_clones_share_source_voxels_without_deep_copy(){
+        let original=example();
+        let gpu=original.clone();
+        let canvas=original.clone();
+        assert!(Arc::ptr_eq(&original.surface,&gpu.surface));
+        assert!(Arc::ptr_eq(&gpu.surface,&canvas.surface));
+        let mut next=gpu.clone();
+        Arc::make_mut(&mut next.surface).voxels[0].span=16;
+        assert_eq!(original.surface.voxels[0].span,1);
+        assert_eq!(next.surface.voxels[0].span,16);
+    }
+    #[test]
     fn gpu_canvas_and_picking_share_one_exact_immutable_view_face_buffer(){
         let view=example();
         let size=Size::new(800.0,440.0);
@@ -846,15 +901,15 @@ mod tests{
     #[test]
     fn distant_scene_fits_horizon_without_3px_minimum_scale(){
         let mut view=example();
-        view.surface.width=8208;
-        view.surface.depth=8208;
+        Arc::make_mut(&mut view.surface).width=8208;
+        Arc::make_mut(&mut view.surface).depth=8208;
         assert!(view.scale(Size::new(1000.0,650.0))<1.0);
     }
     #[test]
     fn camera_relative_projection_preserves_neighboring_blocks_at_world_border(){
         let mut view=example();
-        view.surface.x=29_999_980;
-        view.surface.z=-29_999_980;
+        Arc::make_mut(&mut view.surface).x=29_999_980;
+        Arc::make_mut(&mut view.surface).z=-29_999_980;
         let size=Size::new(900.0,600.0);
         let x=view.surface.x as f64;
         let z=view.surface.z as f64;
@@ -986,6 +1041,49 @@ mod tests{
             .then_with(||a.translucent.cmp(&b.translucent)));
         assert!(!faces[0].translucent);
         assert!(faces[1].translucent);
+    }
+    #[test]
+    fn distant_lod_face_quotas_preserve_real_horizon_when_near_mesh_is_dense(){
+        let mut view=example();
+        let near=view.surface.voxels[0].clone();
+        Arc::make_mut(&mut view.surface).x=-16_392;
+        Arc::make_mut(&mut view.surface).z=-16_392;
+        Arc::make_mut(&mut view.surface).width=32_784;
+        Arc::make_mut(&mut view.surface).depth=32_784;
+        let mut middle=near.clone();
+        middle.x=2000;
+        middle.span=8;
+        let mut horizon=near.clone();
+        horizon.x=14_000;
+        horizon.span=16;
+        Arc::make_mut(&mut view.surface).voxels.push(middle);
+        Arc::make_mut(&mut view.surface).voxels.push(horizon);
+        let sample=example().faces(Size::new(700.0,440.0))[0].clone();
+        let mut faces=Vec::new();
+        for i in 0..600{
+            let mut candidate=sample.clone();
+            candidate.voxel_index=if i<300{0}else if i<450{1}else{2};
+            candidate.pos.0=if i<300{0}else if i<450{2000}else{14_000};
+            candidate.depth=i as f32;
+            faces.push(candidate);
+        }
+        prune_scene_faces(&mut faces,&view.surface,150);
+        assert_eq!(faces.len(),150);
+        let mut counts=[0usize;3];
+        for face in &faces{counts[scene_lod_layer(face,&view.surface)]+=1;}
+        assert_eq!(counts,[100,30,20]);
+        faces.reverse();
+        assert_eq!(faces.len(),150);
+        assert!(faces.iter().any(|f|f.voxel_index==2));
+    }
+    #[test]
+    fn distant_lod_budget_spills_unused_capacity_back_into_exact_geometry(){
+        let mut view=example();
+        let sample=view.faces(Size::new(700.0,440.0))[0].clone();
+        let mut faces=vec![sample;180];
+        prune_scene_faces(&mut faces,&view.surface,120);
+        assert_eq!(faces.len(),120);
+        assert!(faces.iter().all(|f|f.voxel_index==0));
     }
     #[test]
     fn nearest_face_budget_is_independent_of_chunk_iteration_order(){

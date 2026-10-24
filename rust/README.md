@@ -1077,3 +1077,33 @@ terrain can fit the view. 1024-chunk inspections may take considerable
 time on very large saves due to disk access and will progress tile by tile.
 CI and executable build are still deferred until the entire 3D display
 migration has been completed, as explicitly requested.
+
+
+## Progressive far-terrain rendering budgets and nonblocking reads (unverified)
+
+For 16–1024-chunk radius read-only scenes, the 150,000-face GPU/Canvas
+budget is now distributed by **actual source LOD**: detailed original
+voxels receive a near-detail allocation, while sampled terrain and the
+outermost 25% of the horizon retain guaranteed face capacity. Empty
+LOD layers return their unused space to populated layers, and source
+picking never treats multi-block LOD samples as authenticated blocks.
+Far sampled-height cells render only their observed top faces; the editor
+does not invent artificial vertical cliffs where neighboring heights
+were not inspected. No entities, lighting simulation or collision data
+are loaded for far terrain.
+
+The desktop viewport now shares the original SurfaceView behind Arc for
+GPU, Canvas and UI draws. Incoming read-only chunk batches use Arc
+copy-on-write only when source samples change, rather than copying all
+previously loaded world voxels on every hover or redraw. An immutable
+Session snapshot is captured once per far view; small batches of 12
+exact near chunks or up to 128 sparse distant chunks execute on bounded
+OS worker threads and report through a one-shot iced future, keeping
+blocking Region I/O off the iced UI executor. Canceled views discard
+outdated responses by nonce and world selection.
+
+This is performance-focused 3D display migration, not a change to the
+4,096-block edit transaction cap or to original NBT/BE bytes. The code
+has NOT been compiled, tested in CI, or visually validated; check/test
+runs remain deferred until the complete 3D display migration is ready
+as requested by the user. No application packaging or builds.

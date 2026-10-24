@@ -103,6 +103,9 @@ fn shifted_scene(input:&str,dx:i32,dy:i32,dz:i32)->Result<String,String>{
 
 struct FarProgress{
     nonce:u64,key:(usize,usize),center:(i32,i32),radius:u16,
+    /// One immutable source snapshot is shared across background batches.
+    /// Avoid cloning the entire editor journal on every disk read batch.
+    source:std::sync::Arc<Session>,
     remaining:VecDeque<FarChunkRequest>,total:usize,complete:usize,errors:usize,
 }
 #[derive(Default)]
@@ -132,7 +135,7 @@ struct App{
     corner_a:Option<(i32,i32,i32)>,
     corner_b:Option<(i32,i32,i32)>,
     surface_hover:Option<(i32,i32,i32)>,
-    surface:Option<(usize,usize,SurfaceView)>,
+    surface:Option<(usize,usize,std::sync::Arc<SurfaceView>)>,
     far:Option<FarProgress>,far_nonce:u64,
     surface_report:String,
     slice_grid:Option<(usize,usize,Slice)>,
@@ -251,7 +254,7 @@ impl App{
                                     if exposed_volume{"exposed multilayer volume"}else{"highest-column surface"},
                                     result.voxels.len(),result.missing_columns,result.source_chunks
                                 );
-                                self.surface=Some((key.0,key.1,result));
+                                self.surface=Some((key.0,key.1,std::sync::Arc::new(result)));
                                 message
                             },
                             Err(e)=>format!("3D surface refused: {e}"),
@@ -340,10 +343,11 @@ impl App{
                 let z=(v.minimum[2] as i64+v.maximum[2] as i64)/2;
                 Some((i32::try_from(x).ok()?,i32::try_from(z).ok()?))
             })).unwrap_or((0,0));
-        let version=match self.current_session(key){
-            Ok(session)=>session.original_world().data_version,
+        let source=match self.current_session(key){
+            Ok(session)=>std::sync::Arc::new(session.clone()),
             Err(e)=>{self.surface_report=e;return iced::Task::none();}
         };
+        let version=source.original_world().data_version;
         let (y_min,y_max)=if version.is_some_and(|v|v>=2860){
             (-64,319)
         }else{(0,255)};
@@ -356,13 +360,13 @@ impl App{
             Ok(view)=>view,
             Err(e)=>{self.surface_report=e.to_string();return iced::Task::none();}
         };
-        self.surface=Some((key.0,key.1,view));
+        self.surface=Some((key.0,key.1,std::sync::Arc::new(view)));
         self.surface_exposed=false;
         self.surface_report=format!(
             "Streaming original terrain within {radius} chunk radius, {} planned source tiles. No entities or source edits.",
             plan.len());
         self.far=Some(FarProgress{nonce:self.far_nonce,key,center,radius,
-            total:plan.len(),complete:0,errors:0,
+            source,total:plan.len(),complete:0,errors:0,
             remaining:plan.into_iter().collect()});
         self.next_far_batch()
     }
@@ -371,24 +375,33 @@ impl App{
             return iced::Task::none();
         };
         if progress.remaining.is_empty(){return iced::Task::none();}
-        let take=progress.remaining.len().min(far_view::FAR_BATCH_CHUNKS);
+        let take=progress.remaining.len().min(
+            far_view::batch_size_for(progress.remaining.front().unwrap().span));
         let requests:Vec<_>=progress.remaining.drain(..take).collect();
         let (nonce,key)=(progress.nonce,progress.key);
+        let source=std::sync::Arc::clone(&progress.source);
         let (min_y,max_y)=match self.surface.as_ref(){
             Some((wi,di,view))if(*wi,*di)==key=>(view.y_min,view.y_max),
             _=>return iced::Task::none(),
         };
-        let session=match self.current_session(key){
-            Ok(s)=>s.clone(),
-            Err(e)=>{
-                self.surface_report=e;self.far=None;return iced::Task::none();
-            }
-        };
+        // Task::perform executes Futures; synchronous region reads inside
+        // the future would monopolize its executor. Move only bounded
+        // read-only I/O onto an OS worker and await its one-shot response.
+        let requested=requests.len();
         iced::Task::perform(async move {
-            requests.into_iter().map(|req|
-                far_view::inspect_far_chunk(&session,req,min_y,max_y)
-                    .map_err(|e|format!("chunk {},{}: {e}",req.cx,req.cz))
-            ).collect::<Vec<_>>()
+            let (sender,receiver)=iced::futures::channel::oneshot::channel();
+            std::thread::spawn(move ||{
+                let results=requests.into_iter().map(|req|
+                    far_view::inspect_far_chunk(&source,req,min_y,max_y)
+                        .map_err(|e|format!("chunk {},{}: {e}",req.cx,req.cz))
+                ).collect::<Vec<_>>();
+                let _=sender.send(results);
+            });
+            receiver.await.unwrap_or_else(|_|{
+                (0..requested).map(|_|
+                    Err("Distant source read worker stopped unexpectedly".into())
+                ).collect()
+            })
         },move |results|Message::FarBatchLoaded(nonce,results))
     }
     fn finish_far_batch(&mut self,nonce:u64,
@@ -407,7 +420,7 @@ impl App{
         for result in results{
             progress.complete+=1;
             match result{
-                Ok(patch)=>far_view::append_chunk(view,patch),
+                Ok(patch)=>far_view::append_chunk(std::sync::Arc::make_mut(view),patch),
                 Err(e)=>{
                     progress.errors+=1;
                     if progress.errors<=3{
@@ -2023,7 +2036,7 @@ fn view(app:&App)->Element<'_,Message>{
                         app.surface_pitch,app.surface_zoom)),
                 ].spacing(5));
                 let surface_canvas=IsometricSurface{
-                    surface:view.clone(),camera_quarters:app.surface_camera,
+                    surface:std::sync::Arc::clone(view),camera_quarters:app.surface_camera,
                     texture_bank:app.texture_bank.clone(),show_textures:app.show_textures,
                     yaw_degrees:app.surface_yaw,pitch_degrees:app.surface_pitch,
                     zoom:app.surface_zoom,pan_x:app.surface_pan_x,
