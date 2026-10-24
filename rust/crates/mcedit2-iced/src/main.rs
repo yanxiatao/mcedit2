@@ -1,8 +1,15 @@
 //! Native Rust + iced desktop with legacy MCEdit2 positional world arguments.
 mod isometric;
+mod gpu_mesh;
+mod gpu_scene;
+mod palette;
+mod textures;
+mod models;
+mod resource_models;
 use iced::widget::{button,canvas,column,container,row,scrollable,text,text_input};
 use mcedit2_world::surface::SurfaceView;
-use isometric::IsometricSurface;
+use isometric::{Face,IsometricSurface};
+use gpu_scene::GpuScene;
 use iced::{Element,Length,Theme};
 use mcedit2_world::{compatibility_label,inspect_input,launch,WorldSummary};
 use mcedit2_world::block_lookup::{parse_xyz,read_world_block};
@@ -57,15 +64,69 @@ fn shifted_slice(bounds:Bounds,dx:i32,dy:i32,dz:i32)->Result<String,String>{
         last.0,last.1,last.2))
 }
 
+fn parse_scene_window(input:&str)->Result<Bounds,String>{
+    let (first,last)=input.split_once(';')
+        .ok_or("3D scene requires X1,Y1,Z1;X2,Y2,Z2")?;
+    if last.contains(';'){return Err("Too many 3D viewport separators".into());}
+    let a=mcedit2_world::block_lookup::parse_xyz(first).map_err(|e|e.to_string())?;
+    let b=mcedit2_world::block_lookup::parse_xyz(last).map_err(|e|e.to_string())?;
+    let minimum=[a.0.min(b.0),a.1.min(b.1),a.2.min(b.2)];
+    let maximum=[a.0.max(b.0),a.1.max(b.1),a.2.max(b.2)];
+    for v in [minimum,maximum]{
+        Bounds::new((v[0],v[1],v[2]),(v[0],v[1],v[2]))
+            .map_err(|e|e.to_string())?;
+    }
+    for (index,maximum_size) in [(0,32),(1,48),(2,32)]{
+        if maximum[index] as i64-minimum[index] as i64+1>maximum_size{
+            return Err("3D view is limited to 32x32x48 known source cells".into());
+        }
+    }
+    // A display-only selection can exceed the unchanged 4096 edit limit.
+    // The strict read-only 49152-source-cell limit is enforced by the backend.
+    Ok(Bounds{minimum,maximum})
+}
+fn shifted_scene(input:&str,dx:i32,dy:i32,dz:i32)->Result<String,String>{
+    let area=parse_scene_window(input)?;
+    let shift=|p:[i32;3]|->Result<[i32;3],String>{
+        Ok([
+            p[0].checked_add(dx).ok_or("Scene X overflow")?,
+            p[1].checked_add(dy).ok_or("Scene Y overflow")?,
+            p[2].checked_add(dz).ok_or("Scene Z overflow")?,
+        ])
+    };
+    let a=shift(area.minimum)?;let b=shift(area.maximum)?;
+    let text=format!("{},{},{};{},{},{}",a[0],a[1],a[2],b[0],b[1],b[2]);
+    parse_scene_window(&text)?;
+    Ok(text)
+}
+
 #[derive(Default)]
 struct App{
     path:String,
     surface_area:String,
+    surface_exposed:bool,
+    surface_cut_top:Option<i32>,
+    surface_frame:bool,
+    surface_axes:bool,
+    surface_chunk_grid:bool,
+    surface_section_guides:bool,
+    show_textures:bool,
+    use_gpu:bool,
+    gpu_quality:gpu_mesh::Quality,
+    texture_bank:Option<std::sync::Arc<textures::TextureBank>>,
+    texture_path:String,
+    texture_report:String,
     surface_camera:u8,
+    surface_yaw:i32,
+    surface_pitch:i32,
     surface_zoom:f32,
     surface_pan_x:f32,
     surface_pan_y:f32,
     selected_surface:Option<(i32,i32,i32)>,
+    selected_surface_face:Option<Face>,
+    corner_a:Option<(i32,i32,i32)>,
+    corner_b:Option<(i32,i32,i32)>,
+    surface_hover:Option<(i32,i32,i32)>,
     surface:Option<(usize,usize,SurfaceView)>,
     surface_report:String,
     slice_grid:Option<(usize,usize,Slice)>,
@@ -112,8 +173,16 @@ struct App{
 #[derive(Debug,Clone)]
 enum Message{
     Path(String),Open,Select(usize),Coordinates(String),Dimension(usize),
+    TexturePath(String),LoadTextures,UnloadTextures,ToggleTextures,ToggleGpu,CycleGpuQuality,
     SurfaceArea(String),InspectSurface,InspectVolume,PickSurface(i32,i32,i32),RotateSurface,
+    PickSurfaceFace(i32,i32,i32,Face),
+    Shift3D(i32,i32,i32),Center3DOnPicked,ScenePreset(u8),
+    Toggle3DFrame,Toggle3DAxes,Toggle3DChunkGrid,Toggle3DSections,
+    Cut3DTop(i32),Reset3DCut,
+    Set3DCornerA,Set3DCornerB,Use3DBox,Clear3DBox,
     ZoomSurface(i8),PanSurface(i32,i32),ResetSurfaceCamera,
+    OrbitSurface(i32),PitchSurface(i32),OrbitPitchSurface(i32,i32),
+    HoverSurface(Option<(i32,i32,i32)>),
     BeScalarField(String),BeScalarValue(String),PreviewBeScalar,
     StageBeScalar,UndoBeScalar,RedoBeScalar,InspectStagedBe,InspectBeTree,
     BeSnapshotPath(String),ExportOriginalBe,VerifyOriginalBe,
@@ -139,23 +208,28 @@ enum Message{
 }
 impl App{
     fn inspect_surface(&mut self,exposed_volume:bool){
-        self.surface=None;self.selected_surface=None;
+        self.surface_exposed=exposed_volume;
+        if !exposed_volume{self.surface_cut_top=None;}
+        self.surface=None;self.selected_surface=None;self.selected_surface_face=None;
+        self.surface_hover=None;
+        self.corner_a=None;self.corner_b=None;
         self.surface_report=match self.current_key(){
             None=>"Select a Java world first.".into(),
-            Some(key)=>match parse_bounds(&self.surface_area){
+            Some(key)=>match parse_scene_window(&self.surface_area){
                 Err(e)=>format!("Invalid 3D surface bounds: {e}"),
                 Ok(bounds)=>{
                     let w=bounds.maximum[0] as i64-bounds.minimum[0] as i64+1;
                     let depth=bounds.maximum[2] as i64-bounds.minimum[2] as i64+1;
-                    if w<=0 || w>16 || depth<=0 || depth>16{
-                        "Original 3D surface footprint must fit 16x16.".into()
+                    if w<=0 || w>32 || depth<=0 || depth>32{
+                        "Original 3D surface footprint must fit 32x32.".into()
                     }else{
+                        let cut_top=self.surface_cut_top;
                         match self.current_session(key).and_then(|session|
                             (if exposed_volume{
-                                session.inspect_exposed_volume(
-                                    bounds.minimum[0],bounds.minimum[2],
+                                mcedit2_world::surface::inspect_exposed_volume_cutaway(
+                                    session,bounds.minimum[0],bounds.minimum[2],
                                     bounds.minimum[1],bounds.maximum[1],
-                                    w as u8,depth as u8)
+                                    w as u8,depth as u8,cut_top)
                             }else{
                                 session.inspect_surface(
                                     bounds.minimum[0],bounds.minimum[2],
@@ -164,7 +238,7 @@ impl App{
                             }).map_err(|e|e.to_string())){
                             Ok(result)=>{
                                 let message=format!(
-                                    "3D {}: {} visible voxels, {} missing source columns across {} chunks. Click top/side faces for exact XYZ; cropped boundary faces are viewport cuts, not inferred air.",
+                                    "Read-only 3D {}: {} visible voxels, {} missing source columns across {} real chunks. Picked block still obeys the independent 4096-cell edit budget; viewport cuts are not inferred air.",
                                     if exposed_volume{"exposed multilayer volume"}else{"highest-column surface"},
                                     result.voxels.len(),result.missing_columns,result.source_chunks
                                 );
@@ -177,6 +251,93 @@ impl App{
                 }
             }
         };
+    }
+    fn selection_box(&self)->Option<Bounds>{
+        let a=self.corner_a?;let b=self.corner_b?;
+        Bounds::new(a,b).ok()
+    }
+    fn set_3d_corner(&mut self,first:bool){
+        let Some(pos)=self.selected_surface else{
+            self.surface_report="Click a visible original 3D voxel before setting a corner.".into();return;
+        };
+        if first{self.corner_a=Some(pos);}else{self.corner_b=Some(pos);}
+        self.surface_report=match (self.corner_a,self.corner_b){
+            (Some(a),Some(b))=>match Bounds::new(a,b){
+                Ok(bounds)=>format!("3D selection A={a:?}, B={b:?}; {} original block positions. Use box to edit only after review.",
+                    bounds.volume().unwrap_or(0)),
+                Err(e)=>format!("3D box exceeds safe edit limits: {e}; choose closer corners."),
+            },
+            _=>format!("3D {} corner set to {pos:?}; select the other corner.",
+                if first{"A"}else{"B"}),
+        };
+    }
+    fn use_3d_box(&mut self){
+        let Some(bounds)=self.selection_box() else{
+            self.surface_report="Set two 3D corners within the 4096-block edit budget.".into();return;
+        };
+        let a=bounds.minimum;let b=bounds.maximum;
+        self.edit_area=format!("{},{},{};{},{},{}",a[0],a[1],a[2],b[0],b[1],b[2]);
+        self.save_preview=None;self.prepared=None;self.be_prepared=None;
+        self.surface_report=format!("Copied {}-cell original XYZ box to edit bounds; no blocks staged. Preview before Apply.",
+            bounds.volume().unwrap_or(0));
+    }
+    fn move_cutaway(&mut self,delta:i32){
+        let Ok(bounds)=parse_scene_window(&self.surface_area) else{
+            self.surface_report="Inspect a valid 3D scene before cutting".into();return;
+        };
+        let current=self.surface_cut_top.unwrap_or(bounds.maximum[1]);
+        self.surface_cut_top=Some(current.saturating_add(delta)
+            .clamp(bounds.minimum[1],bounds.maximum[1]));
+        self.inspect_surface(true);
+    }
+    fn shift_3d(&mut self,dx:i32,dy:i32,dz:i32){
+        match shifted_scene(&self.surface_area,dx,dy,dz){
+            Ok(text)=>{self.surface_area=text;self.inspect_surface(self.surface_exposed);}
+            Err(e)=>self.surface_report=format!("3D navigation refused: {e}"),
+        }
+    }
+    fn center_3d(&mut self){
+        let pos=self.selected_surface.or_else(||
+            mcedit2_world::block_lookup::parse_xyz(&self.query_coordinates).ok());
+        let Some((x,y,z))=pos else{
+            self.surface_report="Pick an original XYZ before centering.".into();
+            return;
+        };
+        let cx=x.div_euclid(16)*16;
+        let cz=z.div_euclid(16)*16;
+        let y0=y.saturating_sub(8);
+        let y1=y0.saturating_add(15);
+        let next=format!("{cx},{y0},{cz};{},{y1},{}",cx+15,cz+15);
+        match parse_scene_window(&next){
+            Ok(_)=>{self.surface_area=next;self.inspect_surface(self.surface_exposed);}
+            Err(e)=>self.surface_report=format!("3D center refused: {e}"),
+        }
+    }
+    fn scene_preset(&mut self,side:u8){
+        if side!=16&&side!=32{return;}
+        let current=match parse_scene_window(&self.surface_area){
+            Ok(bounds)=>bounds,
+            Err(e)=>{self.surface_report=format!("Cannot resize viewport: {e}");return;}
+        };
+        // Preserve the existing low corner and current Y minimum. Enlarging
+        // the view never stages an edit or increases the edit batch limit.
+        let min=current.minimum;
+        let far=match (min[0].checked_add(side as i32-1),
+            min[2].checked_add(side as i32-1)){
+            (Some(x),Some(z))=>(x,z),
+            _=>{self.surface_report="Viewport coordinate overflow".into();return;}
+        };
+        let height=if side==32{48}else{32};
+        let Some(y1)=min[1].checked_add(height-1)else{
+            self.surface_report="Viewport Y overflow".into();return;
+        };
+        let next=format!("{},{},{};{},{},{}",min[0],min[1],min[2],
+            far.0,y1,far.1);
+        match parse_scene_window(&next){
+            Ok(_)=>{self.surface_area=next;self.surface_cut_top=None;
+                self.inspect_surface(self.surface_exposed);}
+            Err(e)=>self.surface_report=format!("Viewport resize refused: {e}")
+        }
     }
     fn pick_surface(&mut self,x:i32,y:i32,z:i32){
         let Some((wi,di,view))=self.surface.as_ref() else{return};
@@ -572,7 +733,10 @@ impl App{
             clipboard_destination:"0, 64, 0".into(),
             vertical_area:"0,-64,0;15,-49,0".into(),
             surface_area:"0,-64,0;15,-49,15".into(),
-            surface_zoom:1.0,..Default::default()
+            surface_zoom:1.0,surface_pitch:35,
+            surface_frame:true,surface_axes:true,surface_chunk_grid:true,
+            surface_section_guides:false,
+            show_textures:true,use_gpu:true,..Default::default()
         };
         for path in &args.worlds {
             match inspect_input(path) {
@@ -693,6 +857,7 @@ impl App{
         }
     }
     fn apply_batch(&mut self){
+        let displayed=self.surface.is_some();
         self.surface=None;
         self.save_preview=None;
         self.slice_grid=None;
@@ -710,14 +875,17 @@ impl App{
         }
         let result=self.current_session((world,dimension))
             .and_then(|editor|editor.commit(preview).map_err(|e|e.to_string()));
+        let succeeded=result.is_ok();
         self.edit_report=match result{
             Ok(count)=>format!(
                 "Staged {count} block changes as ONE Undo. MEMORY ONLY; no world file was saved."
             ),
             Err(error)=>format!("Edit transaction REFUSED before mutation: {error}"),
         };
+        if succeeded&&displayed{self.inspect_surface(self.surface_exposed);}
     }
     fn history(&mut self, redo:bool){
+        let displayed=self.surface.is_some();
         self.surface=None;
         self.save_preview=None;
         self.slice_grid=None;
@@ -728,22 +896,80 @@ impl App{
             if redo {editor.redo()} else {editor.undo()}
                 .map_err(|e|e.to_string())
         });
+        let succeeded=matches!(result,Ok(true));
         self.edit_report=match result{
             Ok(true)=>format!("{} in-memory original block transaction; no disk writes.",
                 if redo{"Redid"}else{"Undid"}),
             Ok(false)=>"No matching in-memory history to undo/redo.".into(),
             Err(error)=>format!("Undo/Redo REFUSED: {error}"),
         };
+        if succeeded&&displayed{self.inspect_surface(self.surface_exposed);}
     }
 }
 fn update(app:&mut App,message:Message){
     match message{
         Message::Path(x)=>app.path=x,
-        Message::SurfaceArea(value)=>{app.surface_area=value;app.surface=None;},
+        Message::TexturePath(x)=>app.texture_path=x,
+        Message::ToggleTextures=>app.show_textures=!app.show_textures,
+        Message::ToggleGpu=>app.use_gpu=!app.use_gpu,
+        Message::CycleGpuQuality=>app.gpu_quality=app.gpu_quality.next(),
+        Message::UnloadTextures=>{
+            app.texture_bank=None;
+            app.texture_report="3D texture assets unloaded. Original world unchanged.".into();
+        },
+        Message::LoadTextures=>{
+            match textures::TextureBank::open(std::path::Path::new(app.texture_path.trim())){
+                Ok(bank)=>{
+                    app.texture_report=format!(
+                        "Resource textures loaded read-only: {} PNGs, {} model/blockstate JSONs, {} warnings. {}",
+                        bank.count(),bank.model_count(),bank.warnings.len(),
+                        bank.warnings.first().map(String::as_str).unwrap_or(""));
+                    app.texture_bank=Some(std::sync::Arc::new(bank));
+                    app.show_textures=true;
+                },
+                Err(e)=>app.texture_report=format!("Resource pack refused (previous assets retained): {e}"),
+            }
+        },
+        Message::SurfaceArea(value)=>{app.surface_area=value;app.surface=None;app.surface_cut_top=None;},
         Message::InspectSurface=>app.inspect_surface(false),
         Message::InspectVolume=>app.inspect_surface(true),
+        Message::Shift3D(x,y,z)=>app.shift_3d(x,y,z),
+        Message::Center3DOnPicked=>app.center_3d(),
+        Message::ScenePreset(side)=>app.scene_preset(side),
+        Message::Toggle3DFrame=>app.surface_frame=!app.surface_frame,
+        Message::Toggle3DAxes=>app.surface_axes=!app.surface_axes,
+        Message::Toggle3DChunkGrid=>app.surface_chunk_grid=!app.surface_chunk_grid,
+        Message::Toggle3DSections=>app.surface_section_guides=!app.surface_section_guides,
+        Message::Set3DCornerA=>app.set_3d_corner(true),
+        Message::Set3DCornerB=>app.set_3d_corner(false),
+        Message::Use3DBox=>app.use_3d_box(),
+        Message::Clear3DBox=>{
+            app.corner_a=None;app.corner_b=None;
+            app.surface_report="3D selection box cleared; world and staged data unchanged.".into();
+        },
+        Message::Cut3DTop(delta)=>app.move_cutaway(delta),
+        Message::Reset3DCut=>{
+            app.surface_cut_top=None;
+            app.inspect_surface(app.surface_exposed);
+        },
         Message::PickSurface(x,y,z)=>app.pick_surface(x,y,z),
+        Message::PickSurfaceFace(x,y,z,face)=>{
+            app.pick_surface(x,y,z);
+            if app.selected_surface==Some((x,y,z)){
+                app.selected_surface_face=Some(face);
+                app.surface_report=format!(
+                    "Selected original voxel ({x},{y},{z}) {:?} face; normal {:?}. Edits require preview/Apply.",
+                    face,face.normal());
+            }
+        },
         Message::RotateSurface=>app.surface_camera=(app.surface_camera+1)%4,
+        Message::OrbitSurface(deg)=>app.surface_yaw=(app.surface_yaw+deg).rem_euclid(360),
+        Message::OrbitPitchSurface(yaw,pitch)=>{
+            app.surface_yaw=(app.surface_yaw+yaw).rem_euclid(360);
+            app.surface_pitch=(app.surface_pitch+pitch).clamp(15,80);
+        },
+        Message::HoverSurface(pos)=>app.surface_hover=pos,
+        Message::PitchSurface(deg)=>app.surface_pitch=(app.surface_pitch+deg).clamp(15,80),
         Message::ZoomSurface(n)=>app.surface_zoom=(app.surface_zoom+n as f32*0.25).clamp(0.5,3.0),
         Message::PanSurface(dx,dy)=>{
             app.surface_pan_x=(app.surface_pan_x+dx as f32).clamp(-1000.0,1000.0);
@@ -751,7 +977,7 @@ fn update(app:&mut App,message:Message){
         },
         Message::ResetSurfaceCamera=>{
             app.surface_zoom=1.0;app.surface_pan_x=0.0;app.surface_pan_y=0.0;
-            app.surface_camera=0;
+            app.surface_camera=0;app.surface_yaw=0;app.surface_pitch=35;
         },
         Message::ClipboardPath(value)=>app.clipboard_path=value,
         Message::SchematicPath(value)=>app.schematic_path=value,
@@ -1521,11 +1747,39 @@ fn view(app:&App)->Element<'_,Message>{
             body=body.push(text(&app.block_result));
         }
         body=body.push(row![
-            text_input("3D voxel surface X1,Y1,Z1;X2,Y2,Z2 (16x16x32 max)",
+            text_input("Resource pack folder, .zip, or client .jar (read only)",
+                &app.texture_path).on_input(Message::TexturePath)
+                .on_submit(Message::LoadTextures).width(Length::Fill),
+            button("Load textures").on_press(Message::LoadTextures),
+            button("Unload").on_press(Message::UnloadTextures),
+            button(if app.show_textures{"Palette only"}else{"Show textures"})
+                .on_press(Message::ToggleTextures),
+            button(if app.use_gpu{"Use Canvas fallback"}else{"Use wgpu renderer"})
+                .on_press(Message::ToggleGpu),
+            button(text(format!("GPU detail: {}",app.gpu_quality.label())))
+                .on_press(Message::CycleGpuQuality),
+        ].spacing(7));
+        if !app.texture_report.is_empty(){body=body.push(text(&app.texture_report));}
+        body=body.push(row![
+            text_input("Read-only 3D XYZ window (max 32x32x48; edit limit stays 4096)",
                 &app.surface_area).on_input(Message::SurfaceArea).width(Length::Fill),
             button("Top-surface 3D").on_press(Message::InspectSurface),
             button("Exposed multi-layer 3D").on_press(Message::InspectVolume)
         ].spacing(8));
+        body=body.push(row![
+            button("16×16×32 inspect").on_press(Message::ScenePreset(16)),
+            button("32×32×48 inspect").on_press(Message::ScenePreset(32)),
+            text("Read-only cross-chunk view; no new editing permissions.")
+        ].spacing(8));
+        body=body.push(row![
+            button("X -16").on_press(Message::Shift3D(-16,0,0)),
+            button("X +16").on_press(Message::Shift3D(16,0,0)),
+            button("Z -16").on_press(Message::Shift3D(0,0,-16)),
+            button("Z +16").on_press(Message::Shift3D(0,0,16)),
+            button("Y -16").on_press(Message::Shift3D(0,-16,0)),
+            button("Y +16").on_press(Message::Shift3D(0,16,0)),
+            button("Center on XYZ").on_press(Message::Center3DOnPicked),
+        ].spacing(5));
         if let Some((wi,di,view))=&app.surface{
             if app.current_key()==Some((*wi,*di)){
                 body=body.push(row![
@@ -1539,12 +1793,116 @@ fn view(app:&App)->Element<'_,Message>{
                     button("Pan ↓").on_press(Message::PanSurface(0,40)),
                     button("Reset camera").on_press(Message::ResetSurfaceCamera),
                 ].spacing(5));
-                body=body.push(canvas(IsometricSurface{
+                let stats=view.statistics();
+                body=body.push(text(format!(
+                    "Scene: {} visible voxels / {} exposed source faces / {} inspected original chunk slots; BE={}, staged={}, liquid={}, glass={}, foliage={}, missing columns={}",
+                    stats.voxels,stats.exposed_faces,stats.original_chunks,
+                    stats.original_be,stats.staged,stats.liquids,
+                    stats.transparent,stats.foliage,stats.missing_columns
+                )));
+                let unknown_tiles=view.source_tiles.iter().filter(|t|!t.source_present).count();
+                let partial_tiles=view.source_tiles.iter().filter(|t|
+                    t.source_present&&t.unknown_columns>0).count();
+                body=body.push(text(format!(
+                    "Chunk tiles: {} present / {} absent / {} partially unknown. Green=known, amber=unknown columns or Sections, red=missing original chunk; display only.",
+                    view.source_tiles.len()-unknown_tiles,unknown_tiles,partial_tiles
+                )));
+                body=body.push(row![
+                    button(if app.surface_frame{"Hide 3D bounds"}else{"Show 3D bounds"})
+                        .on_press(Message::Toggle3DFrame),
+                    button(if app.surface_axes{"Hide XYZ axes"}else{"Show XYZ axes"})
+                        .on_press(Message::Toggle3DAxes),
+                    button(if app.surface_chunk_grid{"Hide chunk grid"}else{"Show chunk grid"})
+                        .on_press(Message::Toggle3DChunkGrid),
+                    button(if app.surface_section_guides{"Hide section Y"}else{"Show section Y"})
+                        .on_press(Message::Toggle3DSections),
+                    text("Axes: X red / Y green / Z blue. Outlined box is view clipping, not world geometry.")
+                ].spacing(6));
+                body=body.push(row![
+                    button("Corner A from picked").on_press(Message::Set3DCornerA),
+                    button("Corner B from picked").on_press(Message::Set3DCornerB),
+                    button("Use 3D box as edit selection").on_press(Message::Use3DBox),
+                    button("Clear 3D box").on_press(Message::Clear3DBox),
+                    text(format!("A={:?} / B={:?}",app.corner_a,app.corner_b)),
+                ].spacing(5));
+                if app.surface_exposed{
+                    body=body.push(row![
+                        text(format!("3D cutaway top: {} (view only)",
+                            app.surface_cut_top.map_or_else(||"full scene".into(),|y|y.to_string()))),
+                        button("Cut Y -8").on_press(Message::Cut3DTop(-8)),
+                        button("Cut Y -1").on_press(Message::Cut3DTop(-1)),
+                        button("Cut Y +1").on_press(Message::Cut3DTop(1)),
+                        button("Cut Y +8").on_press(Message::Cut3DTop(8)),
+                        button("Restore full height").on_press(Message::Reset3DCut)
+                    ].spacing(5));
+                }
+                body=body.push(text(format!(
+                    "3D renderer: {} / sampler {}. Source exposed faces: {}. GPU/picking cap {} visible faces ({} triangles); original NBT unchanged.",
+                    if app.use_gpu{"wgpu atlas triangles + Canvas interaction"}else{"Canvas fallback"},
+                    app.gpu_quality.label(),stats.exposed_faces,
+                    isometric::MAX_RENDER_FACES,isometric::MAX_RENDER_FACES*2
+                )));
+                if let Some(bank)=&app.texture_bank{
+                    let atlas=bank.atlas_size().map_or_else(||"none".to_string(),
+                        |(w,h)|format!("{w}x{h} RGBA"));
+                    body=body.push(text(format!(
+                        "Texture atlas: {} | {} namespaced PNG tiles | {} model/blockstate JSONs | {} warnings; CPU input, GPU fragment sampling.",
+                        atlas,bank.count(),bank.model_count(),bank.warnings.len())));
+                    if let Some((x,y,z))=app.selected_surface{
+                        if let Some(v)=view.voxels.iter().find(|v|(v.x,v.y,v.z)==(x,y,z)){
+                            body=body.push(text(format!(
+                                "Selected original state {}: {} resource-model cuboids (if supported); no edits applied.",
+                                v.state.name,bank.geometry(&v.state).map_or_else(
+                                    ||"fallback".to_string(),|boxes|boxes.len().to_string()))));
+                        }
+                    }
+                }
+                body=body.push(text("3D controls: right-drag orbit, middle-drag pan, mouse wheel zoom, left-click select. Mouse hover reads original voxel data only."));
+                if let Some((hx,hy,hz))=app.surface_hover{
+                    if let Some(voxel)=view.voxels.iter().find(|v|(v.x,v.y,v.z)==(hx,hy,hz)){
+                        body=body.push(text(format!(
+                            "Hover XYZ ({hx}, {hy}, {hz}) / chunk ({},{}) / section Y {} — {} | BE={} | staged={}",
+                            hx.div_euclid(16),hz.div_euclid(16),hy.div_euclid(16),
+                            voxel.state.name,voxel.original_block_entity,voxel.staged
+                        )));
+                    }
+                }
+                body=body.push(row![
+                    button("Orbit -15°").on_press(Message::OrbitSurface(-15)),
+                    button("Orbit +15°").on_press(Message::OrbitSurface(15)),
+                    button("Look lower").on_press(Message::PitchSurface(-10)),
+                    button("Look higher").on_press(Message::PitchSurface(10)),
+                    text(format!("yaw {}° / pitch {}° / zoom {:.2}x",
+                        (app.surface_camera as i32*90+app.surface_yaw).rem_euclid(360),
+                        app.surface_pitch,app.surface_zoom)),
+                ].spacing(5));
+                let surface_canvas=IsometricSurface{
                     surface:view.clone(),camera_quarters:app.surface_camera,
+                    texture_bank:app.texture_bank.clone(),show_textures:app.show_textures,
+                    yaw_degrees:app.surface_yaw,pitch_degrees:app.surface_pitch,
                     zoom:app.surface_zoom,pan_x:app.surface_pan_x,
-                    pan_y:app.surface_pan_y,selected:app.selected_surface
-                })
-                    .width(Length::Fill).height(Length::Fixed(440.0)));
+                    pan_y:app.surface_pan_y,selected:app.selected_surface,
+                    hovered:app.surface_hover,
+                    selection_box:app.selection_box(),
+                    show_frame:app.surface_frame,show_axes:app.surface_axes,
+                    show_chunk_grid:app.surface_chunk_grid,
+                    show_section_guides:app.surface_section_guides,
+                    gpu_faces:app.use_gpu,
+                    gpu_quality:app.gpu_quality,
+                    frame_cache:std::sync::Arc::new(std::sync::Mutex::new(None)),
+                };
+                let stage:Element<'_,Message>=if app.use_gpu{
+                    iced::widget::stack![
+                        iced::widget::shader(GpuScene(surface_canvas.clone()))
+                            .width(Length::Fill).height(Length::Fixed(440.0)),
+                        canvas(surface_canvas).width(Length::Fill)
+                            .height(Length::Fixed(440.0)),
+                    ].into()
+                }else{
+                    canvas(surface_canvas).width(Length::Fill)
+                        .height(Length::Fixed(440.0)).into()
+                };
+                body=body.push(stage);
             }
         }
         if !app.surface_report.is_empty(){
@@ -1835,9 +2193,24 @@ fn main()->iced::Result{
 
 #[cfg(test)]
 mod tests{
-    use super::{parse_region_name,shifted_slice,slice_cell_label};
+    use super::{parse_region_name,shifted_slice,slice_cell_label,
+        parse_scene_window,shifted_scene};
     use mcedit2_world::editing::{Bounds,SliceCell};
     use mcedit2_world::sections::State;
+    #[test]
+    fn viewport_3d_navigation_is_independent_of_block_edit_budget(){
+        let a=parse_scene_window("0,-64,0;15,-33,15").unwrap();
+        assert_eq!(a.volume().unwrap(),8192);
+        assert_eq!(shifted_scene("0,-64,0;15,-33,15",-16,0,-16).unwrap(),
+            "-16,-64,-16;-1,-33,-1");
+        assert_eq!(parse_scene_window("0,-64,0;31,-17,31").unwrap()
+            .volume().unwrap(),49_152);
+        assert!(parse_scene_window("0,-64,0;32,-33,15").is_err());
+        assert!(parse_scene_window("0,-64,0;15,-16,15").is_err());
+        assert!(shifted_scene("29999980,0,0;29999995,15,15",16,0,0).is_err());
+        assert_eq!(shifted_scene("-32,-64,-32;-1,-17,-1",16,0,16).unwrap(),
+            "-16,-64,-16;15,-17,15");
+    }
     #[test]
     fn interactive_slice_shift_and_cell_symbols_reject_overflow(){
         let bounds=Bounds::new((-16,-64,0),(-1,-64,15)).unwrap();

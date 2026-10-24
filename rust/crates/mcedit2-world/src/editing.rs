@@ -409,6 +409,9 @@ impl Session {
     /// Reuse an already strictly decoded source chunk instead of reopening
     /// it for each cell in a 3D render. This never exposes the overlay for
     /// direct mutation, and original source BE guards remain authoritative.
+    pub(crate) fn is_staged_block(&self,position:Position)->bool{
+        self.overlay.contains_key(&position)
+    }
     pub(crate) fn effective_state(&self,position:Position,source:&State)->State{
         self.overlay.get(&position).unwrap_or(source).clone()
     }
