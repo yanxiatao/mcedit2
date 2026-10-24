@@ -355,7 +355,10 @@ impl IsometricSurface{
         // Huge distant terrain views must FIT instead of forcing at least
         // three pixels per original block beyond the horizon.
         let minimum=if self.surface.width>64||self.surface.depth>64{
-            0.01
+            // At the maximum 2047-chunk horizon the entire source extent
+            // spans 65,520 blocks. A hard 0.01px/block floor would crop
+            // the edges of the panorama instead of fitting them.
+            0.00001
         }else{3.0};
         natural.clamp(minimum,24.0)*self.zoom.clamp(0.5,3.0)
     }
@@ -942,6 +945,11 @@ mod tests{
         Arc::make_mut(&mut view.surface).width=8208;
         Arc::make_mut(&mut view.surface).depth=8208;
         assert!(view.scale(Size::new(1000.0,650.0))<1.0);
+        Arc::make_mut(&mut view.surface).width=65520;
+        Arc::make_mut(&mut view.surface).depth=65520;
+        let scale=view.scale(Size::new(1000.0,650.0));
+        assert!(scale>0.0&&scale<0.01);
+        assert!(65520.0*scale<1000.0);
     }
     #[test]
     fn camera_relative_projection_preserves_neighboring_blocks_at_world_border(){

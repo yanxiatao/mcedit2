@@ -1061,27 +1061,32 @@ package until the entire 3D display feature is complete.
 ## Extreme read-only terrain view distance (no CI)
 
 The distant-terrain planner offers progressive 16 / 32 / 64 / 128 /
-256 / 512 / 1024 chunk radius presets. The largest radius is 16,384
-world blocks from the center to each horizon edge, excluding unseen or
-unavailable source chunks. To keep memory finite, the center samples
+256 / 512 / 1024 / 1536 / 2047 chunk radius presets. The largest
+radius is 32,752 world blocks from the center to each horizon edge,
+excluding unseen or unavailable source chunks. To keep memory finite, the center samples
 single source block columns and successive chunk rings use 4/8/16-block
 LOD footprints; beyond 256/512 chunks the planner also skips more of
-the farthest chunks. The largest view plans at most 36,000 source chunk
-requests, processed in existing bounded asynchronous batches, never all
-decoded and retained at once. It does not inspect or render entities.
+the farthest chunks. Past the 1024-chunk radius, only every eighth
+outer ring is sampled, with a coarser angular step; the final source
+radius is always represented. A view plans at most 36,000 source chunk
+requests, processed in bounded asynchronous batches. Each batch reuses
+up to 32 validated read-only Region indexes, avoiding repeated 8 KiB
+header parsing for adjacent original chunks while retaining per-chunk
+NBT and Block Entity coordinate checks. Nothing is written. It does not inspect or render entities.
 Far LOD tiles are never authenticated editable block picks. This is
 **sparse distant terrain** rather than pixel-perfect all-block terrain:
 unloaded or unplanned areas are not fabricated. The GPU projection uses
 camera-relative coordinates and a near-zero minimum scene scale so far
-terrain can fit the view. 1024-chunk inspections may take considerable
-time on very large saves due to disk access and will progress tile by tile.
+terrain can fit the view. 1024–2047-chunk inspections can take
+considerable time on very large saves; a 2047-chunk panorama is highly
+sparse and is NOT a promise of continuous terrain coverage.
 CI and executable build are still deferred until the entire 3D display
 migration has been completed, as explicitly requested.
 
 
 ## Progressive far-terrain rendering budgets and nonblocking reads (unverified)
 
-For 16–1024-chunk radius read-only scenes, the 150,000-face GPU/Canvas
+For 16–2047-chunk radius read-only scenes, the 150,000-face GPU/Canvas
 budget is now distributed by **actual source LOD**: detailed original
 voxels receive a near-detail allocation, while sampled terrain and the
 outermost 25% of the horizon retain guaranteed face capacity. Empty

@@ -475,9 +475,15 @@ impl App{
             let fallback_requests=requests.clone();
             let (sender,receiver)=iced::futures::channel::oneshot::channel();
             std::thread::spawn(move ||{
+                let mut region_cache=mcedit2_world::block_lookup::ReadOnlyRegionCache::new(
+                    source.original_world(),source.dimension());
                 let results=requests.into_iter().map(|req|{
-                    let result=far_view::inspect_far_chunk(&source,req,min_y,max_y)
-                        .map_err(|e|format!("chunk {},{}: {e}",req.cx,req.cz));
+                    let result=match &mut region_cache{
+                        Ok(reader)=>far_view::inspect_far_chunk_cached(
+                            &source,reader,req,min_y,max_y)
+                            .map_err(|e|format!("chunk {},{}: {e}",req.cx,req.cz)),
+                        Err(e)=>Err(format!("Distant original Region source refused: {e}")),
+                    };
                     (req,result)
                 }).collect::<Vec<_>>();
                 let _=sender.send(results);
@@ -2043,6 +2049,12 @@ fn view(app:&App)->Element<'_,Message>{
             button("256 chunks").on_press(Message::StartFarView(256)),
             button("512 chunks").on_press(Message::StartFarView(512)),
             button("1024 chunks").on_press(Message::StartFarView(1024)),
+        ].spacing(6));
+        body=body.push(row![
+            text("Very sparse panorama (source chunks only):"),
+            button("1536 chunks").on_press(Message::StartFarView(1536)),
+            button("2047 chunks").on_press(Message::StartFarView(2047)),
+            text("Maximum span 65,520 blocks across; only verified columns are shown."),
         ].spacing(6));
         if let Some(far)=app.far.as_ref(){
             if app.current_key()==Some(far.key){
