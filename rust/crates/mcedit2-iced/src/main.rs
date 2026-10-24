@@ -471,8 +471,8 @@ impl App{
         // Task::perform executes Futures; synchronous region reads inside
         // the future would monopolize its executor. Move only bounded
         // read-only I/O onto an OS worker and await its one-shot response.
-        let requested=requests.len();
         iced::Task::perform(async move {
+            let fallback_requests=requests.clone();
             let (sender,receiver)=iced::futures::channel::oneshot::channel();
             std::thread::spawn(move ||{
                 let results=requests.into_iter().map(|req|{
@@ -483,8 +483,8 @@ impl App{
                 let _=sender.send(results);
             });
             receiver.await.unwrap_or_else(|_|{
-                (0..requested).map(|_|
-                    Err("Distant source read worker stopped unexpectedly".into())
+                fallback_requests.into_iter().map(|req|
+                    (req,Err("Distant source read worker stopped unexpectedly".into()))
                 ).collect()
             })
         },move |results|Message::FarBatchLoaded(nonce,results))

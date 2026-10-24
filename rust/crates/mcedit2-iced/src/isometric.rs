@@ -1182,7 +1182,7 @@ mod tests{
     #[test]
     fn partial_geometry_keeps_one_original_voxel_position_for_picking(){
         let mut view=example();
-        view.surface.voxels[0].state=State{name:"minecraft:stone_slab".into(),
+        std::sync::Arc::make_mut(&mut view.surface).voxels[0].state=State{name:"minecraft:stone_slab".into(),
             properties:vec![("type".into(),"bottom".into())]};
         let faces=view.faces(Size::new(700.0,440.0));
         assert!(faces.iter().any(|f|f.face==Face::Top));
@@ -1245,8 +1245,8 @@ mod tests{
     #[test]
     fn original_be_and_staged_visual_flags_survive_loaded_texture_mode(){
         let mut view=example();
-        view.surface.voxels[0].original_block_entity=true;
-        view.surface.voxels[0].staged=true;
+        std::sync::Arc::make_mut(&mut view.surface).voxels[0].original_block_entity=true;
+        std::sync::Arc::make_mut(&mut view.surface).voxels[0].staged=true;
         let faces=view.faces(Size::new(700.0,440.0));
         assert!(faces.iter().any(|f|f.block_entity&&f.staged));
     }
@@ -1261,7 +1261,7 @@ mod tests{
     #[test]
     fn zero_culled_faces_are_not_pickable(){
         let mut view=example();
-        view.surface.voxels[0].faces=0;
+        std::sync::Arc::make_mut(&mut view.surface).voxels[0].faces=0;
         assert!(view.faces(Size::new(700.0,440.0)).is_empty());
     }
 }

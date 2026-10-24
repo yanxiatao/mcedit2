@@ -427,7 +427,7 @@ impl shader::Primitive for Primitive{
             let mut pass=encoder.begin_render_pass(&wgpu::RenderPassDescriptor{
                 label:Some("Original opaque model Z prepass and color"),
                 color_attachments:&[Some(wgpu::RenderPassColorAttachment{
-                    view:&color,resolve_target:None,
+                    view:&color,resolve_target:None,depth_slice:None,
                     ops:wgpu::Operations{
                         load:wgpu::LoadOp::Clear(wgpu::Color{
                             r:0.0,g:0.0,b:0.0,a:0.0
@@ -456,7 +456,7 @@ impl shader::Primitive for Primitive{
             let mut pass=encoder.begin_render_pass(&wgpu::RenderPassDescriptor{
                 label:Some("Original translucent source faces over known opaque Z"),
                 color_attachments:&[Some(wgpu::RenderPassColorAttachment{
-                    view:&color,resolve_target:None,
+                    view:&color,resolve_target:None,depth_slice:None,
                     ops:wgpu::Operations{
                         load:wgpu::LoadOp::Load,store:wgpu::StoreOp::Store,
                     },
