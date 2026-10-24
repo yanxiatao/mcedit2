@@ -508,6 +508,10 @@ impl TextureBank {
         let id=self.resolve_id(state,face)?;
         self.atlas.as_ref()?.entries.get(&id).cloned()
     }
+    /// Stable model/tile identity across animated RGBA atlas frame updates.
+    pub fn geometry_id(&self)->(usize,usize){
+        (Arc::as_ptr(&self.models) as usize,Arc::as_ptr(&self.tiles) as usize)
+    }
     pub fn model_count(&self)->usize{self.models.count()}
     pub fn geometry(&self,state:&State)->Option<Vec<crate::models::Part>>{
         self.models.parts(state)

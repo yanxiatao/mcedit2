@@ -79,7 +79,7 @@ struct CompositeOut {
 pub(crate) struct GpuScene(pub IsometricSurface);
 #[derive(Debug)]
 pub(crate) struct Primitive{
-    vertices:Vec<Vertex>,
+    vertices:Arc<Vec<Vertex>>,
     atlas:Option<Arc<TextureAtlas>>,
     quality:Quality,
 }
@@ -95,17 +95,34 @@ fn to_clip(vertex:&mut Vertex,size:Size,min_depth:f32,max_depth:f32){
         ((max_depth-vertex.depth)/span).clamp(0.0,1.0)
     }else{0.5};
 }
-impl shader::Program<Message> for GpuScene{
-    type State=();
-    type Primitive=Primitive;
-    fn draw(&self,_:&Self::State,_:mouse::Cursor,bounds:Rectangle)->Primitive{
-        let size=bounds.size();
-        let mut vertices=gpu_mesh::build(&self.0,size);
+impl IsometricSurface{
+    pub(crate) fn gpu_vertices_cached(&self,size:Size)->Arc<Vec<Vertex>>{
+        {
+            let cache=self.gpu_frame_cache.lock()
+                .unwrap_or_else(|e|e.into_inner());
+            if let Some((cached_size,vertices))=&*cache{
+                if *cached_size==size{return Arc::clone(vertices);}
+            }
+        }
+        let mut vertices=gpu_mesh::build(self,size);
         let depth_min=vertices.iter().map(|v|v.depth)
             .fold(f32::INFINITY,f32::min);
         let depth_max=vertices.iter().map(|v|v.depth)
             .fold(f32::NEG_INFINITY,f32::max);
         for vertex in &mut vertices{to_clip(vertex,size,depth_min,depth_max);}
+        let vertices=Arc::new(vertices);
+        let mut cache=self.gpu_frame_cache.lock()
+            .unwrap_or_else(|e|e.into_inner());
+        *cache=Some((size,Arc::clone(&vertices)));
+        vertices
+    }
+}
+impl shader::Program<Message> for GpuScene{
+    type State=();
+    type Primitive=Primitive;
+    fn draw(&self,_:&Self::State,_:mouse::Cursor,bounds:Rectangle)->Primitive{
+        let size=bounds.size();
+        let vertices=self.0.gpu_vertices_cached(size);
         let atlas=self.0.texture_bank.as_ref().and_then(|bank|bank.atlas()).cloned();
         Primitive{vertices,atlas,quality:self.0.gpu_quality}
     }
@@ -338,7 +355,7 @@ impl shader::Primitive for Primitive{
     type Pipeline=Pipeline;
     fn prepare(&self,pipeline:&mut Pipeline,device:&wgpu::Device,queue:&wgpu::Queue,
         bounds:&Rectangle,_:&Viewport){
-        let bytes=bytemuck::cast_slice(&self.vertices);
+        let bytes=bytemuck::cast_slice(self.vertices.as_slice());
         let needed=bytes.len() as u64;
         let resized_mesh=needed>pipeline.capacity;
         if resized_mesh{

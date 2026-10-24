@@ -40,6 +40,8 @@ pub struct IsometricSurface {
     /// Ephemeral shared cache for one immutable UI view. GPU and Canvas
     /// clones share it, and each new application view gets a fresh cache.
     pub(crate) frame_cache:Arc<Mutex<Option<(Size,Arc<Vec<RenderFace>>)>>>,
+    /// Fully normalized GPU vertex mesh, shared across Canvas and atlas ticks.
+    pub(crate) gpu_frame_cache:Arc<Mutex<Option<(Size,Arc<Vec<crate::gpu_mesh::Vertex>>)>>>,
 }
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
 pub enum Face{Top,Bottom,PosX,NegX,PosZ,NegZ}
@@ -506,7 +508,12 @@ impl IsometricSurface{
                 if *cached_size==size{return Arc::clone(faces);}
             }
         }
-        let faces=Arc::new(self.faces(size));
+        // Hover/selection outlines are drawn live by Canvas, not baked
+        // into reusable original-world geometry or the GPU mesh.
+        let mut static_view=self.clone();
+        static_view.selected=None;
+        static_view.hovered=None;
+        let faces=Arc::new(static_view.faces(size));
         let mut cache=self.frame_cache.lock().unwrap_or_else(|e|e.into_inner());
         *cache=Some((size,Arc::clone(&faces)));
         faces
@@ -707,15 +714,17 @@ impl canvas::Program<Message> for IsometricSurface{
                 }
                 if !textured{polygon(&mut frame,&face.corners,face.color);}
             }
-            if face.selected||face.hovered||face.block_entity||face.staged{
+            let selected=self.selected==Some(face.pos);
+            let hovered=self.hovered==Some(face.pos);
+            if selected||hovered||face.block_entity||face.staged{
                 // Outline only rendered faces, in the same near/far order as
                 // the fill. Never advertise unknown or culled cells as hits.
-                let tint=if face.selected{Color::from_rgb(0.10,1.0,0.91)}
-                    else if face.hovered{Color::from_rgb(1.0,0.90,0.31)}
+                let tint=if selected{Color::from_rgb(0.10,1.0,0.91)}
+                    else if hovered{Color::from_rgb(1.0,0.90,0.31)}
                     else if face.block_entity{Color::from_rgb(1.0,0.62,0.20)}
                     else{Color::from_rgb(0.19,0.85,0.99)};
                 frame.stroke(&face_path(&face.corners),Stroke::default()
-                    .with_color(tint).with_width(if face.selected{2.7}else{1.8}));
+                    .with_color(tint).with_width(if selected{2.7}else{1.8}));
             }
         }
         self.draw_guides(&mut frame,bounds.size());
@@ -831,6 +840,7 @@ mod tests{
             show_chunk_grid:true,show_section_guides:false,gpu_faces:false,
             gpu_quality:crate::gpu_mesh::Quality::Balanced,
             frame_cache:Arc::new(Mutex::new(None)),
+            gpu_frame_cache:Arc::new(Mutex::new(None)),
         }
     }
     #[test]
@@ -872,6 +882,29 @@ mod tests{
     fn degenerate_projected_triangle_cannot_be_a_pick_target(){
         let p=Point::new(2.0,3.0);
         assert_eq!(triangle_depth(p,[p,p,p],[0.0,1.0,2.0]),None);
+    }
+    #[test]
+    fn clipped_gpu_mesh_is_shared_between_same_view_draws(){
+        let view=example();
+        let size=Size::new(840.0,500.0);
+        let first=view.gpu_vertices_cached(size);
+        let second=view.clone().gpu_vertices_cached(size);
+        assert!(Arc::ptr_eq(&first,&second));
+        assert!(!first.is_empty());
+        let changed=view.gpu_vertices_cached(Size::new(841.0,500.0));
+        assert!(!Arc::ptr_eq(&first,&changed));
+    }
+    #[test]
+    fn selection_and_hover_do_not_invalidate_static_projected_faces(){
+        let mut view=example();
+        let size=Size::new(800.0,440.0);
+        let before=view.faces_cached(size);
+        view.selected=Some((2,-63,3));
+        view.hovered=Some((2,-63,3));
+        let after=view.faces_cached(size);
+        assert!(Arc::ptr_eq(&before,&after));
+        assert!(after.iter().all(|face|!face.selected&&!face.hovered));
+        assert!(view.faces(size).iter().any(|face|face.selected&&face.hovered));
     }
     #[test]
     fn gpu_canvas_clones_share_source_voxels_without_deep_copy(){

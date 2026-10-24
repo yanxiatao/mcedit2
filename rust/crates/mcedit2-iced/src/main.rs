@@ -135,6 +135,14 @@ impl FarProgress {
         }
     }
 }
+#[derive(PartialEq,Eq)]
+struct RenderSignature{
+    /// World selection, source snapshot address and sampled source counts.
+    source:Option<(usize,usize,usize,usize,usize,usize)>,
+    geometry:Option<(usize,usize)>,
+    camera:u8,yaw:i32,pitch:i32,zoom:u32,pan_x:u32,pan_y:u32,
+    show_textures:bool,
+}
 #[derive(Default)]
 struct App{
     path:String,
@@ -150,6 +158,16 @@ struct App{
     gpu_quality:gpu_mesh::Quality,
     texture_bank:Option<std::sync::Arc<textures::TextureBank>>,
     texture_animation_tick:u64,
+    /// Persist projected faces across reactive iced view rebuilds. Only
+    /// geometry/source/camera invalidates it; hover and PNG ticks do not.
+    render_face_cache:std::sync::Arc<
+        std::sync::Mutex<Option<(iced::Size,
+            std::sync::Arc<Vec<isometric::RenderFace>>)>>,
+    >,
+    render_gpu_cache:std::sync::Arc<
+        std::sync::Mutex<Option<(iced::Size,
+            std::sync::Arc<Vec<gpu_mesh::Vertex>>)>>,
+    >,
     texture_path:String,
     texture_report:String,
     surface_camera:u8,
@@ -247,6 +265,19 @@ enum Message{
     PreviewEdit,ApplyEdit,UndoEdit,RedoEdit,DiscardEdits,Clear
 }
 impl App{
+    fn render_signature(&self)->RenderSignature{
+        RenderSignature{
+            source:self.surface.as_ref().map(|(wi,di,view)|{
+                (*wi,*di,std::sync::Arc::as_ptr(view) as usize,
+                    view.voxels.len(),view.source_tiles.len(),view.source_chunks)
+            }),
+            geometry:self.texture_bank.as_ref().map(|bank|bank.geometry_id()),
+            camera:self.surface_camera,yaw:self.surface_yaw,pitch:self.surface_pitch,
+            zoom:self.surface_zoom.to_bits(),pan_x:self.surface_pan_x.to_bits(),
+            pan_y:self.surface_pan_y.to_bits(),
+            show_textures:self.show_textures,
+        }
+    }
     fn inspect_surface(&mut self,exposed_volume:bool){
         self.far=None;
         self.surface_exposed=exposed_volume;
@@ -1087,11 +1118,25 @@ impl App{
     }
 }
 fn update(app:&mut App,message:Message)->iced::Task<Message>{
+    let before=app.render_signature();
+    let task=update_impl(app,message);
+    if before!=app.render_signature(){
+        let mut cache=app.render_face_cache.lock()
+            .unwrap_or_else(|poison|poison.into_inner());
+        *cache=None;
+        let mut gpu=app.render_gpu_cache.lock()
+            .unwrap_or_else(|poison|poison.into_inner());
+        *gpu=None;
+    }
+    task
+}
+fn update_impl(app:&mut App,message:Message)->iced::Task<Message>{
     // A cached far-height patch reflects one original+overlay snapshot.
     // Any mutation must invalidate it before the next camera move.
     if matches!(&message,
         Message::ApplyEdit|Message::UndoEdit|Message::RedoEdit|
-        Message::DiscardEdits|Message::StageBeScalar|
+        Message::DiscardEdits|Message::ImportPatch|Message::Open|
+        Message::Select(_)|Message::Dimension(_)|Message::StageBeScalar|
         Message::UndoBeScalar|Message::RedoBeScalar|
         Message::StageBeBatch|Message::ImportBeJournal|
         Message::ConfirmWorldSave|Message::ConfirmBeSave|
@@ -2129,7 +2174,8 @@ fn view(app:&App)->Element<'_,Message>{
                     show_section_guides:app.surface_section_guides,
                     gpu_faces:app.use_gpu,
                     gpu_quality:app.gpu_quality,
-                    frame_cache:std::sync::Arc::new(std::sync::Mutex::new(None)),
+                    frame_cache:std::sync::Arc::clone(&app.render_face_cache),
+                    gpu_frame_cache:std::sync::Arc::clone(&app.render_gpu_cache),
                 };
                 let stage:Element<'_,Message>=if app.use_gpu{
                     iced::widget::stack![
@@ -2464,6 +2510,16 @@ mod tests{
         assert!(FAR_CACHE_PATCHES<=4096);
         assert!(FAR_CACHE_VOXELS<=90_000);
         assert_eq!(patch.voxels.len(),0);
+    }
+    #[test]
+    fn render_signature_ignores_animation_and_hover_but_tracks_camera_changes(){
+        let mut app=super::App::default();
+        let original=app.render_signature();
+        app.surface_hover=Some((4,64,6));
+        app.texture_animation_tick=19;
+        assert!(original==app.render_signature());
+        app.surface_yaw=45;
+        assert!(original!=app.render_signature());
     }
     #[test]
     fn viewport_3d_navigation_is_independent_of_block_edit_budget(){

@@ -1136,3 +1136,27 @@ a sprite's frame actually changes. The underlying immutable model and
 sprite resources share Arc ownership, avoiding reloading packs on ticks.
 Interpolation between frames is not implemented; discrete animation frames
 are supported. No compilation, CI or application packaging was triggered.
+
+
+## Persistent projected mesh and responsive overlays (unverified)
+
+The exact projected original-world face buffer is now cached across iced's
+reactive UI view rebuilds, rather than only among widgets in one frame.
+Camera changes, source chunk arrivals, world/dimension selection and model
+asset changes invalidate the cache; sprite animation frame changes only
+replace atlas RGBA, and hover/selection outlines are drawn independently
+by Canvas without regenerating the original geometry. Importing a block
+patch also discards distant original-source cache data. This preserves
+original source XYZ picking while reducing CPU projection during orbit/
+hover and 20 TPS animated resource-pack updates.
+No CI, compilation, executable build or packaging has been performed.
+
+
+The fully clip-space-normalized GPU mesh now has its own persistent
+`Arc<Vec<Vertex>>` cache, sized by the 150,000-face view cap. Atlas frame
+changes, hover and selected-block overlays reuse identical vertices and
+source face lists; GPU buffer writes are skipped by a matching hash.
+Toggling source textures, changing camera projection, loading a different
+pack/world or receiving new chunk samples invalidates both projected and
+GPU caches together. CPU and GPU frame selection share one atlas tick.
+This optimization is not yet CI-tested or runtime verified.
