@@ -1,2 +1,8 @@
-2026-10-24 corrected five-feature read-only scene 32x32x48 boundary verification.
-Confirm height 48 allows Y -64..-17; height 49 Y -64..-16 rejects; width 33 rejects. cargo check/test only, no packaging.
+2026-10-24 FULL 3D DISPLAY MIGRATION ONE-BATCH VALIDATION
+Rust iced/wgpu depth-tested render path, 1024-chunk progressive LOD,
+original-world visual picking and BE preservation, weighted Java JSON models,
+UV lock, cullface, crossed plants, animated .png.mcmeta atlas,
+cross-camera chunk reuse and persistent projected GPU/Canvas caches.
+Explicit user-requested one concentrated CI after implementation:
+Linux world+CLI and full workspace cargo check/test; Windows MSVC workspace
+cargo check/test. NO cargo build, packaging, binary artifacts or releases.
