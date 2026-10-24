@@ -101,12 +101,39 @@ fn shifted_scene(input:&str,dx:i32,dy:i32,dz:i32)->Result<String,String>{
     Ok(text)
 }
 
+/// Only exact same source chunk + requested LOD can be reused. Never
+/// use a cached distant sample for editor selection or source provenance.
+const FAR_CACHE_PATCHES:usize=4096;
+const FAR_CACHE_VOXELS:usize=90_000;
+type FarCacheKey=(i32,i32,u8);
 struct FarProgress{
     nonce:u64,key:(usize,usize),center:(i32,i32),radius:u16,
-    /// One immutable source snapshot is shared across background batches.
-    /// Avoid cloning the entire editor journal on every disk read batch.
+    /// Immutable source snapshot: only display navigation can reuse it;
+    /// any staging/undo/commit invalidates this entire FarProgress.
     source:std::sync::Arc<Session>,
     remaining:VecDeque<FarChunkRequest>,total:usize,complete:usize,errors:usize,
+    cache:BTreeMap<FarCacheKey,std::sync::Arc<FarChunkPatch>>,
+    cache_order:VecDeque<FarCacheKey>,
+    cached_voxels:usize,
+}
+fn far_cache_key(req:FarChunkRequest)->FarCacheKey{(req.cx,req.cz,req.span)}
+impl FarProgress {
+    fn remember(&mut self,req:FarChunkRequest,patch:&std::sync::Arc<FarChunkPatch>){
+        let key=far_cache_key(req);
+        if self.cache.contains_key(&key){return;}
+        // A large original chunk cannot starve future distant reuse.
+        if patch.voxels.len()>FAR_CACHE_VOXELS{return;}
+        self.cached_voxels+=patch.voxels.len();
+        self.cache.insert(key,std::sync::Arc::clone(patch));
+        self.cache_order.push_back(key);
+        while self.cache.len()>FAR_CACHE_PATCHES
+            ||self.cached_voxels>FAR_CACHE_VOXELS{
+            let Some(old)=self.cache_order.pop_front()else{break};
+            if let Some(evicted)=self.cache.remove(&old){
+                self.cached_voxels=self.cached_voxels.saturating_sub(evicted.voxels.len());
+            }
+        }
+    }
 }
 #[derive(Default)]
 struct App{
@@ -187,7 +214,7 @@ enum Message{
     PickSurfaceFace(i32,i32,i32,Face),
     Shift3D(i32,i32,i32),Center3DOnPicked,ScenePreset(u8),
     StartFarView(u16),ShiftFarView(i32,i32),
-    FarBatchLoaded(u64,Vec<Result<FarChunkPatch,String>>),
+    FarBatchLoaded(u64,Vec<(FarChunkRequest,Result<FarChunkPatch,String>)>),
     Toggle3DFrame,Toggle3DAxes,Toggle3DChunkGrid,Toggle3DSections,
     Cut3DTop(i32),Reset3DCut,
     Set3DCornerA,Set3DCornerB,Use3DBox,Clear3DBox,
@@ -327,7 +354,7 @@ impl App{
     }
     fn start_far_view(&mut self,radius:u16,requested:Option<(i32,i32)>)
         ->iced::Task<Message>{
-        self.far=None;
+        let previous=self.far.take();
         self.far_nonce=self.far_nonce.wrapping_add(1);
         self.surface=None;self.surface_cut_top=None;self.surface_hover=None;
         self.selected_surface=None;self.selected_surface_face=None;
@@ -343,9 +370,17 @@ impl App{
                 let z=(v.minimum[2] as i64+v.maximum[2] as i64)/2;
                 Some((i32::try_from(x).ok()?,i32::try_from(z).ok()?))
             })).unwrap_or((0,0));
-        let source=match self.current_session(key){
-            Ok(session)=>std::sync::Arc::new(session.clone()),
-            Err(e)=>{self.surface_report=e;return iced::Task::none();}
+        // Pan/recenter keeps the immutable source snapshot so overlapping
+        // chunk requests can reuse their already-decoded data. Mutations
+        // clear self.far before entering this method.
+        let compatible=previous.filter(|prior|prior.key==key);
+        let source=if let Some(prior)=compatible.as_ref(){
+            std::sync::Arc::clone(&prior.source)
+        }else{
+            match self.current_session(key){
+                Ok(session)=>std::sync::Arc::new(session.clone()),
+                Err(e)=>{self.surface_report=e;return iced::Task::none();}
+            }
         };
         let version=source.original_world().data_version;
         let (y_min,y_max)=if version.is_some_and(|v|v>=2860){
@@ -355,19 +390,35 @@ impl App{
             Ok(plan)=>plan,
             Err(e)=>{self.surface_report=e.to_string();return iced::Task::none();}
         };
-        let view=match far_view::empty_far_view(center.0,center.1,
+        let mut view=match far_view::empty_far_view(center.0,center.1,
             y_min,y_max,radius){
             Ok(view)=>view,
             Err(e)=>{self.surface_report=e.to_string();return iced::Task::none();}
         };
+        let (mut cache,mut order,mut cached_voxels)=compatible.map_or_else(
+            ||(BTreeMap::new(),VecDeque::new(),0),
+            |prior|(prior.cache,prior.cache_order,prior.cached_voxels));
+        // If the user pan moves a far camera, fill the new view with cached
+        // authentic source patches before scheduling fresh region reads.
+        let mut pending=VecDeque::new();
+        let mut reused=0;
+        for request in plan{
+            if let Some(patch)=cache.get(&far_cache_key(request)){
+                far_view::append_chunk(&mut view,(**patch).clone());
+                reused+=1;
+            }else{
+                pending.push_back(request);
+            }
+        }
+        let total=pending.len()+reused;
         self.surface=Some((key.0,key.1,std::sync::Arc::new(view)));
         self.surface_exposed=false;
         self.surface_report=format!(
-            "Streaming original terrain within {radius} chunk radius, {} planned source tiles. No entities or source edits.",
-            plan.len());
+            "Streaming {radius} chunk radius: {reused} cached tiles, {} pending source reads. No entities or edits.",
+            pending.len());
         self.far=Some(FarProgress{nonce:self.far_nonce,key,center,radius,
-            source,total:plan.len(),complete:0,errors:0,
-            remaining:plan.into_iter().collect()});
+            source,total,complete:reused,errors:0,
+            remaining:pending,cache,cache_order:order,cached_voxels});
         self.next_far_batch()
     }
     fn next_far_batch(&mut self)->iced::Task<Message>{
@@ -391,10 +442,11 @@ impl App{
         iced::Task::perform(async move {
             let (sender,receiver)=iced::futures::channel::oneshot::channel();
             std::thread::spawn(move ||{
-                let results=requests.into_iter().map(|req|
-                    far_view::inspect_far_chunk(&source,req,min_y,max_y)
-                        .map_err(|e|format!("chunk {},{}: {e}",req.cx,req.cz))
-                ).collect::<Vec<_>>();
+                let results=requests.into_iter().map(|req|{
+                    let result=far_view::inspect_far_chunk(&source,req,min_y,max_y)
+                        .map_err(|e|format!("chunk {},{}: {e}",req.cx,req.cz));
+                    (req,result)
+                }).collect::<Vec<_>>();
                 let _=sender.send(results);
             });
             receiver.await.unwrap_or_else(|_|{
@@ -405,7 +457,8 @@ impl App{
         },move |results|Message::FarBatchLoaded(nonce,results))
     }
     fn finish_far_batch(&mut self,nonce:u64,
-        results:Vec<Result<FarChunkPatch,String>>)->iced::Task<Message>{
+        results:Vec<(FarChunkRequest,Result<FarChunkPatch,String>)>)
+        ->iced::Task<Message>{
         let current=self.current_key();
         let Some(progress)=self.far.as_mut()else{
             return iced::Task::none();
@@ -417,10 +470,14 @@ impl App{
             return iced::Task::none();
         };
         if (*wi,*di)!=progress.key{return iced::Task::none();}
-        for result in results{
+        for (request,result) in results{
             progress.complete+=1;
             match result{
-                Ok(patch)=>far_view::append_chunk(std::sync::Arc::make_mut(view),patch),
+                Ok(patch)=>{
+                    let cached=std::sync::Arc::new(patch);
+                    progress.remember(request,&cached);
+                    far_view::append_chunk(std::sync::Arc::make_mut(view),(*cached).clone());
+                },
                 Err(e)=>{
                     progress.errors+=1;
                     if progress.errors<=3{
@@ -1028,6 +1085,19 @@ impl App{
     }
 }
 fn update(app:&mut App,message:Message)->iced::Task<Message>{
+    // A cached far-height patch reflects one original+overlay snapshot.
+    // Any mutation must invalidate it before the next camera move.
+    if matches!(&message,
+        Message::ApplyEdit|Message::UndoEdit|Message::RedoEdit|
+        Message::DiscardEdits|Message::StageBeScalar|
+        Message::UndoBeScalar|Message::RedoBeScalar|
+        Message::StageBeBatch|Message::ImportBeJournal|
+        Message::ConfirmWorldSave|Message::ConfirmBeSave|
+        Message::FinalizeRegion|Message::RollbackRegion|
+        Message::Clear)
+    {
+        app.far=None;
+    }
     match message{
         Message::Path(x)=>app.path=x,
         Message::TexturePath(x)=>app.texture_path=x,
@@ -2356,6 +2426,24 @@ mod tests{
         parse_scene_window,shifted_scene};
     use mcedit2_world::editing::{Bounds,SliceCell};
     use mcedit2_world::sections::State;
+    #[test]
+    fn far_tile_cache_is_bounded_and_lod_sensitive(){
+        use super::{FarProgress,far_cache_key,FAR_CACHE_PATCHES,FAR_CACHE_VOXELS};
+        use mcedit2_world::far_view::{FarChunkPatch,FarChunkRequest};
+        use mcedit2_world::surface::SourceChunkTile;
+        let sample=FarChunkRequest{cx:12,cz:-8,span:8};
+        let tile=SourceChunkTile{
+            chunk_x:12,chunk_z:-8,source_present:false,
+            known_columns:0,unknown_columns:4,exposed_voxels:0,
+        };
+        let patch=std::sync::Arc::new(FarChunkPatch{tile,voxels:vec![]});
+        assert_ne!(far_cache_key(sample),far_cache_key(FarChunkRequest{
+            span:16,..sample
+        }));
+        assert!(FAR_CACHE_PATCHES<=4096);
+        assert!(FAR_CACHE_VOXELS<=90_000);
+        assert_eq!(patch.voxels.len(),0);
+    }
     #[test]
     fn viewport_3d_navigation_is_independent_of_block_edit_budget(){
         let a=parse_scene_window("0,-64,0;15,-33,15").unwrap();

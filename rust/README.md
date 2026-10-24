@@ -1107,3 +1107,15 @@ This is performance-focused 3D display migration, not a change to the
 has NOT been compiled, tested in CI, or visually validated; check/test
 runs remain deferred until the complete 3D display migration is ready
 as requested by the user. No application packaging or builds.
+
+
+## Camera navigation reuse of far source tiles (unverified)
+
+Pan/recenter reuses a bounded cache of real source-chunk patches keyed by
+chunk X/Z and LOD sampling span. The cache keeps up to 4,096 patches and
+90,000 sampled voxels; old patches are evicted FIFO. New camera requests
+hydrate overlapping terrain immediately and schedule only uncached chunks.
+Any staged edit, undo, redo, BE import, region finalization, or direct save
+invalidates the cached Session snapshot. Cancellation and world switching
+still discard late in-flight responses. Cached LOD samples remain read-only.
+The new code has not been compiled or CI tested. No packing/building.
