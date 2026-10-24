@@ -1192,3 +1192,18 @@ never treated as air. The existing on-disk Region preflight still refuses
 saving external chunks; read support does not imply write support. LZ4 and
 custom compression remain unsupported. No CI, compilation or packaging was
 requested or run for this change.
+
+## Full-resolution interactive 2D source slices
+
+Horizontal X/Z and vertical X/Y or Z/Y native slices now display **all
+64×64 source cells** in an iced Canvas rather than a 16×16 wall of buttons
+or unselectable text. The map fits its viewport, colors known original
+block identities (including stable synthetic modded colors), highlights
+Block Entities, and distinguishes known air, missing chunks and absent
+Sections. Clicks map back to exact signed XYZ in the source world. A click
+on an unknown cell is ignored, and even a known cell must use the normal
+preview/confirm path to edit; the 4096-cell edit cap does not change.
+This preview does not fabricate missing source NBT and does not require
+entity computation. Tests cover signed coordinates, 64×64 hit-testing,
+vertical Y ordering and unknown-source color separation. These new tests
+have not been run; CI/build/packaging remain deferred.

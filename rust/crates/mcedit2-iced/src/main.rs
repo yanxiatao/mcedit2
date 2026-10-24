@@ -1,5 +1,6 @@
 //! Native Rust + iced desktop with legacy MCEdit2 positional world arguments.
 mod isometric;
+mod slice_canvas;
 mod gpu_mesh;
 mod gpu_scene;
 mod palette;
@@ -10,6 +11,7 @@ use iced::widget::{button,canvas,column,container,row,scrollable,text,text_input
 use mcedit2_world::surface::SurfaceView;
 use isometric::{Face,IsometricSurface};
 use gpu_scene::GpuScene;
+use slice_canvas::{Map2D,Plane};
 use iced::{Element,Length,Theme};
 use mcedit2_world::{compatibility_label,inspect_input,launch,WorldSummary};
 use mcedit2_world::block_lookup::{parse_xyz,read_world_block};
@@ -586,11 +588,11 @@ impl App{
                         let explanation=slice.text_map();
                         let h=slice.rows.len();
                         let width=slice.rows.first().map_or(0,Vec::len);
-                        if width<=16&&h<=16 {
-                            self.vertical_grid=Some((key.0,key.1,slice));
-                            format!("Clickable {width}x{h} original vertical plane. Select exact blocks below.\n{explanation}")
+                        self.vertical_grid=Some((key.0,key.1,slice));
+                        if width<=16&&h<=16{
+                            format!("Interactive {width}x{h} original vertical plane.\n{explanation}")
                         }else{
-                            format!("Text-only {width}x{h} original plane; use <=16x16 for clickable cells.\n{explanation}")
+                            format!("Interactive {width}x{h} original vertical plane. Colored map preserves unknown source cells and original BE markers; pick exact blocks below.")
                         }
                     },
                     Err(e)=>format!("Vertical inspection refused: {e}"),
@@ -606,6 +608,11 @@ impl App{
             return;
         }
         let Some((x,y,z))=plane.coordinate(row,col) else{return};
+        if !matches!(plane.rows.get(row).and_then(|line|line.get(col)),
+            Some(SliceCell::Present{..})){
+            self.vertical_report="Cannot pick missing original chunk/Section.".into();
+            return;
+        }
         self.edit_area=format!("{x},{y},{z};{x},{y},{z}");
         self.query_coordinates=format!("{x}, {y}, {z}");
         self.be_prepared=None;
@@ -630,11 +637,11 @@ impl App{
                                 .map_err(|e|e.to_string())) {
                             Ok(slice)=>{
                                 let legend=slice.text_map();
-                                if width<=16 && depth<=16 {
-                                    self.slice_grid=Some((key.0,key.1,slice));
-                                    format!("Interactive 2D grid ({width}x{depth}). Click a cell to inspect/select; @ = original Block Entity, ? = missing Section, · = missing chunk.\n{legend}")
-                                } else {
-                                    format!("Text-only slice ({width}x{depth}); use a 16x16 or smaller window for clickable cells.\n{legend}")
+                                self.slice_grid=Some((key.0,key.1,slice));
+                                if width<=16&&depth<=16{
+                                    format!("Interactive 2D grid ({width}x{depth}).\n{legend}")
+                                }else{
+                                    format!("Interactive 2D grid ({width}x{depth}). Gold square=original BE; amber diagonal=missing Section; dark purple=missing chunk. Air is dark gray. Click a known cell to inspect/select.")
                                 }
                             }
                             Err(e)=>format!("2D slice read refused: {e}"),
@@ -2268,24 +2275,13 @@ fn view(app:&App)->Element<'_,Message>{
         ].spacing(5));
         if let Some((world_index,dimension_index,slice))=app.slice_grid.as_ref() {
             if app.current_key()==Some((*world_index,*dimension_index)) {
-                let mut visual=column![].spacing(1);
-                for (iz,cells) in slice.rows.iter().enumerate() {
-                    let mut row_buttons=row![].spacing(1);
-                    for (ix,cell) in cells.iter().enumerate() {
-                        let x=slice.bounds.minimum[0]+ix as i32;
-                        let y=slice.bounds.minimum[1];
-                        let z=slice.bounds.minimum[2]+iz as i32;
-                        row_buttons=row_buttons.push(
-                            button(text(slice_cell_label(cell)).size(12))
-                                .width(Length::Fixed(28.0))
-                                .height(Length::Fixed(24.0))
-                                .on_press(Message::PickSlice(x,y,z))
-                        );
-                    }
-                    visual=visual.push(row_buttons);
-                }
-                body=body.push(text("Interactive 2D blocks (click to inspect and select a 1x1 edit area)"));
-                body=body.push(scrollable(visual).height(Length::Fixed(420.0)));
+                body=body.push(text(
+                    "Original-state horizontal map: click colored source blocks to inspect; gray=air, purple=missing chunk, amber diagonal=missing Section, gold=BE."
+                ));
+                body=body.push(canvas(Map2D{
+                    plane:Plane::Horizontal(slice),
+                    selected:parse_xyz(&app.query_coordinates).ok()
+                }).width(Length::Fill).height(Length::Fixed(420.0)));
             }
         }
         if !app.slice_result.is_empty(){
@@ -2299,21 +2295,13 @@ fn view(app:&App)->Element<'_,Message>{
         ].spacing(8));
         if let Some((wi,di,plane))=app.vertical_grid.as_ref(){
             if app.current_key()==Some((*wi,*di)){
-                let mut rows=column![].spacing(1);
-                for (y_index,line) in plane.rows.iter().enumerate(){
-                    let mut cells=row![].spacing(1);
-                    for (x_index,cell) in line.iter().enumerate(){
-                        cells=cells.push(
-                            button(text(slice_cell_label(cell)).size(12))
-                                .width(Length::Fixed(28.0))
-                                .height(Length::Fixed(24.0))
-                                .on_press(Message::PickVertical(y_index,x_index))
-                        );
-                    }
-                    rows=rows.push(cells);
-                }
-                body=body.push(text("Vertical slice: top row is highest Y, @ indicates original BE."));
-                body=body.push(scrollable(rows).height(Length::Fixed(420.0)));
+                body=body.push(text(
+                    "Original vertical plane (highest Y at top): click source blocks; gold=BE, amber=missing Section, purple=missing chunk."
+                ));
+                body=body.push(canvas(Map2D{
+                    plane:Plane::Vertical(plane),
+                    selected:parse_xyz(&app.query_coordinates).ok()
+                }).width(Length::Fill).height(Length::Fixed(420.0)));
             }
         }
         if !app.vertical_report.is_empty(){
