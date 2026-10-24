@@ -1313,3 +1313,15 @@ world. Startup worlds passed as command-line arguments retain the
 existing synchronous initialization behavior and remain a future
 migration target. No world files are altered. The new desktop tasks
 have not yet been compiled or test-run; CI is still explicitly deferred.
+
+## Reused-source overhead 2D map for near and distant terrain
+
+Toggle **Top-down 2D** in the native source viewport to render the exact
+same original SurfaceView and progressive far-terrain samples without
+re-reading chunks. Near scenes show the highest actual source voxel per
+X/Z cell and support exact signed XYZ selection. Large panoramas coalesce
+sampled source columns into bounded 2px screen bins; unknown/unloaded
+areas are not filled in and approximate LOD terrain cannot be picked or
+edited. Pan/zoom buttons and wheel retain existing read-only navigation.
+Regression tests cover source world-border coordinates and far LOD
+selection refusal. CI, compiler checks and packaging were not run.

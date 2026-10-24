@@ -1,6 +1,7 @@
 //! Native Rust + iced desktop with legacy MCEdit2 positional world arguments.
 mod isometric;
 mod slice_canvas;
+mod top_down;
 mod gpu_mesh;
 mod gpu_scene;
 mod palette;
@@ -12,6 +13,7 @@ use mcedit2_world::surface::SurfaceView;
 use isometric::{Face,IsometricSurface};
 use gpu_scene::GpuScene;
 use slice_canvas::{Map2D,Plane};
+use top_down::TopDown;
 use iced::{Element,Length,Theme};
 use mcedit2_world::{compatibility_label,inspect_input,launch,WorldSummary};
 use mcedit2_world::block_lookup::{parse_xyz,read_world_block};
@@ -216,6 +218,7 @@ struct App{
     surface_section_guides:bool,
     show_textures:bool,
     use_gpu:bool,
+    show_top_down:bool,
     gpu_quality:gpu_mesh::Quality,
     texture_bank:Option<std::sync::Arc<textures::TextureBank>>,
     texture_animation_tick:u64,
@@ -296,7 +299,7 @@ struct App{
 enum Message{
     Path(String),Open,OpenFinished(u64,Result<WorldSummary,String>),
     Select(usize),Coordinates(String),Dimension(usize),
-    TexturePath(String),LoadTextures,UnloadTextures,ToggleTextures,ToggleGpu,CycleGpuQuality,
+    TexturePath(String),LoadTextures,UnloadTextures,ToggleTextures,ToggleGpu,CycleGpuQuality,ToggleTopDown,
     TextureTick,
     SurfaceArea(String),InspectSurface,InspectVolume,PickSurface(i32,i32,i32),RotateSurface,
     PickSurfaceFace(i32,i32,i32,Face),
@@ -1293,6 +1296,7 @@ fn update_impl(app:&mut App,message:Message)->iced::Task<Message>{
         },
         Message::ToggleTextures=>app.show_textures=!app.show_textures,
         Message::ToggleGpu=>app.use_gpu=!app.use_gpu,
+        Message::ToggleTopDown=>app.show_top_down=!app.show_top_down,
         Message::CycleGpuQuality=>app.gpu_quality=app.gpu_quality.next(),
         Message::UnloadTextures=>{
             app.texture_bank=None;
@@ -2233,6 +2237,8 @@ fn view(app:&App)->Element<'_,Message>{
                 body=body.push(row![
                     button(text(format!("Rotate 90° ({})",app.surface_camera)))
                         .on_press(Message::RotateSurface),
+                    button(if app.show_top_down{"Switch to 3D"}else{"Top-down 2D"})
+                        .on_press(Message::ToggleTopDown),
                     button("Zoom +").on_press(Message::ZoomSurface(1)),
                     button("Zoom -").on_press(Message::ZoomSurface(-1)),
                     button("Pan ←").on_press(Message::PanSurface(-40,0)),
@@ -2340,7 +2346,13 @@ fn view(app:&App)->Element<'_,Message>{
                     frame_cache:std::sync::Arc::clone(&app.render_face_cache),
                     gpu_frame_cache:std::sync::Arc::clone(&app.render_gpu_cache),
                 };
-                let stage:Element<'_,Message>=if app.use_gpu{
+                let stage:Element<'_,Message>=if app.show_top_down{
+                    canvas(TopDown{
+                        source:std::sync::Arc::clone(view),
+                        zoom:app.surface_zoom,pan_x:app.surface_pan_x,
+                        pan_y:app.surface_pan_y,selected:app.selected_surface,
+                    }).width(Length::Fill).height(Length::Fixed(440.0)).into()
+                }else if app.use_gpu{
                     iced::widget::stack![
                         iced::widget::shader(GpuScene(surface_canvas.clone()))
                             .width(Length::Fill).height(Length::Fixed(440.0)),
