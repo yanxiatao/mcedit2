@@ -1056,3 +1056,24 @@ Canvas fallback and alpha-tested original-block picking.
 
 This is a read-only rendering change. Do not execute CI, compile or
 package until the entire 3D display feature is complete.
+
+
+## Extreme read-only terrain view distance (no CI)
+
+The distant-terrain planner offers progressive 16 / 32 / 64 / 128 /
+256 / 512 / 1024 chunk radius presets. The largest radius is 16,384
+world blocks from the center to each horizon edge, excluding unseen or
+unavailable source chunks. To keep memory finite, the center samples
+single source block columns and successive chunk rings use 4/8/16-block
+LOD footprints; beyond 256/512 chunks the planner also skips more of
+the farthest chunks. The largest view plans at most 36,000 source chunk
+requests, processed in existing bounded asynchronous batches, never all
+decoded and retained at once. It does not inspect or render entities.
+Far LOD tiles are never authenticated editable block picks. This is
+**sparse distant terrain** rather than pixel-perfect all-block terrain:
+unloaded or unplanned areas are not fabricated. The GPU projection uses
+camera-relative coordinates and a near-zero minimum scene scale so far
+terrain can fit the view. 1024-chunk inspections may take considerable
+time on very large saves due to disk access and will progress tile by tile.
+CI and executable build are still deferred until the entire 3D display
+migration has been completed, as explicitly requested.

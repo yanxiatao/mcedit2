@@ -1902,6 +1902,8 @@ fn view(app:&App)->Element<'_,Message>{
             button("64 chunks").on_press(Message::StartFarView(64)),
             button("128 chunks").on_press(Message::StartFarView(128)),
             button("256 chunks").on_press(Message::StartFarView(256)),
+            button("512 chunks").on_press(Message::StartFarView(512)),
+            button("1024 chunks").on_press(Message::StartFarView(1024)),
         ].spacing(6));
         if let Some(far)=app.far.as_ref(){
             if app.current_key()==Some(far.key){

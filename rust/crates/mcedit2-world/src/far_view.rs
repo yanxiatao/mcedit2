@@ -9,9 +9,9 @@ use crate::surface::{
 };
 use crate::{WorldError};
 
-pub const MAX_DISTANCE_CHUNKS:u16=256;
+pub const MAX_DISTANCE_CHUNKS:u16=1024;
 pub const FAR_BATCH_CHUNKS:usize=12;
-pub const MAX_PLANNED_CHUNKS:usize=20_000;
+pub const MAX_PLANNED_CHUNKS:usize=36_000;
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub struct FarChunkRequest{
     pub cx:i32,pub cz:i32,
@@ -35,7 +35,7 @@ fn validate_height(y_min:i32,y_max:i32)->Result<(),WorldError>{
 }
 fn extrema(center_x:i32,center_z:i32,radius:u16)->Result<(i32,i32,u16),WorldError>{
     if radius==0||radius>MAX_DISTANCE_CHUNKS{
-        return Err(reject("Far preview radius must be 1..256 source chunks"));
+        return Err(reject("Far preview radius must be 1..1024 source chunks"));
     }
     let span=((radius as i64*2)+1)*16;
     let xmin=(center_x.div_euclid(16) as i64-radius as i64)*16;
@@ -60,7 +60,8 @@ pub fn plan_far_chunks(center_x:i32,center_z:i32,radius:u16)
     let mut out=Vec::new();
     for ring in 0..=radius as i32{
         let step=if ring<=8{1}else if ring<=16{2}
-            else if ring<=48{4}else if ring<=128{8}else{32};
+            else if ring<=48{4}else if ring<=128{8}
+            else if ring<=256{32}else if ring<=512{128}else{512};
         let mut along=Vec::new();
         let mut n=-ring;
         while n<=ring{
@@ -206,10 +207,13 @@ mod tests{
         assert!(view.voxels.is_empty());
         assert!(empty_far_view(0,0,-64,447,128).is_ok());
         assert!(empty_far_view(0,0,-64,448,128).is_err());
-        let extreme=plan_far_chunks(0,0,256).unwrap();
-        assert!(extreme.iter().any(|r|r.cx.abs()==256||r.cz.abs()==256));
+        let extreme=plan_far_chunks(0,0,1024).unwrap();
+        assert!(extreme.iter().any(|r|r.cx.abs()==1024||r.cz.abs()==1024));
         assert!(extreme.len()<=MAX_PLANNED_CHUNKS);
-        assert!(plan_far_chunks(0,0,257).is_err());
+        let view=empty_far_view(0,0,-64,255,1024).unwrap();
+        assert_eq!(view.width,32784);
+        assert_eq!(view.depth,32784);
+        assert!(plan_far_chunks(0,0,1025).is_err());
     }
     #[test]
     fn far_view_negative_coordinates_use_floor_chunk_grid(){
