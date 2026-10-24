@@ -1207,3 +1207,15 @@ This preview does not fabricate missing source NBT and does not require
 entity computation. Tests cover signed coordinates, 64×64 hit-testing,
 vertical Y ordering and unknown-source color separation. These new tests
 have not been run; CI/build/packaging remain deferred.
+
+## Region index integrity before rendering (read-only)
+
+Every Java .mca/.mcr header now verifies its 1024 sector extents for
+cross-chunk overlaps before source blocks are trusted. Corrupt duplicated
+or partially overlapping slot claims refuse the entire index instead of
+showing potentially unrelated data in the 2D/3D view. Adjacent valid
+allocations remain supported. Validation sorts at most 1024 fixed-size
+ranges, so a sparse/malicious gigantic file cannot cause a sector-sized
+memory allocation. The writer's stricter independent preflight and original
+NBT/Block Entity protections are unchanged. CI, tests and packaging have
+not been run for this migration batch.

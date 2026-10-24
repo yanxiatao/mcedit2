@@ -88,6 +88,11 @@ impl RegionIndex {
         let mut header = [0u8; HEADER_BYTES];
         file.read_exact(&mut header)?;
         let mut slots = [None; 1024];
+        // A corrupt Region can point multiple chunk slots at overlapping
+        // source sectors. Never trust those ambiguous headers even for
+        // read-only 2D/3D rendering. 1024 small spans are enough; avoid
+        // allocating a bitmap proportional to an attacker-controlled file.
+        let mut occupied:Vec<(u64,u64,usize)>=Vec::new();
         for (index, slot) in slots.iter_mut().enumerate() {
             let start = index * 4;
             let word = u32::from_be_bytes(header[start..start + 4].try_into().unwrap());
@@ -108,7 +113,17 @@ impl RegionIndex {
                     path.display()
                 )));
             }
+            occupied.push((first as u64,first as u64+count as u64,index));
             *slot = Some(ChunkSlot { start_sector: first, sector_count: count });
+        }
+        occupied.sort_unstable_by_key(|span|span.0);
+        for pair in occupied.windows(2){
+            if pair[0].1>pair[1].0{
+                return Err(invalid(format!(
+                    "Original Region source has overlapping chunk allocations: slots {} and {} in {}",
+                    pair[0].2,pair[1].2,path.display()
+                )));
+            }
         }
         Ok(Self { path, slots })
     }
@@ -637,6 +652,33 @@ mod tests {
         raw[0..4].copy_from_slice(&((250u32 << 8) | 2).to_be_bytes());
         fs::write(&path, raw).unwrap();
         assert!(RegionIndex::open(path).is_err());
+    }
+    #[test]
+    fn overlapping_original_region_slots_are_rejected_before_rendering(){
+        let temp=Fixture::new();
+        write_fixture_world(&temp);
+        let path=temp.0.join("region/r.0.0.mca");
+        let original=fs::read(&path).unwrap();
+        // Both slots claim the same original physical sector.
+        let mut duplicate=original.clone();
+        duplicate[4..8].copy_from_slice(&((2u32<<8)|1).to_be_bytes());
+        fs::write(&path,&duplicate).unwrap();
+        assert!(RegionIndex::open(&path).unwrap_err().to_string()
+            .contains("overlapping chunk allocations"));
+        // Partial overlap also fails, even when both pointers fit the file.
+        let mut partial=vec![0u8;4*SECTOR as usize];
+        partial[..original.len()].copy_from_slice(&original);
+        partial[0..4].copy_from_slice(&((2u32<<8)|2).to_be_bytes());
+        partial[4..8].copy_from_slice(&((3u32<<8)|1).to_be_bytes());
+        fs::write(&path,&partial).unwrap();
+        assert!(RegionIndex::open(&path).is_err());
+        // Adjacent non-overlapping allocations are valid header structure.
+        partial[0..4].copy_from_slice(&((2u32<<8)|1).to_be_bytes());
+        fs::write(&path,&partial).unwrap();
+        let safe=RegionIndex::open(&path).unwrap();
+        assert_eq!(safe.chunk_count(),2);
+        assert_eq!(safe.slot(1,0).unwrap().start_sector,3);
+        assert_eq!(fs::read(&path).unwrap(),partial);
     }
     #[test]
     fn java_external_mcc_is_read_only_and_rejects_bad_marker(){
