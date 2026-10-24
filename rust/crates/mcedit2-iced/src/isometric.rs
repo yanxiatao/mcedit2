@@ -230,6 +230,47 @@ fn grid_boundaries(first:i32,last:i32)->Vec<i32>{
     if first>=last{return Vec::new();}
     ((first+1)..=last).filter(|v|v.rem_euclid(16)==0).collect()
 }
+/// 3D distant panoramas can cover 4095 source chunks across each axis.
+/// Keep useful negative-coordinate-aligned region/grid guides without
+/// painting thousands of subpixel lines every interactive Canvas frame.
+/// Near worlds retain every source chunk boundary exactly.
+fn adaptive_chunk_grid(first:i32,last:i32)->Vec<i32>{
+    if first>=last{return Vec::new();}
+    const MAX_GUIDES:i64=128;
+    let length=last as i64-first as i64;
+    let chunks=(length+15)/16;
+    let stride_chunks=((chunks+MAX_GUIDES-1)/MAX_GUIDES)
+        .max(1).next_power_of_two();
+    let step=stride_chunks*16;
+    let mut next=(first as i64).div_euclid(step)*step+step;
+    let mut lines=Vec::new();
+    while next<=last as i64{
+        if next>first as i64{
+            lines.push(next as i32);
+        }
+        next+=step;
+    }
+    lines
+}
+/// Prefer the near source tiles but reserve markers across the entire
+/// progressive panorama. Taking the first N hides distant missing-chunk
+/// status forever when the plan is ordered nearest-first.
+fn sampled_source_tile_indices(total:usize,limit:usize)->Vec<usize>{
+    if total==0||limit==0{return Vec::new();}
+    if total<=limit{return (0..total).collect();}
+    if limit==1{return vec![total-1];}
+    let near=(limit/4).min(total);
+    let remaining=limit-near;
+    let span=total-near-1;
+    let mut result:(Vec<usize>)=(0..near).collect();
+    if remaining==1{result.push(total-1);}
+    else{
+        for index in 0..remaining{
+            result.push(near+index*span/(remaining-1));
+        }
+    }
+    result
+}
 fn point_in_face(p:Point,face:&[Point;4])->bool{
     let mut hits=0u8;
     for n in 0..4{
@@ -429,11 +470,11 @@ impl IsometricSurface{
         };
         if self.show_chunk_grid{
             let color=Color::from_rgba(0.92,0.64,0.18,0.85);
-            for x in grid_boundaries(x0,x1){
+            for x in adaptive_chunk_grid(x0,x1){
                 let x=x as f64-0.5;
                 stroke_line([x,floor_y,min_z],[x,floor_y,max_z],color,1.9,frame);
             }
-            for z in grid_boundaries(z0,z1){
+            for z in adaptive_chunk_grid(z0,z1){
                 let z=z as f64-0.5;
                 stroke_line([min_x,floor_y,z],[max_x,floor_y,z],color,1.9,frame);
             }
@@ -441,8 +482,10 @@ impl IsometricSurface{
         // Distinguish exact missing chunk tiles from merely empty or
         // unknown-section tiles without inventing rendered blocks.
         if self.show_chunk_grid{
-            for tile in self.surface.source_tiles.iter().take(
-                if self.surface.width>64{256}else{usize::MAX}){
+            let tiles=&self.surface.source_tiles;
+            let guide_limit=if self.surface.width>64{256}else{tiles.len()};
+            for index in sampled_source_tile_indices(tiles.len(),guide_limit){
+                let tile=&tiles[index];
                 let tile_min_x=tile.chunk_x*16;
                 let tile_min_z=tile.chunk_z*16;
                 let x0=tile_min_x.max(x0) as f64-0.5;
@@ -1206,6 +1249,29 @@ mod tests{
         assert_eq!(texture_steps(100),8);
         assert_eq!(texture_steps(1500),4);
         assert_eq!(texture_steps(15000),1);
+    }
+    #[test]
+    fn extreme_panorama_chunk_grid_is_bounded_and_floor_aligned(){
+        assert_eq!(adaptive_chunk_grid(-33,-1),vec![-32,-16]);
+        assert_eq!(adaptive_chunk_grid(15,16),vec![16]);
+        let far=adaptive_chunk_grid(-32760,32759);
+        assert!(far.len()<=128);
+        assert!(!far.is_empty());
+        assert!(far.iter().all(|x|x.rem_euclid(16)==0));
+        assert!(far.windows(2).all(|p|p[0]<p[1]));
+        assert!(adaptive_chunk_grid(0,15).is_empty());
+    }
+    #[test]
+    fn panorama_chunk_markers_reach_far_horizon_not_just_first_256(){
+        let chosen=sampled_source_tile_indices(32_017,256);
+        assert_eq!(chosen.len(),256);
+        assert_eq!(chosen[0],0);
+        assert_eq!(chosen[255],32_016);
+        assert!(chosen.iter().any(|&i|i>24_000));
+        assert!(chosen.windows(2).all(|p|p[0]<p[1]));
+        assert_eq!(sampled_source_tile_indices(3,256),vec![0,1,2]);
+        assert_eq!(sampled_source_tile_indices(9,1),vec![8]);
+        assert!(sampled_source_tile_indices(10,0).is_empty());
     }
     #[test]
     fn chunk_and_section_boundaries_use_negative_coordinate_floor_grid(){

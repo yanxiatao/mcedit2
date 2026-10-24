@@ -1219,3 +1219,17 @@ ranges, so a sparse/malicious gigantic file cannot cause a sector-sized
 memory allocation. The writer's stricter independent preflight and original
 NBT/Block Entity protections are unchanged. CI, tests and packaging have
 not been run for this migration batch.
+
+## Adaptive 3D far-horizon source guides
+
+Large 1024–2047 chunk panoramas previously drew thousands of 16-block
+chunk-reference lines on every mouse interaction, while showing only the
+first 256 source-chunk status borders. The Canvas now coarsens X/Z guides
+to at most 128 lines per axis, with power-of-two Minecraft-aligned
+spacing and negative-coordinate correctness. It preserves full 16-block
+guides in near scenes. Source tile status markers retain near detail
+and sample across the entire streamed panorama, including the last
+outer-horizon tile; missing original chunks and Sections remain visibly
+distinct. No extra chunk reads, entity computation, model rebuilds or
+NBT changes are introduced. The draw/selection source remains the same.
+This change has not been compiled or CI-tested.
