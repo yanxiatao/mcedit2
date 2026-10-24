@@ -73,6 +73,18 @@ fn dispatch_near(job:NearJob)->iced::Task<Message>{
     },|(nonce,key,result)|Message::NearLoaded(nonce,key,result))
 }
 
+/// World directory/level.dat indexing also belongs off the iced UI loop.
+fn dispatch_open(nonce:u64,path:PathBuf)->iced::Task<Message>{
+    iced::Task::perform(async move {
+        let (sender,receiver)=iced::futures::channel::oneshot::channel();
+        std::thread::spawn(move ||{
+            let result=inspect_input(&path).map_err(|e|e.to_string());
+            let _=sender.send(result);
+        });
+        (nonce,receiver.await.unwrap_or_else(|_|
+            Err("Original world indexing worker stopped".into())))
+    },|(nonce,result)|Message::OpenFinished(nonce,result))
+}
 struct SaveIntent {
     key:(usize,usize),
     timestamp:u32,
@@ -235,6 +247,9 @@ struct App{
     near_nonce:u64,
     near_job:Option<NearJob>,
     near_busy:bool,
+    open_nonce:u64,
+    open_busy:bool,
+    open_pending:Option<(u64,PathBuf)>,
     surface_report:String,
     slice_grid:Option<(usize,usize,Slice)>,
     vertical_grid:Option<(usize,usize,VerticalSlice)>,
@@ -279,7 +294,8 @@ struct App{
 }
 #[derive(Debug,Clone)]
 enum Message{
-    Path(String),Open,Select(usize),Coordinates(String),Dimension(usize),
+    Path(String),Open,OpenFinished(u64,Result<WorldSummary,String>),
+    Select(usize),Coordinates(String),Dimension(usize),
     TexturePath(String),LoadTextures,UnloadTextures,ToggleTextures,ToggleGpu,CycleGpuQuality,
     TextureTick,
     SurfaceArea(String),InspectSurface,InspectVolume,PickSurface(i32,i32,i32),RotateSurface,
@@ -1234,13 +1250,20 @@ fn update(app:&mut App,message:Message)->iced::Task<Message>{
             .unwrap_or_else(|poison|poison.into_inner());
         *gpu=None;
     }
+    let mut tasks=vec![task];
     if !app.near_busy{
         if let Some(job)=app.near_job.take(){
             app.near_busy=true;
-            return iced::Task::batch([task,dispatch_near(job)]);
+            tasks.push(dispatch_near(job));
         }
     }
-    task
+    if !app.open_busy{
+        if let Some((nonce,path))=app.open_pending.take(){
+            app.open_busy=true;
+            tasks.push(dispatch_open(nonce,path));
+        }
+    }
+    iced::Task::batch(tasks)
 }
 fn update_impl(app:&mut App,message:Message)->iced::Task<Message>{
     // A cached far-height patch reflects one original+overlay snapshot.
@@ -1536,25 +1559,41 @@ fn update_impl(app:&mut App,message:Message)->iced::Task<Message>{
             app.be_prepared=None;
             app.surface=None;
             app.save_preview=None;
-            app.slice_grid=None;
-            app.vertical_grid=None;
+            app.slice_grid=None;app.vertical_grid=None;
+            app.open_nonce=app.open_nonce.wrapping_add(1);
+            app.open_pending=None;
             if app.path.trim().is_empty(){
                 app.messages.push("Enter a Java world folder or level.dat path".into());
-            } else {
-                match inspect_input(app.path.trim()){
+            }else{
+                let path=PathBuf::from(app.path.trim());
+                app.open_pending=Some((app.open_nonce,path));
+                app.messages.push("Indexing original Java world in a read-only worker.".into());
+            }
+        }
+        Message::OpenFinished(nonce,result)=>{
+            // Release the single indexer slot EVEN if another world selection
+            // superseded this read. A queued latest open can then start.
+            app.open_busy=false;
+            if nonce==app.open_nonce{
+                match result{
                     Ok(world)=>{
                         app.current=Some(app.worlds.len());
                         app.dimension_index=0;
                         app.block_result.clear();app.slice_result.clear();
-                        app.prepared=None;
-                        app.edit_report.clear();
+                        app.prepared=None;app.edit_report.clear();
+                        app.messages.push(format!(
+                            "Indexed {} original Region files and {} chunks.",
+                            world.total_regions(),world.total_chunks()
+                        ));
                         app.worlds.push(world);
                     }
-                    Err(e)=>app.messages.push(format!("Cannot inspect world: {e}"))
+                    Err(e)=>app.messages.push(format!("Cannot inspect world: {e}")),
                 }
             }
         }
         Message::Select(index)=>{
+            app.open_nonce=app.open_nonce.wrapping_add(1);
+            app.open_pending=None;
             app.be_prepared=None;
             app.surface=None;
             app.save_preview=None;
@@ -1570,6 +1609,8 @@ fn update_impl(app:&mut App,message:Message)->iced::Task<Message>{
         }
         Message::Coordinates(value)=>{app.query_coordinates=value;app.be_prepared=None;},
         Message::Dimension(index)=>{
+            app.open_nonce=app.open_nonce.wrapping_add(1);
+            app.open_pending=None;
             app.be_prepared=None;
             app.surface=None;
             app.save_preview=None;
@@ -2048,6 +2089,8 @@ fn update_impl(app:&mut App,message:Message)->iced::Task<Message>{
             app.edit_report="Discarded all staged edits for this world/dimension; original disk untouched.".into();
         }
         Message::Clear=>{
+            app.open_nonce=app.open_nonce.wrapping_add(1);
+            app.open_pending=None;
             app.be_save_phrase.clear();
             app.be_prepared=None;
             app.surface=None;app.far=None;
@@ -2070,7 +2113,8 @@ fn view(app:&App)->Element<'_,Message>{
         text_input("Java world folder, level.dat, or level.dat_old",&app.path)
             .on_input(Message::Path).on_submit(Message::Open)
             .width(Length::Fill),
-        button("Inspect world").on_press(Message::Open),
+        button(if app.open_busy{"Indexing world…"}else{"Inspect world"})
+            .on_press(Message::Open),
         button("Close all (discard staged)").on_press(Message::Clear)
     ].spacing(10);
     let mut body=column![
@@ -2597,6 +2641,37 @@ mod tests{
         parse_scene_window,shifted_scene};
     use mcedit2_world::editing::{Bounds,SliceCell};
     use mcedit2_world::sections::State;
+    #[test]
+    fn superseded_indexer_and_near_read_cannot_publish_stale_results(){
+        let mut app=super::App::default();
+        app.open_nonce=8;
+        app.open_busy=true;
+        let before=app.messages.len();
+        let _=super::update_impl(&mut app,super::Message::OpenFinished(
+            7,Err("a stale bad world".into())));
+        assert!(!app.open_busy);
+        assert_eq!(app.messages.len(),before);
+        app.near_nonce=12;
+        app.near_busy=true;
+        app.near_loaded(11,(0,0),super::NearResult::WorkerStopped);
+        assert!(!app.near_busy);
+        assert!(app.surface_report.is_empty());
+        assert!(app.slice_grid.is_none());
+    }
+    #[test]
+    fn rapid_open_requests_keep_only_latest_source_path(){
+        let mut app=super::App::default();
+        app.path="original-A".into();
+        let _=super::update_impl(&mut app,super::Message::Open);
+        let old=app.open_nonce;
+        app.path="original-B".into();
+        let _=super::update_impl(&mut app,super::Message::Open);
+        assert_eq!(app.open_pending.as_ref().unwrap().1,
+            std::path::PathBuf::from("original-B"));
+        assert_ne!(app.open_nonce,old);
+        let _=super::update_impl(&mut app,super::Message::Clear);
+        assert!(app.open_pending.is_none());
+    }
     #[test]
     fn far_tile_cache_is_bounded_and_lod_sensitive(){
         use super::{FarProgress,far_cache_key,FAR_CACHE_PATCHES,FAR_CACHE_VOXELS};

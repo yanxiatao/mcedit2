@@ -1299,3 +1299,17 @@ only for genuine view boundaries, lower verified source surfaces, or
 verified air/partial neighbors. Unknown neighbors do not imply source
 air. Exact blockstate and BE provenance remain unchanged; no writes or
 entity rendering. New tests have been added but not executed.
+
+## Nonblocking Java world discovery and Region indexing
+
+The desktop **Inspect world** action now moves Java save discovery,
+level.dat inspection and bounded Region header scanning onto a read-only
+OS indexer rather than blocking iced while a large original world is
+opened. Only one indexer can run at once; rapid repeated opens keep the
+newest pending path, with a generation token that discards completed
+results after switching an existing world, dimension or closing all.
+Indexing errors are displayed without inserting a partially trusted
+world. Startup worlds passed as command-line arguments retain the
+existing synchronous initialization behavior and remain a future
+migration target. No world files are altered. The new desktop tasks
+have not yet been compiled or test-run; CI is still explicitly deferred.
