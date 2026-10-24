@@ -5,7 +5,7 @@ use iced::{Color,Point,Rectangle,Renderer,Size,Theme,mouse};
 use iced::widget::canvas::{self,Frame,Path,Stroke};
 use mcedit2_world::editing::{Slice,SliceCell,VerticalSlice};
 use mcedit2_world::surface::{material,VoxelMaterial};
-use crate::{Message,palette};
+use crate::{Message,palette,isometric::Face,textures::TextureBank};
 
 #[derive(Clone,Copy)]
 pub(crate) enum Plane<'a>{
@@ -15,6 +15,9 @@ pub(crate) enum Plane<'a>{
 pub(crate) struct Map2D<'a>{
     pub plane:Plane<'a>,
     pub selected:Option<(i32,i32,i32)>,
+    /// The same read-only resource atlas used by the 3D source renderer.
+    pub texture_bank:Option<&'a TextureBank>,
+    pub show_textures:bool,
 }
 #[derive(Clone,Copy,Debug)]
 struct GridLayout{
@@ -104,6 +107,43 @@ fn fill_color(cell:&SliceCell)->Color{
         }
     }
 }
+/// UV corners use the same [top-left, top-right, bottom-right, bottom-left]
+/// convention as the existing 3D source face. Do not silently ignore
+/// resource-pack UV rotation/cropping or blockstate model variants.
+fn sample_uv(uv:[[f32;2];4],u:f32,v:f32)->[f32;2]{
+    let a=uv[0];let b=uv[1];let c=uv[2];let d=uv[3];
+    [
+        a[0]*(1.0-u)*(1.0-v)+b[0]*u*(1.0-v)
+            +c[0]*u*v+d[0]*(1.0-u)*v,
+        a[1]*(1.0-u)*(1.0-v)+b[1]*u*(1.0-v)
+            +c[1]*u*v+d[1]*(1.0-u)*v,
+    ]
+}
+/// Bounded 2D texture preview quality. Sparse maps have more pixels per
+/// source block, while 64x64 maps must not rasterize millions of quads.
+fn texture_samples(cell:f32,source_cells:usize)->usize{
+    let budget=if source_cells>1024{2}else if source_cells>256{4}else{6};
+    ((cell/4.0).floor() as usize).clamp(1,budget)
+}
+fn draw_texture(frame:&mut Frame,bank:&TextureBank,
+    state:&mcedit2_world::sections::State,xyz:(i32,i32,i32),
+    at:Point,cell:f32,samples:usize){
+    let Some((uv,_))=bank.atlas_face_style_at(state,Face::Top,0,xyz)else{return;};
+    let step=cell/samples as f32;
+    for iy in 0..samples{
+        for ix in 0..samples{
+            let u=(ix as f32+0.5)/samples as f32;
+            let v=(iy as f32+0.5)/samples as f32;
+            let Some([r,g,b,a])=bank.atlas_pixel(sample_uv(uv,u,v))else{continue;};
+            if a==0{continue;}
+            frame.fill(&Path::rectangle(Point::new(
+                at.x+ix as f32*step,at.y+iy as f32*step
+            ),Size::new(step+0.05,step+0.05)),Color::from_rgba(
+                r as f32/255.0,g as f32/255.0,b as f32/255.0,a as f32/255.0
+            ));
+        }
+    }
+}
 impl canvas::Program<Message> for Map2D<'_>{
     type State=();
     fn draw(&self,_:&(),renderer:&Renderer,_:&Theme,bounds:Rectangle,
@@ -111,12 +151,23 @@ impl canvas::Program<Message> for Map2D<'_>{
         let mut frame=Frame::new(renderer,bounds.size());
         let (rows,cols)=self.dims();
         if let Some(grid)=GridLayout::new(bounds.size(),rows,cols){
+            let samples=texture_samples(grid.cell,rows*cols);
+            let atlas=if self.show_textures{self.texture_bank}else{None};
             for row in 0..rows{
                 for col in 0..cols{
                     let Some((cell,xyz))=self.cell(row,col)else{continue;};
                     let at=grid.at(row,col);
                     let rect=Path::rectangle(at,Size::new(grid.cell,grid.cell));
                     frame.fill(&rect,fill_color(cell));
+                    // Draw a bounded top-face texture preview over the
+                    // original-state color. A textureless/modded block still
+                    // has its stable palette color, never fabricated texture.
+                    if let (Some(bank),SliceCell::Present{state,..})=(atlas,cell){
+                        if !matches!(state.name.as_str(),
+                            "minecraft:air"|"minecraft:cave_air"|"minecraft:void_air"|"numeric:0"){
+                            draw_texture(&mut frame,bank,state,xyz,at,grid.cell,samples);
+                        }
+                    }
                     if grid.cell>=5.0{
                         frame.stroke(&rect,Stroke::default()
                             .with_color(Color::from_rgba(0.06,0.07,0.08,0.45))
@@ -201,7 +252,8 @@ mod tests{
         let slice=Slice{bounds:b,source_chunks:2,present:4,
             missing_chunks:0,missing_sections:0,block_entities:0,
             rows:vec![vec![known(),known()],vec![known(),known()]]};
-        let map=Map2D{plane:Plane::Horizontal(&slice),selected:None};
+        let map=Map2D{plane:Plane::Horizontal(&slice),selected:None,
+            texture_bank:None,show_textures:false};
         assert_eq!(map.cell(1,0).unwrap().1,(-16,-64,-16));
         assert_eq!(map.cell(0,1).unwrap().1,(-15,-64,-17));
         let b=Bounds::new((-16,-64,-17),(-15,-63,-17)).unwrap();
@@ -209,9 +261,20 @@ mod tests{
             source_chunks:1,block_entities:0,missing_chunks:0,
             missing_sections:0,rows:vec![vec![known(),known()],
                 vec![known(),known()]]};
-        let map=Map2D{plane:Plane::Vertical(&vertical),selected:None};
+        let map=Map2D{plane:Plane::Vertical(&vertical),selected:None,
+            texture_bank:None,show_textures:false};
         assert_eq!(map.cell(0,1).unwrap().1,(-15,-63,-17));
         assert_eq!(map.cell(1,0).unwrap().1,(-16,-64,-17));
+    }
+    #[test]fn uv_corners_and_texture_sampling_are_bounded(){
+        let uv=[[0.0,0.0],[1.0,0.0],[1.0,1.0],[0.0,1.0]];
+        assert_eq!(sample_uv(uv,0.0,0.0),[0.0,0.0]);
+        assert_eq!(sample_uv(uv,1.0,1.0),[1.0,1.0]);
+        assert_eq!(sample_uv(uv,0.5,0.5),[0.5,0.5]);
+        assert_eq!(texture_samples(7.0,4096),1);
+        assert_eq!(texture_samples(28.0,4096),2);
+        assert_eq!(texture_samples(28.0,64),6);
+        assert!(texture_samples(28.0,4096).pow(2)*4096<=16384);
     }
     #[test]fn absent_source_is_visually_distinct_from_air(){
         let air=SliceCell::Present{state:State{

@@ -2280,7 +2280,9 @@ fn view(app:&App)->Element<'_,Message>{
                 ));
                 body=body.push(canvas(Map2D{
                     plane:Plane::Horizontal(slice),
-                    selected:parse_xyz(&app.query_coordinates).ok()
+                    selected:parse_xyz(&app.query_coordinates).ok(),
+                    texture_bank:app.texture_bank.as_deref(),
+                    show_textures:app.show_textures
                 }).width(Length::Fill).height(Length::Fixed(420.0)));
             }
         }
@@ -2300,7 +2302,9 @@ fn view(app:&App)->Element<'_,Message>{
                 ));
                 body=body.push(canvas(Map2D{
                     plane:Plane::Vertical(plane),
-                    selected:parse_xyz(&app.query_coordinates).ok()
+                    selected:parse_xyz(&app.query_coordinates).ok(),
+                    texture_bank:app.texture_bank.as_deref(),
+                    show_textures:app.show_textures
                 }).width(Length::Fill).height(Length::Fixed(420.0)));
             }
         }

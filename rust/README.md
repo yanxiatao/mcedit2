@@ -1233,3 +1233,18 @@ outer-horizon tile; missing original chunks and Sections remain visibly
 distinct. No extra chunk reads, entity computation, model rebuilds or
 NBT changes are introduced. The draw/selection source remains the same.
 This change has not been compiled or CI-tested.
+
+## Resource-pack sampling in 2D slice maps
+
+When original-state resource textures are enabled, both horizontal and
+vertical native 2D maps now sample the already-loaded Java resource-pack
+atlas using the resolved **top-face texture** of each original blockstate.
+The same original XYZ selects deterministic weighted/multipart model
+variants, and the same UV-corner ordering honors texture crop/rotation.
+The preview is a 2D **top-face color/texture guide**, not an exact vertical
+cross-section or a replacement for arbitrary 3D model geometry. Missing,
+transparent, air or unsupported texture cells retain their verified source
+palette appearance. A fixed per-cell sampling cap ensures a 64x64 map draws
+at most 16,384 additional texture squares, without filesystem access,
+entity processing or writes to the world. Tests cover atlas-UV interpolation
+and bounded rasterization; CI/compilation remain unrun.
