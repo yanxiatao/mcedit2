@@ -1,8 +1,3 @@
-2026-10-24 FULL 3D DISPLAY MIGRATION ONE-BATCH VALIDATION
-Rust iced/wgpu depth-tested render path, 1024-chunk progressive LOD,
-original-world visual picking and BE preservation, weighted Java JSON models,
-UV lock, cullface, crossed plants, animated .png.mcmeta atlas,
-cross-camera chunk reuse and persistent projected GPU/Canvas caches.
-Explicit user-requested one concentrated CI after implementation:
-Linux world+CLI and full workspace cargo check/test; Windows MSVC workspace
-cargo check/test. NO cargo build, packaging, binary artifacts or releases.
+2026-10-24 consolidated post-3D migration validation retry after fixing initial iced/wgpu check/test errors.
+Only Linux/Windows cargo check and cargo test; no executable build, package, artifact or release.
+Target source commit 162617d4698a7b9bededdc0b1e69e4f258aef858.
