@@ -7,7 +7,7 @@ license.workspace = true
 description = "Native Rust iced Minecraft world inspector and future editor"
 
 [dependencies]
-iced = { version = "0.14", features = ["canvas", "wgpu"] }
+iced = { version = "0.14", features = ["canvas", "wgpu", "tokio"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 zip = { version = "2.4", default-features = false, features = ["deflate"] }
 serde_json = "1"

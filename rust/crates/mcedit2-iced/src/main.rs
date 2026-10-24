@@ -149,6 +149,7 @@ struct App{
     use_gpu:bool,
     gpu_quality:gpu_mesh::Quality,
     texture_bank:Option<std::sync::Arc<textures::TextureBank>>,
+    texture_animation_tick:u64,
     texture_path:String,
     texture_report:String,
     surface_camera:u8,
@@ -210,6 +211,7 @@ struct App{
 enum Message{
     Path(String),Open,Select(usize),Coordinates(String),Dimension(usize),
     TexturePath(String),LoadTextures,UnloadTextures,ToggleTextures,ToggleGpu,CycleGpuQuality,
+    TextureTick,
     SurfaceArea(String),InspectSurface,InspectVolume,PickSurface(i32,i32,i32),RotateSurface,
     PickSurfaceFace(i32,i32,i32,Face),
     Shift3D(i32,i32,i32),Center3DOnPicked,ScenePreset(u8),
@@ -1101,6 +1103,14 @@ fn update(app:&mut App,message:Message)->iced::Task<Message>{
     match message{
         Message::Path(x)=>app.path=x,
         Message::TexturePath(x)=>app.texture_path=x,
+        Message::TextureTick=>{
+            app.texture_animation_tick=app.texture_animation_tick.wrapping_add(1);
+            if let Some(bank)=app.texture_bank.as_ref(){
+                if let Some(frame)=bank.advance_animation(app.texture_animation_tick){
+                    app.texture_bank=Some(std::sync::Arc::new(frame));
+                }
+            }
+        },
         Message::ToggleTextures=>app.show_textures=!app.show_textures,
         Message::ToggleGpu=>app.use_gpu=!app.use_gpu,
         Message::CycleGpuQuality=>app.gpu_quality=app.gpu_quality.next(),
@@ -1112,9 +1122,10 @@ fn update(app:&mut App,message:Message)->iced::Task<Message>{
             match textures::TextureBank::open(std::path::Path::new(app.texture_path.trim())){
                 Ok(bank)=>{
                     app.texture_report=format!(
-                        "Resource textures loaded read-only: {} PNGs, {} model/blockstate JSONs, {} warnings. {}",
-                        bank.count(),bank.model_count(),bank.warnings.len(),
+                        "Resource textures loaded read-only: {} PNGs, {} animated sprites, {} model/blockstate JSONs, {} warnings. {}",
+                        bank.count(),bank.animation_count(),bank.model_count(),bank.warnings.len(),
                         bank.warnings.first().map(String::as_str).unwrap_or(""));
+                    app.texture_animation_tick=0;
                     app.texture_bank=Some(std::sync::Arc::new(bank));
                     app.show_textures=true;
                 },
@@ -2075,8 +2086,8 @@ fn view(app:&App)->Element<'_,Message>{
                     let atlas=bank.atlas_size().map_or_else(||"none".to_string(),
                         |(w,h)|format!("{w}x{h} RGBA"));
                     body=body.push(text(format!(
-                        "Texture atlas: {} | {} namespaced PNG tiles | {} model/blockstate JSONs | {} warnings; CPU input, GPU fragment sampling.",
-                        atlas,bank.count(),bank.model_count(),bank.warnings.len())));
+                        "Texture atlas: {} | {} namespaced PNG tiles | {} animated sprites | {} model/blockstate JSONs | {} warnings; CPU/GPU in sync.",
+                        atlas,bank.count(),bank.animation_count(),bank.model_count(),bank.warnings.len())));
                     if let Some((x,y,z))=app.selected_surface{
                         if let Some(v)=view.voxels.iter().find(|v|(v.x,v.y,v.z)==(x,y,z)){
                             body=body.push(text(format!(
@@ -2401,6 +2412,15 @@ fn view(app:&App)->Element<'_,Message>{
     container(scrollable(body).height(Length::Fill))
         .width(Length::Fill).height(Length::Fill).padding(20).into()
 }
+fn subscription(app:&App)->iced::Subscription<Message>{
+    if app.show_textures && app.surface.is_some()
+        &&app.texture_bank.as_ref().is_some_and(|bank|bank.has_animation()){
+        iced::time::every(iced::time::Duration::from_millis(50))
+            .map(|_|Message::TextureTick)
+    }else{
+        iced::Subscription::none()
+    }
+}
 fn main()->iced::Result{
     let args=match launch::parse_process(){
         Ok(options)=>options,
@@ -2417,6 +2437,7 @@ fn main()->iced::Result{
         }
     }
     iced::application(move||App::boot(args.clone()),update,view)
+        .subscription(subscription)
         .title("MCEdit2 — Rust + iced").theme(Theme::Dark).run()
 }
 

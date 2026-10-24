@@ -1119,3 +1119,20 @@ Any staged edit, undo, redo, BE import, region finalization, or direct save
 invalidates the cached Session snapshot. Cancellation and world switching
 still discard late in-flight responses. Cached LOD samples remain read-only.
 The new code has not been compiled or CI tested. No packing/building.
+
+
+## Animated Java resource-pack textures (unverified)
+
+Vertically stacked PNG sprite frames and bounded `.png.mcmeta` animation
+metadata now control texture animation. The parser supports `frametime`,
+per-frame index/time sequences and implicit sequential frames (1–1200 ticks
+per step, 4,096 steps maximum). Invalid/untrusted metadata leaves the static
+first frame visible and adds a warning. UV slots, source block models and
+world NBT remain untouched. All sprite frames obey the existing 48 MiB
+decoded texture-bank limit; metadata is capped at 32 KiB per sprite.
+When an original 3D view is visible, iced's Tokio-backed subscription
+ticks every 50 ms, building a new bounded GPU/Canvas RGBA atlas only when
+a sprite's frame actually changes. The underlying immutable model and
+sprite resources share Arc ownership, avoiding reloading packs on ticks.
+Interpolation between frames is not implemented; discrete animation frames
+are supported. No compilation, CI or application packaging was triggered.

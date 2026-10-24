@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::fs::{self,File};
 use std::io::{Read,Seek};
 use std::path::Path;
+use std::sync::Arc;
 use image::ImageFormat;
 use mcedit2_world::sections::State;
 use crate::resource_models::ModelBank;
@@ -13,6 +14,8 @@ const MAX_TEXTURES:usize=1024;
 const MAX_TEXTURE_BYTES:u64=4*1024*1024;
 const MAX_PIXEL_EDGE:u32=512;
 const MAX_RGBA_MEMORY:usize=48*1024*1024;
+const MAX_ANIMATION_META:usize=32*1024;
+const MAX_ANIMATION_STEPS:usize=4096;
 const ATLAS_CELL:u32=32;
 const ATLAS_STRIDE:u32=34;
 const ATLAS_COLUMNS:u32=33;
@@ -45,6 +48,76 @@ impl Tile {
         let y=(v.clamp(0.0,0.999_999)*self.height as f32) as usize;
         let at=(y*self.width as usize+x)*4;
         [self.rgba[at],self.rgba[at+1],self.rgba[at+2],self.rgba[at+3]]
+    }
+}
+#[derive(Clone,Debug)]
+struct SpriteAnimation{
+    frames:Vec<Tile>,
+    schedule:Vec<(usize,u16)>,
+    cycle:u32,
+}
+impl SpriteAnimation{
+    fn from_metadata(frames:Vec<Tile>,meta:&[u8])->Result<Self,String>{
+        if frames.len()<2{return Err("Animated PNG needs two or more frames".into());}
+        if meta.len()>MAX_ANIMATION_META{return Err("Animation metadata exceeds 32KiB".into());}
+        let root:serde_json::Value=serde_json::from_slice(meta)
+            .map_err(|e|format!("Invalid animation metadata: {e}"))?;
+        let animation=root.get("animation").and_then(|v|v.as_object())
+            .ok_or("Missing animation metadata object")?;
+        let frame_time=animation.get("frametime").map(|v|v.as_u64())
+            .unwrap_or(Some(1)).ok_or("Animation frametime must be positive")?;
+        if !(1..=1200).contains(&frame_time){
+            return Err("Animation frametime must be between 1 and 1200 ticks".into());
+        }
+        let schedule=if let Some(entries)=animation.get("frames"){
+            let entries=entries.as_array().ok_or("Animation frames must be an array")?;
+            if entries.is_empty()||entries.len()>MAX_ANIMATION_STEPS{
+                return Err("Animation frame sequence is empty or too long".into());
+            }
+            let mut sequence=Vec::with_capacity(entries.len());
+            for item in entries{
+                let (index,duration)=if let Some(index)=item.as_u64(){
+                    (index,frame_time)
+                }else{
+                    (item.get("index").and_then(|v|v.as_u64())
+                        .ok_or("Animation frame requires an index")?,
+                    item.get("time").map(|v|v.as_u64()).unwrap_or(Some(frame_time))
+                        .ok_or("Animation frame time must be positive")?)
+                };
+                if index>=frames.len() as u64||!(1..=1200).contains(&duration){
+                    return Err("Animation step index or duration out of bounds".into());
+                }
+                sequence.push((index as usize,duration as u16));
+            }
+            sequence
+        }else{
+            frames.iter().enumerate().map(|(i,_)|(i,frame_time as u16)).collect()
+        };
+        let cycle=schedule.iter().map(|(_,time)|*time as u32).sum();
+        if cycle==0||cycle>1_000_000{
+            return Err("Animation cycle exceeds bounded tick budget".into());
+        }
+        Ok(Self{frames,schedule,cycle})
+    }
+    fn index_at(&self,ticks:u64)->usize{
+        let mut offset=(ticks%self.cycle as u64) as u32;
+        for (index,time) in &self.schedule{
+            if offset<*time as u32{return *index;}
+            offset-=*time as u32;
+        }
+        self.schedule.last().map(|x|x.0).unwrap_or(0)
+    }
+    fn tile_at(&self,ticks:u64)->&Tile{&self.frames[self.index_at(ticks)]}
+    fn alpha_mode(&self)->AlphaMode{
+        let mut cutout=false;
+        for frame in &self.frames{
+            match frame.alpha_mode(){
+                AlphaMode::Blend=>return AlphaMode::Blend,
+                AlphaMode::Cutout=>cutout=true,
+                _=>{}
+            }
+        }
+        if cutout{AlphaMode::Cutout}else{AlphaMode::Opaque}
     }
 }
 /// UVs refer to the center of each 32px atlas texel; slots have a
@@ -82,6 +155,10 @@ pub(crate) struct TextureAtlas{
 }
 impl TextureAtlas{
     fn create(tiles:&BTreeMap<String,Tile>)->Self{
+        Self::create_at(tiles,&BTreeMap::new(),0)
+    }
+    fn create_at(tiles:&BTreeMap<String,Tile>,
+        animations:&BTreeMap<String,SpriteAnimation>,ticks:u64)->Self{
         let slots=tiles.len()+1; // always reserve white for color-only faces
         let rows=(slots as u32).div_ceil(ATLAS_COLUMNS);
         let width=ATLAS_COLUMNS*ATLAS_STRIDE;
@@ -153,7 +230,8 @@ impl TextureAtlas{
         write(0,&white_tile,&mut rgba);
         let mut entries=BTreeMap::new();
         for (i,(name,tile)) in tiles.iter().enumerate(){
-            write(i+1,tile,&mut rgba);
+            let current=animations.get(name).map(|a|a.tile_at(ticks)).unwrap_or(tile);
+            write(i+1,current,&mut rgba);
             entries.insert(name.clone(),uv(i+1));
         }
         Self{width,height,rgba,entries,white:uv(0)}
@@ -161,9 +239,14 @@ impl TextureAtlas{
 }
 #[derive(Clone,Debug,Default)]
 pub(crate) struct TextureBank{
-    tiles:BTreeMap<String,Tile>,
-    models:ModelBank,
-    atlas:Option<std::sync::Arc<TextureAtlas>>,
+    // Source assets are immutable and shared between frame versions. Only
+    // the small RGBA atlas changes when the animation timeline advances.
+    tiles:Arc<BTreeMap<String,Tile>>,
+    models:Arc<ModelBank>,
+    animations:Arc<BTreeMap<String,SpriteAnimation>>,
+    metadata:BTreeMap<String,Vec<u8>>,
+    atlas:Option<Arc<TextureAtlas>>,
+    animation_tick:u64,
     pub source:String,
     pub warnings:Vec<String>,
 }
@@ -183,7 +266,7 @@ fn texture_id(path:&str)->Option<String>{
     {return None;}
     Some(format!("{namespace}:{name}"))
 }
-fn decode_png(bytes:&[u8])->Result<Tile,String>{
+fn decode_png_frames(bytes:&[u8])->Result<Vec<Tile>,String>{
     if bytes.len() as u64>MAX_TEXTURE_BYTES{return Err("PNG exceeds 4MiB".into());}
     if bytes.len()<24 || &bytes[..8]!=b"\x89PNG\r\n\x1a\n"{
         return Err("Invalid PNG header".into());
@@ -195,25 +278,41 @@ fn decode_png(bytes:&[u8])->Result<Tile,String>{
     let image=image::load_from_memory_with_format(bytes,ImageFormat::Png)
         .map_err(|e|format!("Invalid PNG: {e}"))?.into_rgba8();
     let (width,height)=image.dimensions();
-    if width==0||height==0||width>MAX_PIXEL_EDGE||height>4096 {
+    if width==0||height==0||width>MAX_PIXEL_EDGE||height>4096{
         return Err("Texture PNG exceeds decoded frame safeguards".into());
     }
-    // Minecraft animated textures store their frames vertically; we display
-    // frame zero until animated sprites gain their own timeline.
-    let frame_h=if height>=width&&height%width==0 {width}else{height};
+    let frame_h=if height>=width&&height%width==0{width}else{height};
     if frame_h>MAX_PIXEL_EDGE{return Err("Animation frame exceeds 512px".into());}
+    let count=height/frame_h;
+    if count as usize>MAX_ANIMATION_STEPS{
+        return Err("Animated source contains too many frames".into());
+    }
     let pixels=image.into_raw();
-    let end=width as usize*frame_h as usize*4;
-    Ok(Tile{width,height:frame_h,rgba:pixels[..end].to_vec()})
+    let row_bytes=width as usize*frame_h as usize*4;
+    Ok((0..count).map(|index|Tile{
+        width,height:frame_h,
+        rgba:pixels[index as usize*row_bytes..(index as usize+1)*row_bytes].to_vec(),
+    }).collect())
+}
+fn decode_png(bytes:&[u8])->Result<Tile,String>{
+    decode_png_frames(bytes)?.into_iter().next().ok_or("Empty PNG".into())
 }
 impl TextureBank {
     fn insert(&mut self,id:String,data:&[u8],memory:&mut usize)->Result<(),String>{
         if self.tiles.len()>=MAX_TEXTURES{return Err("Texture limit (1024) reached".into());}
-        let tile=decode_png(data)?;
-        let next=memory.checked_add(tile.rgba.len()).ok_or("Texture memory overflow")?;
+        let frames=decode_png_frames(data)?;
+        let bytes=frames.iter().map(|tile|tile.rgba.len()).sum::<usize>();
+        let next=memory.checked_add(bytes).ok_or("Texture memory overflow")?;
         if next>MAX_RGBA_MEMORY{return Err("Texture bank exceeds 48MiB".into());}
         *memory=next;
-        self.tiles.insert(id,tile);
+        let tile=frames[0].clone();
+        if frames.len()>1{
+            // Finalize only sprites that actually ship a .png.mcmeta.
+            Arc::make_mut(&mut self.animations).insert(id.clone(),SpriteAnimation{
+                frames,schedule:vec![(0,1)],cycle:1,
+            });
+        }
+        Arc::make_mut(&mut self.tiles).insert(id,tile);
         Ok(())
     }
     fn walk(&mut self,root:&Path,folder:&Path,memory:&mut usize,
@@ -233,17 +332,22 @@ impl TextureBank {
                 let Ok(relative)=path.strip_prefix(root)else{continue};
                 let name=relative.to_string_lossy().replace('\\',"/");
                 let id=texture_id(&name);
+                let meta_id=name.strip_suffix(".mcmeta").and_then(texture_id);
                 let is_model=name.ends_with(".json")&&(name.contains("/models/block/")
                     ||name.contains("/blockstates/"));
-                if id.is_none()&&!is_model{continue;}
+                if id.is_none()&&meta_id.is_none()&&!is_model{continue;}
                 let meta=fs::metadata(&path).map_err(|e|e.to_string())?;
-                if meta.len()>(if is_model{256*1024}else{MAX_TEXTURE_BYTES}){
+                if meta.len()>(if is_model{256*1024}else if meta_id.is_some(){MAX_ANIMATION_META as u64}else{MAX_TEXTURE_BYTES}){
                     self.warnings.push(format!("Skipped oversize {name}"));continue;
                 }
                 let bytes=fs::read(&path).map_err(|e|e.to_string())?;
                 if is_model{
-                    if let Err(e)=self.models.insert(&name,&bytes){
+                    if let Err(e)=Arc::make_mut(&mut self.models).insert(&name,&bytes){
                         self.warnings.push(format!("Skipped model {name}: {e}"));
+                    }
+                }else if let Some(id)=meta_id{
+                    if self.metadata.len()<MAX_TEXTURES{
+                        self.metadata.insert(id,bytes);
                     }
                 }else if let Some(id)=id{
                     if let Err(e)=self.insert(id.clone(),&bytes,memory){
@@ -262,18 +366,26 @@ impl TextureBank {
             let mut member=archive.by_index(i).map_err(|e|e.to_string())?;
             let name=member.name().to_string();
             let id=texture_id(&name);
+            let meta_id=name.strip_suffix(".mcmeta").and_then(texture_id);
             let is_model=name.ends_with(".json")&&(name.contains("/models/block/")
                 ||name.contains("/blockstates/"));
-            if id.is_none()&&!is_model{continue;}
-            if member.size()>(if is_model{256*1024}else{MAX_TEXTURE_BYTES}){
+            if id.is_none()&&meta_id.is_none()&&!is_model{continue;}
+            let max_size=if is_model{256*1024}else if meta_id.is_some(){
+                MAX_ANIMATION_META as u64
+            }else{MAX_TEXTURE_BYTES};
+            if member.size()>max_size{
                 self.warnings.push(format!("Skipped oversize {name}"));continue;
             }
             let mut bytes=Vec::new();
-            member.by_ref().take(if is_model{256*1024+1}else{MAX_TEXTURE_BYTES+1})
+            member.by_ref().take(max_size+1)
                 .read_to_end(&mut bytes).map_err(|e|e.to_string())?;
             if is_model{
-                if let Err(e)=self.models.insert(&name,&bytes){
+                if let Err(e)=Arc::make_mut(&mut self.models).insert(&name,&bytes){
                     self.warnings.push(format!("Skipped model {name}: {e}"));
+                }
+            }else if let Some(id)=meta_id{
+                if self.metadata.len()<MAX_TEXTURES{
+                    self.metadata.insert(id,bytes);
                 }
             }else if let Some(id)=id{
                 if let Err(e)=self.insert(id.clone(),&bytes,&mut memory){
@@ -282,6 +394,38 @@ impl TextureBank {
             }
         }
         Ok(())
+    }
+    /// Resource packs may place metadata before or after the PNG in ZIPs;
+    /// resolve order-independently only after all namespaced assets load.
+    fn finalize_animations(&mut self){
+        let source=std::mem::take(&mut self.animations);
+        let candidates=Arc::try_unwrap(source)
+            .unwrap_or_else(|shared|(*shared).clone());
+        let mut active=BTreeMap::new();
+        for (id,candidate) in candidates{
+            let Some(meta)=self.metadata.get(&id)else{continue;};
+            match SpriteAnimation::from_metadata(candidate.frames,meta){
+                Ok(animation)=>{active.insert(id,animation);},
+                Err(e)=>self.warnings.push(format!("Skipped animation {id}: {e}")),
+            }
+        }
+        self.metadata.clear();
+        self.animations=Arc::new(active);
+    }
+    pub fn has_animation(&self)->bool{!self.animations.is_empty()}
+    pub fn animation_count(&self)->usize{self.animations.len()}
+    /// Advance only if a frame actually changes. The source atlas UV slots,
+    /// model JSON and texture data stay immutable between scene frames.
+    pub fn advance_animation(&self,ticks:u64)->Option<Self>{
+        if !self.animations.iter().any(|(name,animation)|{
+            self.tiles.contains_key(name)
+                &&animation.index_at(self.animation_tick)!=animation.index_at(ticks)
+        }){return None;}
+        let mut next=self.clone();
+        next.animation_tick=ticks;
+        next.atlas=Some(Arc::new(TextureAtlas::create_at(
+            &next.tiles,&next.animations,ticks)));
+        Some(next)
     }
     pub fn open(path:&Path)->Result<Self,String>{
         if path.as_os_str().is_empty(){return Err("Select a resource-pack directory or ZIP".into());}
@@ -299,7 +443,8 @@ impl TextureBank {
             out.read_zip(file)?;
         }else{return Err("Resource pack does not exist".into());}
         if out.tiles.is_empty(){return Err("Pack contains no supported assets/*/textures/block/*.png".into());}
-        out.atlas=Some(std::sync::Arc::new(TextureAtlas::create(&out.tiles)));
+        out.finalize_animations();
+        out.atlas=Some(Arc::new(TextureAtlas::create_at(&out.tiles,&out.animations,0)));
         Ok(out)
     }
     pub fn count(&self)->usize{self.tiles.len()}
@@ -341,11 +486,14 @@ impl TextureBank {
             _=>(self.resolve_id(state,face)?,[0.0,0.0,16.0,16.0],0,[0,1,2,3]),
         };
         let region=self.atlas.as_ref()?.entries.get(&id)?;
-        let alpha=self.tiles.get(&id)?.alpha_mode();
+        let alpha=self.animations.get(&id).map(SpriteAnimation::alpha_mode)
+            .unwrap_or(self.tiles.get(&id)?.alpha_mode());
         Some((orient_uv(region.corners_for(uv,rot),perm),alpha))
     }
     pub fn alpha_mode(&self,state:&State,face:crate::isometric::Face)->Option<AlphaMode>{
-        self.resolve(state,face).map(Tile::alpha_mode)
+        let id=self.resolve_id(state,face)?;
+        self.animations.get(&id).map(SpriteAnimation::alpha_mode)
+            .or_else(||self.tiles.get(&id).map(Tile::alpha_mode))
     }
     pub fn atlas_face_corners(&self,state:&State,face:crate::isometric::Face,
         element_index:usize)->Option<[[f32;2];4]>{
@@ -411,6 +559,58 @@ mod tests {
     use crate::isometric::Face;
     fn state(name:&str,properties:Vec<(String,String)>)->State{State{name:name.into(),properties}}
     fn solid(color:[u8;4])->Tile{Tile{width:1,height:1,rgba:color.to_vec()}}
+    #[test]fn minecraft_animation_metadata_uses_custom_order_and_tick_lengths(){
+        let frames=vec![
+            solid([255,0,0,255]),solid([0,255,0,255]),solid([0,0,255,255]),
+        ];
+        let animation=SpriteAnimation::from_metadata(frames,
+            br#"{"animation":{"frametime":2,"frames":[{"index":2,"time":3},0,1]}}"#
+        ).unwrap();
+        assert_eq!(animation.cycle,7);
+        let chosen=(0..9).map(|tick|animation.index_at(tick)).collect::<Vec<_>>();
+        assert_eq!(chosen,vec![2,2,2,0,0,1,1,2,2]);
+        assert!(SpriteAnimation::from_metadata(vec![solid([0,0,0,255]);2],
+            br#"{"animation":{"frames":[5]}}"#).is_err());
+        assert!(SpriteAnimation::from_metadata(vec![solid([0,0,0,255]);2],
+            br#"{"animation":{"frametime":0}}"#).is_err());
+    }
+    #[test]fn animated_atlas_updates_gpu_and_canvas_source_from_one_tick(){
+        let mut bank=TextureBank::default();
+        let a=solid([3,14,159,255]);
+        let b=solid([230,100,6,128]);
+        Arc::make_mut(&mut bank.tiles).insert("minecraft:water_still".into(),a.clone());
+        Arc::make_mut(&mut bank.animations).insert("minecraft:water_still".into(),
+            SpriteAnimation{
+                frames:vec![a,b],schedule:vec![(0,2),(1,1)],cycle:3,
+            });
+        bank.atlas=Some(Arc::new(TextureAtlas::create_at(
+            &bank.tiles,&bank.animations,0)));
+        let uv=bank.atlas.as_ref().unwrap().entries["minecraft:water_still"]
+            .sample(0.5,0.5);
+        assert_eq!(bank.atlas_pixel(uv),Some([3,14,159,255]));
+        assert!(bank.advance_animation(1).is_none());
+        let next=bank.advance_animation(2).unwrap();
+        assert_eq!(next.atlas_pixel(uv),Some([230,100,6,128]));
+        assert_eq!(bank.atlas_pixel(uv),Some([3,14,159,255]));
+        assert!(Arc::ptr_eq(&bank.tiles,&next.tiles));
+        assert!(Arc::ptr_eq(&bank.models,&next.models));
+        assert!(Arc::ptr_eq(&bank.animations,&next.animations));
+    }
+    #[test]fn meta_file_order_is_independent_of_image_loading(){
+        let mut bank=TextureBank::default();
+        let id="minecraft:lava_still".to_string();
+        bank.metadata.insert(id.clone(),
+            br#"{"animation":{"frametime":3}}"#.to_vec());
+        let source=vec![solid([6,12,18,255]),solid([24,30,36,255])];
+        Arc::make_mut(&mut bank.tiles).insert(id.clone(),source[0].clone());
+        Arc::make_mut(&mut bank.animations).insert(id.clone(),SpriteAnimation{
+            frames:source,schedule:vec![(0,1)],cycle:1,
+        });
+        bank.finalize_animations();
+        assert_eq!(bank.animation_count(),1);
+        assert!(bank.metadata.is_empty());
+        assert_eq!(bank.animations[&id].index_at(3),1);
+    }
     #[test]fn cutout_atlas_avoids_black_filter_fringe_without_changing_alpha(){
         let mut tiles=BTreeMap::new();
         tiles.insert("test:leaves".into(),Tile{width:2,height:1,rgba:vec![
@@ -447,7 +647,7 @@ mod tests {
     }
     #[test]fn atlas_alpha_sampling_retains_transparent_holes(){
         let mut bank=TextureBank::default();
-        bank.tiles.insert("test:bars".into(),Tile{width:2,height:1,
+        Arc::make_mut(&mut bank.tiles).insert("test:bars".into(),Tile{width:2,height:1,
             rgba:vec![255,255,255,255,0,0,0,0]});
         bank.atlas=Some(std::sync::Arc::new(TextureAtlas::create(&bank.tiles)));
         let rect=bank.atlas.as_ref().unwrap().entries.get("test:bars").unwrap();
@@ -465,7 +665,7 @@ mod tests {
     }
     #[test]fn one_pass_gpu_face_style_preserves_cutout_and_uv_coordinates(){
         let mut bank=TextureBank::default();
-        bank.tiles.insert("test:casing".into(),Tile{width:2,height:1,
+        Arc::make_mut(&mut bank.tiles).insert("test:casing".into(),Tile{width:2,height:1,
             rgba:vec![10,20,30,255,20,30,40,0]});
         bank.atlas=Some(std::sync::Arc::new(TextureAtlas::create(&bank.tiles)));
         let state=state("test:casing",vec![]);
@@ -517,8 +717,8 @@ mod tests {
     }
     #[test]fn exact_face_rule_and_mod_namespace(){
         let mut bank=TextureBank::default();
-        bank.tiles.insert("minecraft:oak_log".into(),solid([17,0,0,255]));
-        bank.tiles.insert("minecraft:oak_log_top".into(),solid([81,0,0,255]));
+        Arc::make_mut(&mut bank.tiles).insert("minecraft:oak_log".into(),solid([17,0,0,255]));
+        Arc::make_mut(&mut bank.tiles).insert("minecraft:oak_log_top".into(),solid([81,0,0,255]));
         let log=state("minecraft:oak_log",vec![("axis".into(),"x".into())]);
         assert_eq!(bank.resolve(&log,Face::PosX).unwrap().pixel(0.4,0.4)[0],81);
         assert_eq!(bank.resolve(&log,Face::Top).unwrap().pixel(0.4,0.4)[0],17);
