@@ -523,14 +523,19 @@ impl IsometricSurface{
         let mut out=Vec::new();
         // Thousands of voxels typically share a few exact palette states.
         // Cache only within one frame; no stale model after pack replacement.
-        let mut shape_cache:HashMap<(String,Vec<(String,String)>),Vec<models::Part>>
-            =HashMap::new();
+        let mut shape_cache:HashMap<(String,Vec<(String,String)>,u64),
+            Vec<models::Part>>=HashMap::new();
         let mut json_face_cache:HashMap<
-            ((String,Vec<(String,String)>),usize,u8),
+            ((String,Vec<(String,String)>,u64),usize,u8),
             (Option<bool>,Option<Option<Face>>,bool)> =HashMap::new();
         for (voxel_index,voxel) in self.surface.voxels.iter().enumerate(){
             let base=material_color(voxel);
-            let key=(voxel.state.name.clone(),voxel.state.properties.clone());
+            let pos=(voxel.x,voxel.y,voxel.z);
+            let variant=if voxel.span>1{0}else{
+                self.texture_bank.as_ref().map_or(0,|bank|
+                    bank.model_variant_key(&voxel.state,pos))
+            };
+            let key=(voxel.state.name.clone(),voxel.state.properties.clone(),variant);
             // Distant spans are sampled terrain tiles, not exact JSON
             // model instances: use one covering plane rather than inventing
             // detailed model geometry for unsampled neighboring positions.
@@ -538,7 +543,7 @@ impl IsometricSurface{
             let boxes:&[models::Part]=if voxel.span>1{&distant}else{
                 shape_cache.entry(key.clone()).or_insert_with(||{
                     self.texture_bank.as_ref().and_then(|bank|
-                        bank.geometry(&voxel.state))
+                        bank.geometry_at(&voxel.state,pos))
                         .unwrap_or_else(||models::boxes(&voxel.state)
                             .into_iter().map(models::Part::cube).collect())
                 }).as_slice()
@@ -555,11 +560,11 @@ impl IsometricSurface{
                     *json_face_cache.entry((key.clone(),index,face.flag()))
                         .or_insert_with(||{
                             let defined=self.texture_bank.as_ref().and_then(|bank|
-                                bank.face_defined(&voxel.state,face,index));
+                                bank.face_defined_at(&voxel.state,face,index,pos));
                             let cull=self.texture_bank.as_ref().and_then(|bank|
-                                bank.face_cull_direction(&voxel.state,face,index));
+                                bank.face_cull_direction_at(&voxel.state,face,index,pos));
                             let unshaded=self.texture_bank.as_ref().and_then(|bank|
-                                bank.element_unshaded(&voxel.state,index))==Some(true);
+                                bank.element_unshaded_at(&voxel.state,index,pos))==Some(true);
                             (defined,cull,unshaded)
                         })
                 };
@@ -656,8 +661,8 @@ impl IsometricSurface{
                 if self.show_textures{
                     if let Some(bank)=&self.texture_bank{
                         let voxel=&self.surface.voxels[face.voxel_index];
-                        if let Some((uv,mode))=bank.atlas_face_style(
-                            &voxel.state,face.face,face.element_index)
+                        if let Some((uv,mode))=bank.atlas_face_style_at(
+                            &voxel.state,face.face,face.element_index,face.pos)
                         {
                             if let Some(at)=face_uv_at_cursor(p,&face.corners,&uv){
                                 if let Some(pixel)=bank.atlas_pixel(at){
@@ -704,8 +709,8 @@ impl canvas::Program<Message> for IsometricSurface{
                 if self.show_textures{
                     if let Some(bank)=&self.texture_bank{
                         let voxel=&self.surface.voxels[face.voxel_index];
-                        if let Some((uv,mode))=bank.atlas_face_style(
-                            &voxel.state,face.face,face.element_index)
+                        if let Some((uv,mode))=bank.atlas_face_style_at(
+                            &voxel.state,face.face,face.element_index,face.pos)
                         {
                             draw_tile(&mut frame,face,bank,&uv,mode,steps);
                             textured=true;

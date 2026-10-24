@@ -467,23 +467,40 @@ impl TextureBank {
     /// The fallback may use old per-block named textures, but never another
     /// namespace with a coincidentally matching resource path.
     pub fn element_unshaded(&self,state:&State,element_index:usize)->Option<bool>{
-        self.models.element_unshaded(state,element_index)
+        self.element_unshaded_at(state,element_index,(0,0,0))
+    }
+    pub fn element_unshaded_at(&self,state:&State,element_index:usize,
+        pos:(i32,i32,i32))->Option<bool>{
+        self.models.element_unshaded_at(state,element_index,pos)
     }
     pub fn face_cull_direction(&self,state:&State,face:crate::isometric::Face,
         element_index:usize)->Option<Option<crate::isometric::Face>>{
-        self.models.face_cull_direction(state,face,element_index)
+        self.face_cull_direction_at(state,face,element_index,(0,0,0))
+    }
+    pub fn face_cull_direction_at(&self,state:&State,face:crate::isometric::Face,
+        element_index:usize,pos:(i32,i32,i32))
+        ->Option<Option<crate::isometric::Face>>{
+        self.models.face_cull_direction_at(state,face,element_index,pos)
     }
     pub fn face_defined(&self,state:&State,face:crate::isometric::Face,
         element_index:usize)->Option<bool>{
-        self.models.face_defined(state,face,element_index)
+        self.face_defined_at(state,face,element_index,(0,0,0))
+    }
+    pub fn face_defined_at(&self,state:&State,face:crate::isometric::Face,
+        element_index:usize,pos:(i32,i32,i32))->Option<bool>{
+        self.models.face_defined_at(state,face,element_index,pos)
     }
     pub fn atlas_face_style(&self,state:&State,face:crate::isometric::Face,
         element_index:usize)->Option<([[f32;2];4],AlphaMode)>{
-        let id_spec=self.models.element_face(state,face,element_index);
+        self.atlas_face_style_at(state,face,element_index,(0,0,0))
+    }
+    pub fn atlas_face_style_at(&self,state:&State,face:crate::isometric::Face,
+        element_index:usize,pos:(i32,i32,i32))->Option<([[f32;2];4],AlphaMode)>{
+        let id_spec=self.models.element_face_at(state,face,element_index,pos);
         let (id,uv,rot,perm)=match id_spec{
             Some(spec) if self.tiles.contains_key(&spec.texture)=>
                 (spec.texture,spec.uv,spec.rotation,spec.uvlock),
-            _=>(self.resolve_id(state,face)?,[0.0,0.0,16.0,16.0],0,[0,1,2,3]),
+            _=>(self.resolve_id_at(state,face,pos)?,[0.0,0.0,16.0,16.0],0,[0,1,2,3]),
         };
         let region=self.atlas.as_ref()?.entries.get(&id)?;
         let alpha=self.animations.get(&id).map(SpriteAnimation::alpha_mode)
@@ -514,13 +531,24 @@ impl TextureBank {
     }
     pub fn model_count(&self)->usize{self.models.count()}
     pub fn geometry(&self,state:&State)->Option<Vec<crate::models::Part>>{
-        self.models.parts(state)
+        self.geometry_at(state,(0,0,0))
+    }
+    pub fn geometry_at(&self,state:&State,pos:(i32,i32,i32))
+        ->Option<Vec<crate::models::Part>>{
+        self.models.parts_at(state,pos)
+    }
+    pub fn model_variant_key(&self,state:&State,pos:(i32,i32,i32))->u64{
+        self.models.weighted_selection_key(state,pos)
     }
     pub fn get(&self,id:&str)->Option<&Tile>{self.tiles.get(id)}
     pub fn resolve_id(&self,state:&State,face:crate::isometric::Face)->Option<String>{
+        self.resolve_id_at(state,face,(0,0,0))
+    }
+    pub fn resolve_id_at(&self,state:&State,face:crate::isometric::Face,
+        pos:(i32,i32,i32))->Option<String>{
         let (ns,name)=state.name.split_once(':')?;
         if ns=="numeric"{return None;}
-        if let Some(key)=self.models.texture(state,face){
+        if let Some(key)=self.models.texture_at(state,face,pos){
             if self.tiles.contains_key(&key){return Some(key);}
         }
         let top=face==crate::isometric::Face::Top;

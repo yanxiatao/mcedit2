@@ -1160,3 +1160,18 @@ Toggling source textures, changing camera projection, loading a different
 pack/world or receiving new chunk samples invalidates both projected and
 GPU caches together. CPU and GPU frame selection share one atlas tick.
 This optimization is not yet CI-tested or runtime verified.
+
+
+## Stable weighted Java model variants (unverified)
+
+The Java blockstate renderer now evaluates weighted `variants` arrays
+and weighted multipart `apply` arrays with a stable selection keyed by
+the original integer block X/Y/Z, state and multipart index. No global RNG
+state, random shifts while orbiting, or guessed editable source blocks.
+Selected geometry and its JSON face texture/UV/cullface derive from the
+same variant choice. Both Canvas and GPU texture lookup use position-aware
+variants, while caches deduplicate identical selected model combinations
+rather than generating one independent mesh for every source voxel.
+Weighted counts and array size are bounded, and invalid metadata safely
+falls back to the existing conservative display. Entity and disk world
+operations remain excluded. This work is pending one final CI gate.

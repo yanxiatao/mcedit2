@@ -44,16 +44,20 @@ pub(crate) fn build(view:&IsometricSurface,size:Size)->Vec<Vertex>{
     let faces=view.faces_cached(size);
     let mut out=Vec::with_capacity(faces.len().min(MAX_TRIANGLES/2)*6);
     let atlas=view.texture_bank.as_ref().and_then(|bank|bank.atlas());
-    let mut style_cache:HashMap<(String,Vec<(String,String)>,u8,usize),
+    let mut style_cache:HashMap<(String,Vec<(String,String)>,u8,usize,u64),
         Option<([[f32;2];4],AlphaMode)>>=HashMap::new();
     for face in faces.iter().take(MAX_TRIANGLES/2){
         let voxel=&view.surface.voxels[face.voxel_index];
+        let variant=if voxel.span>1{0}else{
+            view.texture_bank.as_ref().map_or(0,|bank|
+                bank.model_variant_key(&voxel.state,face.pos))
+        };
         let cache_key=(voxel.state.name.clone(),voxel.state.properties.clone(),
-            face.face as u8,face.element_index);
+            face.face as u8,face.element_index,variant);
         let style=style_cache.entry(cache_key).or_insert_with(||{
             if view.show_textures{
                 view.texture_bank.as_ref().and_then(|bank|
-                    bank.atlas_face_style(&voxel.state,face.face,face.element_index))
+                    bank.atlas_face_style_at(&voxel.state,face.face,face.element_index,face.pos))
             }else{None}
         });
         let texture=style.as_ref().map(|(uv,_)|*uv);

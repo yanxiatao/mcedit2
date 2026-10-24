@@ -3,6 +3,7 @@
 //! unsupported multipart, rotations, random weighted variants and custom
 //! geometry use the ordinary named-texture fallback rather than guessing.
 use std::collections::{BTreeMap,BTreeSet};
+use std::hash::{Hash,Hasher};
 use mcedit2_world::sections::State;
 use serde_json::Value;
 use crate::isometric::Face;
@@ -71,8 +72,37 @@ fn variant_angles(value:&Value)->Option<(i32,i32)>{
     };
     Some((angle("x")?,angle("y")?))
 }
-#[derive(Debug,Clone)]
+#[derive(Debug,Clone,Hash)]
 struct ChosenModel{key:String,x:i32,y:i32,uvlock:bool}
+fn deterministic_model_seed(state:&State,pos:(i32,i32,i32),salt:u64)->u64{
+    let mut hasher=std::collections::hash_map::DefaultHasher::new();
+    state.name.hash(&mut hasher);
+    state.properties.hash(&mut hasher);
+    pos.hash(&mut hasher);
+    salt.hash(&mut hasher);
+    hasher.finish()
+}
+/// Choose a weighted Java model entry without a global RNG: reloading a
+/// chunk/camera yields the same source XYZ appearance and matched UVs.
+fn choose_weighted<'a>(value:&'a Value,seed:u64)->Option<&'a Value>{
+    let Some(array)=value.as_array()else{return Some(value);};
+    if array.is_empty()||array.len()>64{return None;}
+    let mut weights=Vec::with_capacity(array.len());
+    let mut total=0u64;
+    for item in array{
+        let weight=item.get("weight").map(Value::as_u64).unwrap_or(Some(1))?;
+        if weight==0||weight>10_000{return None;}
+        total=total.checked_add(weight)?;
+        if total>640_000{return None;}
+        weights.push(weight);
+    }
+    let mut target=seed%total;
+    for (item,weight) in array.iter().zip(weights){
+        if target<weight{return Some(item);}
+        target-=weight;
+    }
+    None
+}
 fn uvlock_permutation(local:Face,x:i32,y:i32)->Option<[u8;4]>{
     const FACES:[Face;6]=[Face::Top,Face::Bottom,
         Face::PosX,Face::NegX,Face::PosZ,Face::NegZ];
@@ -195,19 +225,22 @@ fn face_keys(face:Face,parent:&str)->&'static [&'static str]{
 }
 impl ModelBank {
     fn selections(&self,state:&State)->Option<Vec<ChosenModel>>{
+        self.selections_at(state,(0,0,0))
+    }
+    fn selections_at(&self,state:&State,pos:(i32,i32,i32))
+        ->Option<Vec<ChosenModel>>{
         let (ns,name)=state.name.split_once(':')?;
         let doc=self.files.get(&format!("state:{ns}:{name}"))?;
         if let Some(parts)=doc.get("multipart"){
             let parts=parts.as_array()?;
             if parts.is_empty()||parts.len()>64{return None;}
             let mut chosen=Vec::new();
-            for part in parts{
+            for (index,part) in parts.iter().enumerate(){
                 let active=part.get("when").map(|v|condition_matches(v,state,0))
                     .unwrap_or(Some(true))?;
                 if !active{continue;}
-                let apply=part.get("apply")?;
-                // Weighted arrays are intentionally not guessed.
-                if apply.is_array(){return None;}
+                let apply=choose_weighted(part.get("apply")?,
+                    deterministic_model_seed(state,pos,index as u64+1))?;
                 let (x,y)=variant_angles(apply)?;
                 chosen.push(ChosenModel{
                     key:normalize_model(apply.get("model")?.as_str()?,ns)?,x,y,
@@ -217,7 +250,9 @@ impl ModelBank {
             if chosen.is_empty(){return None;}
             return Some(chosen);
         }
-        let value=best_variant(doc.get("variants")?.as_object()?,state)?;
+        let value=choose_weighted(
+            best_variant(doc.get("variants")?.as_object()?,state)?,
+            deterministic_model_seed(state,pos,0))?;
         let (x,y)=variant_angles(value)?;
         Some(vec![ChosenModel{
             key:normalize_model(value.get("model")?.as_str()?,ns)?,x,y,
@@ -225,9 +260,13 @@ impl ModelBank {
         }])
     }
     fn chosen_element(&self,state:&State,index:usize)->Option<(ChosenModel,&Value)>{
+        self.chosen_element_at(state,index,(0,0,0))
+    }
+    fn chosen_element_at(&self,state:&State,index:usize,pos:(i32,i32,i32))
+        ->Option<(ChosenModel,&Value)>{
         if index>=128{return None;}
         let mut remaining=index;
-        for model in self.selections(state)?{
+        for model in self.selections_at(state,pos)?{
             let elements=self.model_elements(&model.key)?;
             if remaining<elements.len(){
                 return Some((model,elements.get(remaining)?));
@@ -236,10 +275,22 @@ impl ModelBank {
         }
         None
     }
+    /// Signed block position changes weighted variants; the cache key
+    /// hashes only the chosen model set, not each individual coordinate.
+    pub fn weighted_selection_key(&self,state:&State,pos:(i32,i32,i32))->u64{
+        let Some(chosen)=self.selections_at(state,pos)else{return 0;};
+        let mut hash=std::collections::hash_map::DefaultHasher::new();
+        chosen.hash(&mut hash);
+        hash.finish()
+    }
     /// Elements may deliberately disable directional shading, notably the
     /// zero-thickness crossed planes used by flowers and saplings.
     pub fn element_unshaded(&self,state:&State,index:usize)->Option<bool>{
-        let (_,element)=self.chosen_element(state,index)?;
+        self.element_unshaded_at(state,index,(0,0,0))
+    }
+    pub fn element_unshaded_at(&self,state:&State,index:usize,pos:(i32,i32,i32))
+        ->Option<bool>{
+        let (_,element)=self.chosen_element_at(state,index,pos)?;
         let shade=element.get("shade").map(Value::as_bool).unwrap_or(Some(true))?;
         Some(!shade)
     }
@@ -247,7 +298,11 @@ impl ModelBank {
     /// be rendered as a synthetic palette-textured side. None means that
     /// the model/element is not resolved and the fallback remains active.
     pub fn face_defined(&self,state:&State,face:Face,index:usize)->Option<bool>{
-        let (_model,element)=self.chosen_element(state,index)?;
+        self.face_defined_at(state,face,index,(0,0,0))
+    }
+    pub fn face_defined_at(&self,state:&State,face:Face,index:usize,
+        pos:(i32,i32,i32))->Option<bool>{
+        let (_model,element)=self.chosen_element_at(state,index,pos)?;
         let faces=element.get("faces")?.as_object()?;
         let name=match face{
             Face::Top=>"up",Face::Bottom=>"down",
@@ -262,7 +317,11 @@ impl ModelBank {
     /// None means no reliable JSON face metadata was found.
     pub fn face_cull_direction(&self,state:&State,face:Face,index:usize)
         ->Option<Option<Face>>{
-        let (chosen,element)=self.chosen_element(state,index)?;
+        self.face_cull_direction_at(state,face,index,(0,0,0))
+    }
+    pub fn face_cull_direction_at(&self,state:&State,face:Face,index:usize,
+        pos:(i32,i32,i32))->Option<Option<Face>>{
+        let (chosen,element)=self.chosen_element_at(state,index,pos)?;
         let name=match face{
             Face::Top=>"up",Face::Bottom=>"down",
             Face::PosX=>"east",Face::NegX=>"west",
@@ -320,7 +379,10 @@ impl ModelBank {
     /// Native visual parts support vanilla 22.5/45 degree element axes
     /// without collapsing the source geometry into a larger AABB.
     pub fn parts(&self,state:&State)->Option<Vec<Part>>{
-        let chosen=self.selections(state)?;
+        self.parts_at(state,(0,0,0))
+    }
+    pub fn parts_at(&self,state:&State,pos:(i32,i32,i32))->Option<Vec<Part>>{
+        let chosen=self.selections_at(state,pos)?;
         let mut out=Vec::new();
         for model in chosen{
             let elements=self.model_elements(&model.key)?;
@@ -393,7 +455,11 @@ impl ModelBank {
     /// A specific Java model element face's texture and declared UV.
     /// This is more precise than the older block-global texture map.
     pub fn element_face(&self,state:&State,face:Face,index:usize)->Option<FaceSpec>{
-        let (model,element)=self.chosen_element(state,index)?;
+        self.element_face_at(state,face,index,(0,0,0))
+    }
+    pub fn element_face_at(&self,state:&State,face:Face,index:usize,
+        pos:(i32,i32,i32))->Option<FaceSpec>{
+        let (model,element)=self.chosen_element_at(state,index,pos)?;
         // A RenderFace stores the *local model face*; its vertices and
         // normals were rotated later by Part::point(). Inverse rotation
         // here would apply the same transform twice.
@@ -454,19 +520,17 @@ impl ModelBank {
         Some(FaceSpec{texture,uv,rotation,uvlock})
     }
     pub fn texture(&self,state:&State,face:Face)->Option<String>{
-        let (ns,name)=state.name.split_once(':')?;
-        let key=format!("state:{ns}:{name}");
-        let state_json=self.files.get(&key)?;
-        let variant=state_json.get("variants")?.as_object()
-            .and_then(|obj|best_variant(obj,state))?;
-        let (rotation_x,rotation_y)=variant_angles(variant)?;
-        let lookup_face=face.undo_variant_rotation(rotation_x,rotation_y);
-        let model_name=variant_model(variant)?;
-        let model_key=normalize_model(model_name,ns)?;
+        self.texture_at(state,face,(0,0,0))
+    }
+    pub fn texture_at(&self,state:&State,face:Face,pos:(i32,i32,i32))
+        ->Option<String>{
+        let chosen=self.selections_at(state,pos)?.into_iter().next()?;
+        let lookup_face=face.undo_variant_rotation(chosen.x,chosen.y);
+        let model_key=chosen.key;
         let fallback_ns=model_key.strip_prefix("model:")?.split_once(':')?.0.to_string();
         let mut maps=Vec::new();
         let mut visited=BTreeSet::new();
-        let mut current=Some(model_key);
+        let mut current=Some(model_key.clone());
         while let Some(key)=current{
             if visited.len()>=16||!visited.insert(key.clone()){return None;}
             let Some(model)=self.files.get(&key)else{break};
@@ -484,7 +548,7 @@ impl ModelBank {
             }
             None
         };
-        for key in face_keys(lookup_face,model_name){
+        for key in face_keys(lookup_face,&model_key){
             let Some(mut texture)=get(key)else{continue;};
             let mut seen=BTreeSet::new();
             for _ in 0..16{
@@ -503,6 +567,65 @@ mod tests{
     use super::*;
     fn s(name:&str,props:&[(&str,&str)])->State{
         State{name:name.into(),properties:props.iter().map(|(a,b)|(a.to_string(),b.to_string())).collect()}
+    }
+    #[test]fn weighted_variants_are_stable_per_source_xyz_and_match_texture_geometry(){
+        let mut bank=ModelBank::default();
+        bank.insert("assets/test/blockstates/ore.json",
+            br#"{"variants":{"":[
+               {"model":"test:block/short","weight":1},
+               {"model":"test:block/tall","weight":3}]}}"#).unwrap();
+        bank.insert("assets/test/models/block/short.json",
+            br#"{"elements":[{"from":[0,0,0],"to":[16,8,16],
+                 "faces":{"up":{"texture":"test:block/short","uv":[0,0,16,16]}}}]}"#).unwrap();
+        bank.insert("assets/test/models/block/tall.json",
+            br#"{"elements":[{"from":[0,0,0],"to":[16,16,16],
+                 "faces":{"up":{"texture":"test:block/tall","uv":[0,0,16,16]}}}]}"#).unwrap();
+        let state=s("test:ore",&[]);
+        let mut short=0;
+        let mut tall=0;
+        for x in -64..64{
+            let pos=(x,64,-14);
+            let a=bank.parts_at(&state,pos).unwrap();
+            let b=bank.parts_at(&state,pos).unwrap();
+            assert_eq!(a.iter().map(|p|p.bounds).collect::<Vec<_>>(),
+                b.iter().map(|p|p.bounds).collect::<Vec<_>>());
+            let texture=bank.element_face_at(&state,Face::Top,0,pos).unwrap().texture;
+            let key=bank.weighted_selection_key(&state,pos);
+            assert_eq!(key,bank.weighted_selection_key(&state,pos));
+            if a[0].bounds.max[1]<0.5{
+                short+=1;assert_eq!(texture,"test:short");
+            }else{
+                tall+=1;assert_eq!(texture,"test:tall");
+            }
+        }
+        assert!(short>0&&tall>short);
+    }
+    #[test]fn multipart_weighted_apply_uses_independent_stable_choices(){
+        let mut bank=ModelBank::default();
+        bank.insert("assets/test/blockstates/garden.json",
+            br#"{"multipart":[
+                {"apply":[{"model":"test:block/short","weight":1},
+                          {"model":"test:block/tall","weight":1}]},
+                {"when":{"side":"north"},
+                 "apply":[{"model":"test:block/tall","weight":1},
+                          {"model":"test:block/short","weight":1}]}]}"#).unwrap();
+        bank.insert("assets/test/models/block/short.json",
+            br#"{"elements":[{"from":[0,0,0],"to":[16,8,16],
+                 "faces":{"up":{"texture":"test:block/short"}}}]}"#).unwrap();
+        bank.insert("assets/test/models/block/tall.json",
+            br#"{"elements":[{"from":[0,0,0],"to":[16,16,16],
+                 "faces":{"up":{"texture":"test:block/tall"}}}]}"#).unwrap();
+        let state=s("test:garden",&[("side","north")]);
+        let source=(8,70,-3);
+        let chosen=bank.selections_at(&state,source).unwrap();
+        assert_eq!(chosen.len(),2);
+        assert_eq!(chosen.iter().map(|m|m.key.clone()).collect::<Vec<_>>(),
+            bank.selections_at(&state,source).unwrap()
+                .iter().map(|m|m.key.clone()).collect::<Vec<_>>());
+        assert_eq!(bank.parts_at(&state,source).unwrap().len(),2);
+        assert!(choose_weighted(&serde_json::json!([
+            {"model":"x","weight":0}
+        ]),0).is_none());
     }
     #[test]fn state_variants_inherit_named_top_side_and_preserve_namespace(){
         let mut bank=ModelBank::default();
