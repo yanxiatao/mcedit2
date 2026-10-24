@@ -39,7 +39,11 @@ impl Chunk {
     }
     pub fn block(&self, x: u8, y: i32, z: u8) -> Option<&State> {
         let sy = i8::try_from(y.div_euclid(16)).ok()?;
-        self.sections.iter().find(|v| v.y == sy)?.block(x, y.rem_euclid(16) as u8, z)
+        // All supported decoders validate unique signed Section Y values
+        // and sort them once; binary lookup avoids a linear Section scan for
+        // every voxel in 64x64x48 previews of tall modern worlds.
+        let index=self.sections.binary_search_by_key(&sy,|section|section.y).ok()?;
+        self.sections[index].block(x,y.rem_euclid(16) as u8,z)
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1456,6 +1460,23 @@ mod tests {
         assert_eq!(chunk.block(2,-62,3).unwrap().name,"minecraft:stone");
         assert_eq!(chunk.x,Some(-7));
         assert_eq!(raw,original);
+    }
+    #[test]
+    fn sorted_signed_section_lookup_is_exact_and_never_infers_absent_y(){
+        let state=|name:&str|State{name:name.into(),properties:vec![]};
+        let sections=[(-4,"minecraft:stone"),(0,"minecraft:dirt"),
+            (19,"modded:unmapped")].into_iter().map(|(y,name)|Section{
+                y,palette:vec![state(name)],indices:vec![0;BLOCKS],
+            }).collect();
+        let chunk=Chunk{data_version:Some(5125),x:Some(0),z:Some(0),
+            layout:Layout::Modern118,sections,
+            block_entities:BTreeSet::new()};
+        assert_eq!(chunk.block(15,-64,15).unwrap().name,"minecraft:stone");
+        assert_eq!(chunk.block(0,15,0).unwrap().name,"minecraft:dirt");
+        assert_eq!(chunk.block(0,319,0).unwrap().name,"modded:unmapped");
+        assert!(chunk.block(0,16,0).is_none());
+        assert!(chunk.block(0,-65,0).is_none());
+        assert!(chunk.block(16,0,0).is_none());
     }
     #[test]
     fn contiguous_and_padded_five_bit_encoding() {

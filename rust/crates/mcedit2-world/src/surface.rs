@@ -3,7 +3,7 @@
 //! original BE marker. Air, missing sections and missing chunks are never
 //! silently replaced with generated Minecraft data.
 use std::collections::BTreeMap;
-use crate::block_lookup::read_world_chunk;
+use crate::block_lookup::ReadOnlyRegionCache;
 use crate::editing::Session;
 use crate::sections::{Chunk,State};
 use crate::{WorldError,WorldSummary};
@@ -150,6 +150,7 @@ pub fn inspect_surface(
     let _=crate::editing::Bounds::new((x,y_min,z),(x,y_min,z))?;
     let _=crate::editing::Bounds::new((far_x,y_max,far_z),(far_x,y_max,far_z))?;
     let mut cache:BTreeMap<(i32,i32),Option<Chunk>>=BTreeMap::new();
+    let mut region_reader=ReadOnlyRegionCache::new(session.original_world(),session.dimension())?;
     let mut voxels=Vec::new();
     let mut missing_columns=0;
     let mut tiles:BTreeMap<(i32,i32),SourceChunkTile>=BTreeMap::new();
@@ -158,9 +159,7 @@ pub fn inspect_surface(
             let (wx,wz)=(x+dx,z+dz);
             let key=(wx.div_euclid(16),wz.div_euclid(16));
             if !cache.contains_key(&key){
-                cache.insert(key,read_world_chunk(
-                    session.original_world(),session.dimension(),key.0,key.1
-                )?);
+                cache.insert(key,region_reader.read_chunk(key.0,key.1)?);
             }
             let tile=tiles.entry(key).or_insert_with(||SourceChunkTile{
                 chunk_x:key.0,chunk_z:key.1,
@@ -230,6 +229,7 @@ pub fn inspect_exposed_volume_cutaway(
     let _=crate::editing::Bounds::new((x,y_min,z),(x,y_min,z))?;
     let _=crate::editing::Bounds::new((max_x,y_max,max_z),(max_x,y_max,max_z))?;
     let mut chunks:BTreeMap<(i32,i32),Option<Chunk>>=BTreeMap::new();
+    let mut region_reader=ReadOnlyRegionCache::new(session.original_world(),session.dimension())?;
     let mut known:BTreeMap<(i32,i32,i32),(State,VoxelMaterial)>=BTreeMap::new();
     let mut solids=Vec::new();
     let mut missing_columns=0;
@@ -239,9 +239,7 @@ pub fn inspect_exposed_volume_cutaway(
             let (wx,wz)=(x+dx,z+dz);
             let key=(wx.div_euclid(16),wz.div_euclid(16));
             if !chunks.contains_key(&key){
-                chunks.insert(key,read_world_chunk(
-                    session.original_world(),session.dimension(),key.0,key.1
-                )?);
+                chunks.insert(key,region_reader.read_chunk(key.0,key.1)?);
             }
             let tile=tiles.entry(key).or_insert_with(||SourceChunkTile{
                 chunk_x:key.0,chunk_z:key.1,

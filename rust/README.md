@@ -1248,3 +1248,18 @@ palette appearance. A fixed per-cell sampling cap ensures a 64x64 map draws
 at most 16,384 additional texture squares, without filesystem access,
 entity processing or writes to the world. Tests cover atlas-UV interpolation
 and bounded rasterization; CI/compilation remain unrun.
+
+## Reused verified Region indexes for near 2D and 3D scenes
+
+Single-shot 64x64 horizontal/vertical slices and 64x64x48 near-field
+3D surface/volume inspections now share the existing worker-local
+ReadOnlyRegionCache within each view request. This avoids reopening
+and validating the same original 8 KiB Region index for adjacent chunks
+while preserving exact per-chunk decompression, ownership, Block Entity
+validation and absence reporting. Loaded original chunks are still
+decoded only once per scene. The bounded cache never writes Region data
+or extends the independent 4096-edit budget. Signed, sorted Section Y
+lookup uses a binary search instead of a per-block linear traversal
+through 1.18+ tall-world Sections; missing Y remains absent rather than
+invented air. New negative-Y and missing-Section regression tests are
+included but unrun; CI/build/packaging remain disabled.
