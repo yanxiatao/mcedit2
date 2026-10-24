@@ -14,6 +14,9 @@ pub(crate) struct FaceSpec {
     /// Minecraft model-element UV rectangle, in 0..16 texture units.
     pub uv:[f32;4],
     pub rotation:u16,
+    /// Source face vertex i samples base texture corner uvlock[i].
+    /// Handles quarter-turns and mirrors without corrupting geometry.
+    pub uvlock:[u8;4],
 }
 #[derive(Clone,Debug,Default)]
 pub(crate) struct ModelBank {
@@ -59,7 +62,7 @@ fn best_variant<'a>(obj:&'a serde_json::Map<String,Value>,state:&State)->Option<
         .map(|(_,v)|v)
 }
 fn variant_angles(value:&Value)->Option<(i32,i32)>{
-    if value.is_array()||value.get("uvlock").and_then(Value::as_bool)==Some(true){return None;}
+    if value.is_array()||value.get("uvlock").is_some_and(|v|v.as_bool().is_none()){return None;}
     let angle=|key:&str|->Option<i32>{
         let value=value.get(key);
         let n=if let Some(v)=value{v.as_i64()?}else{0};
@@ -69,7 +72,30 @@ fn variant_angles(value:&Value)->Option<(i32,i32)>{
     Some((angle("x")?,angle("y")?))
 }
 #[derive(Debug,Clone)]
-struct ChosenModel{key:String,x:i32,y:i32}
+struct ChosenModel{key:String,x:i32,y:i32,uvlock:bool}
+fn uvlock_permutation(local:Face,x:i32,y:i32)->Option<[u8;4]>{
+    const FACES:[Face;6]=[Face::Top,Face::Bottom,
+        Face::PosX,Face::NegX,Face::PosZ,Face::NegZ];
+    let part=Part{bounds:Box3::FULL,rotation:None,variant_x:x,variant_y:y};
+    let normal=part.normal(local.normal());
+    let target=FACES.iter().copied().find(|face|{
+        let n=face.normal();
+        let expected=[n.0 as f32,n.1 as f32,n.2 as f32];
+        normal.iter().zip(expected).all(|(a,b)|(*a-b).abs()<1e-5)
+    })?;
+    let rotated=part.face_vertices(local.corners());
+    let canonical=target.corners();
+    let mut permutation=[0u8;4];
+    for (i,point) in rotated.iter().enumerate(){
+        let index=canonical.iter().position(|target|point.iter().zip(target)
+            .all(|(a,b)|(*a-b).abs()<1e-5))?;
+        permutation[i]=index as u8;
+    }
+    let mut sorted=permutation;
+    sorted.sort_unstable();
+    (sorted==[0,1,2,3]).then_some(permutation)
+}
+
 /// Minecraft multipart: property AND, pipe-separated alternatives,
 /// nested OR/AND, and omitted when (always). Reject unknown syntax.
 fn condition_matches(condition:&Value,state:&State,depth:usize)->Option<bool>{
@@ -184,7 +210,8 @@ impl ModelBank {
                 if apply.is_array(){return None;}
                 let (x,y)=variant_angles(apply)?;
                 chosen.push(ChosenModel{
-                    key:normalize_model(apply.get("model")?.as_str()?,ns)?,x,y
+                    key:normalize_model(apply.get("model")?.as_str()?,ns)?,x,y,
+                    uvlock:apply.get("uvlock").and_then(Value::as_bool).unwrap_or(false)
                 });
             }
             if chosen.is_empty(){return None;}
@@ -193,7 +220,8 @@ impl ModelBank {
         let value=best_variant(doc.get("variants")?.as_object()?,state)?;
         let (x,y)=variant_angles(value)?;
         Some(vec![ChosenModel{
-            key:normalize_model(value.get("model")?.as_str()?,ns)?,x,y
+            key:normalize_model(value.get("model")?.as_str()?,ns)?,x,y,
+            uvlock:value.get("uvlock").and_then(Value::as_bool).unwrap_or(false)
         }])
     }
     fn chosen_element(&self,state:&State,index:usize)->Option<(ChosenModel,&Value)>{
@@ -370,6 +398,9 @@ impl ModelBank {
         // normals were rotated later by Part::point(). Inverse rotation
         // here would apply the same transform twice.
         let model_face=face;
+        let uvlock=if model.uvlock{
+            uvlock_permutation(face,model.x,model.y)?
+        }else{[0,1,2,3]};
         let model_key=model.key;
         let mut current=Some(model_key.clone());
         let mut visited=BTreeSet::new();
@@ -420,7 +451,7 @@ impl ModelBank {
             }
             out
         }else{implicit_face_uv(element,model_face)?};
-        Some(FaceSpec{texture,uv,rotation})
+        Some(FaceSpec{texture,uv,rotation,uvlock})
     }
     pub fn texture(&self,state:&State,face:Face)->Option<String>{
         let (ns,name)=state.name.split_once(':')?;
@@ -526,7 +557,7 @@ mod tests{
         assert_eq!(bank.texture(&s,Face::PosX),Some("test:north".into()));
         assert_eq!(bank.texture(&s,Face::PosZ),Some("test:east".into()));
     }
-    #[test]fn unsupported_variant_rotation_and_uvlock_fail_closed(){
+    #[test]fn unsupported_variant_rotation_fail_closed(){
         let mut bank=ModelBank::default();
         bank.insert("assets/test/blockstates/bad.json",
             br#"{"variants":{"":{"model":"test:block/bad","y":45}}}"#).unwrap();
@@ -534,6 +565,30 @@ mod tests{
             br#"{"elements":[{"from":[0,0,0],"to":[16,16,16]}]}"#).unwrap();
         assert!(bank.elements(&s("test:bad",&[])).is_none());
         assert_eq!(bank.texture(&s("test:bad",&[]),Face::Top),None);
+    }
+    #[test]fn uvlock_corners_preserve_world_texture_basis_with_any_variant_turn(){
+        for x in [0,90,180,270]{
+            for y in [0,90,180,270]{
+                for face in [Face::Top,Face::Bottom,Face::PosX,
+                    Face::NegX,Face::PosZ,Face::NegZ]{
+                    let permutation=uvlock_permutation(face,x,y).unwrap();
+                    let mut sorted=permutation;
+                    sorted.sort_unstable();
+                    assert_eq!(sorted,[0,1,2,3]);
+                }
+            }
+        }
+        assert_eq!(uvlock_permutation(Face::Top,0,0),Some([0,1,2,3]));
+        assert_ne!(uvlock_permutation(Face::Top,0,90),Some([0,1,2,3]));
+        let mut bank=ModelBank::default();
+        bank.insert("assets/test/blockstates/turn.json",
+            br#"{"variants":{"":{"model":"test:block/turn","y":90,"uvlock":true}}}"#).unwrap();
+        bank.insert("assets/test/models/block/turn.json",
+            br##"{"elements":[{"from":[0,0,0],"to":[16,16,16],
+                "faces":{"up":{"texture":"test:block/checker"}}}]}"##).unwrap();
+        let st=s("test:turn",&[]);
+        assert_eq!(bank.parts(&st).unwrap().len(),1);
+        assert_ne!(bank.element_face(&st,Face::Top,0).unwrap().uvlock,[0,1,2,3]);
     }
     #[test]fn json_cullface_is_optional_and_y_variant_rotates_world_direction(){
         let mut bank=ModelBank::default();
@@ -607,7 +662,7 @@ mod tests{
         let state=s("test:machine",&[]);
         assert_eq!(bank.element_face(&state,Face::NegZ,0),
             Some(FaceSpec{texture:"test:casing".into(),uv:[4.0,2.0,12.0,14.0],
-                rotation:90}));
+                rotation:90,uvlock:[0,1,2,3]}));
         assert_eq!(bank.element_face(&state,Face::Top,0).unwrap().texture,"test:top");
         assert!(bank.element_face(&state,Face::PosX,0).is_none());
         assert!(bank.element_face(&state,Face::NegZ,1).is_none());

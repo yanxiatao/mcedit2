@@ -51,6 +51,9 @@ impl Tile {
 /// 1-pixel duplicated gutter on all sides to prevent texture bleeding.
 #[derive(Clone,Debug,PartialEq)]
 pub(crate) struct AtlasUv{pub start:[f32;2],pub end:[f32;2]}
+fn orient_uv(corners:[[f32;2];4],permutation:[u8;4])->[[f32;2];4]{
+    permutation.map(|index|corners[index as usize])
+}
 impl AtlasUv{
     pub fn corners_for(&self,uv:[f32;4],rotation:u16)->[[f32;2];4]{
         let mut corners=[
@@ -332,14 +335,14 @@ impl TextureBank {
     pub fn atlas_face_style(&self,state:&State,face:crate::isometric::Face,
         element_index:usize)->Option<([[f32;2];4],AlphaMode)>{
         let id_spec=self.models.element_face(state,face,element_index);
-        let (id,uv,rot)=match id_spec{
+        let (id,uv,rot,perm)=match id_spec{
             Some(spec) if self.tiles.contains_key(&spec.texture)=>
-                (spec.texture,spec.uv,spec.rotation),
-            _=>(self.resolve_id(state,face)?,[0.0,0.0,16.0,16.0],0),
+                (spec.texture,spec.uv,spec.rotation,spec.uvlock),
+            _=>(self.resolve_id(state,face)?,[0.0,0.0,16.0,16.0],0,[0,1,2,3]),
         };
         let region=self.atlas.as_ref()?.entries.get(&id)?;
         let alpha=self.tiles.get(&id)?.alpha_mode();
-        Some((region.corners_for(uv,rot),alpha))
+        Some((orient_uv(region.corners_for(uv,rot),perm),alpha))
     }
     pub fn alpha_mode(&self,state:&State,face:crate::isometric::Face)->Option<AlphaMode>{
         self.resolve(state,face).map(Tile::alpha_mode)
@@ -348,7 +351,7 @@ impl TextureBank {
         element_index:usize)->Option<[[f32;2];4]>{
         if let Some(spec)=self.models.element_face(state,face,element_index){
             if let Some(region)=self.atlas.as_ref()?.entries.get(&spec.texture){
-                return Some(region.corners_for(spec.uv,spec.rotation));
+                return Some(orient_uv(region.corners_for(spec.uv,spec.rotation),spec.uvlock));
             }
         }
         self.atlas_uv(state,face).map(|r|r.corners_for([0.0,0.0,16.0,16.0],0))
@@ -470,6 +473,15 @@ mod tests {
         assert_eq!(alpha,AlphaMode::Cutout);
         let first=bank.atlas_uv(&state,Face::Top).unwrap();
         assert_eq!(uv[0],first.start);
+    }
+    #[test]fn uvlock_handles_corner_reflection_as_well_as_rotation(){
+        let slot=AtlasUv{start:[0.2,0.3],end:[0.4,0.5]};
+        let uv=slot.corners_for([4.0,0.0,12.0,16.0],0);
+        let mirrored=orient_uv(uv,[1,0,3,2]);
+        assert_eq!(mirrored[0],uv[1]);
+        assert_eq!(mirrored[1],uv[0]);
+        assert_eq!(mirrored[3],uv[2]);
+        assert!(mirrored.iter().flatten().all(|x|x.is_finite()));
     }
     #[test]fn per_face_uv_crop_and_rotation_stay_inside_atlas_slot(){
         let slot=AtlasUv{start:[0.2,0.3],end:[0.4,0.5]};

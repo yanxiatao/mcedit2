@@ -1042,3 +1042,17 @@ No user-requested CI run or app build has occurred for this feature;
 Rust compilation, GUI threading and actual GPU drawing remain unverified.
 Do not initiate CI until all 3D display migration is complete and the
 user explicitly requests the final consolidated check/test run.
+
+## Java blockstate UVLock texture-orientation parity (unvalidated)
+
+The JSON blockstate `uvlock:true` flag now computes a complete mapping
+from the four rotated source model-face vertices to the corresponding
+world-facing canonical texture corners. This remaps the atlas's UVs for all
+multiples of 90 degrees on both X and Y, including geometrically mirrored
+corner order: it does not use an incorrect rotation-only shortcut.
+Original model face UV crop and per-face rotation are applied before this
+corner permutation. The same atlas style is used by native wgpu rendering,
+Canvas fallback and alpha-tested original-block picking.
+
+This is a read-only rendering change. Do not execute CI, compile or
+package until the entire 3D display feature is complete.
