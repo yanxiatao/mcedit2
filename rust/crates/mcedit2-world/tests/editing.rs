@@ -1015,8 +1015,13 @@ fn bounded_isometric_voxel_surface_uses_original_height_and_overlay_without_worl
     let mut editor=Session::new(world.metadata(),"minecraft:overworld").unwrap();
     assert!(editor.inspect_surface(0,0,-64,-33,16,16).is_ok());
     assert!(editor.inspect_surface(0,0,-64,-17,16,16).is_ok());
+    // 64x64x48 is a read-only scene budget; the original world remains byte exact.
+    let wide=editor.inspect_surface(0,0,-64,-17,64,64).unwrap();
+    assert_eq!(wide.source_chunks,16);
+    assert!(wide.source_tiles.len()==16);
+    assert_eq!(wide.source_tiles.iter().map(|t|t.known_columns+t.unknown_columns).sum::<usize>(),4096);
     assert!(editor.inspect_surface(0,0,-64,-16,16,16).is_err());
-    assert!(editor.inspect_surface(0,0,-64,-17,33,16).is_err());
+    assert!(editor.inspect_surface(0,0,-64,-17,65,16).is_err());
     let view=editor.inspect_surface(0,0,-64,-63,2,2).unwrap();
     assert_eq!(view.voxels.len(),4);
     assert_eq!(view.missing_columns,0);

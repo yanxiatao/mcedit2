@@ -1005,3 +1005,40 @@ offset to f32 GPU coordinates. Tests cover opposite +/-30M border views.
 This is a display-only precision improvement; original BE/NBT, source
 coordinates, edit bounds, and disk save safeguards remain unchanged.
 CI, compilation and runtime visual verification have not been requested.
+
+## Progressive very long-distance terrain viewer (source-only, no CI)
+
+The near-field exact inspector now supports **64×64×48** cells, independently
+from its unchanged 4096-cell edit budget. The separate far-terrain
+viewer does **not** allocate all source blocks in a gigantic cube.
+
+- Distant presets are radii of 16, 32, 64, 128 and **256 original Java chunks**.
+  Radius 256 spans 8,208 blocks horizontally (4,096 blocks from center
+  to the edge). This exceeds typical Minecraft normal render distances.
+- A bounded camera-centric ring plan samples near chunks at full horizontal
+  block density, then samples only every 4/8/16 columns in progressively
+  sparser ORIGINAL source chunks. It includes outermost ring coordinates.
+  Maximum planner capacity is 20,000 sampled source chunks; no artificial
+  world generation, entity rendering, ticking or spawning.
+- Streaming reads 12 source chunk patches per asynchronous UI update,
+  builds an original-chunk status record and appends only known terrain
+  samples. Missing chunks/Sections are not invented; authenticated block
+  editing remains independent and never consumes approximate previews.
+- `SurfaceVoxel.span>1` is an explicit approximate LOD preview. The projected
+  X/Z tiles have the corresponding visual width, but mouse picking rejects
+  approximate spans. An exact `span=1` position still reports the ORIGINAL
+  source XYZ, and original BE data is never rewritten.
+- Normal modern world height samples -64..319; older original worlds
+  default to 0..255. The near-field inspection retains adjustable signed Y.
+  The far stream cancels stale generations when users move to another scene.
+- Large view projection uses camera-relative f64 then bounded f32 clip
+  coordinates. Chunk-grid debug outlines are restricted to 256 tiles per
+  frame at these radii. Face and GPU buffer budgets are still enforced.
+
+Important limitations: This is progressively sampled *terrain*, NOT
+Minecraft's exact full-detail 256-chunk simulation. Distant water and
+modded block geometry may be approximated, with far LOD never selectable.
+No user-requested CI run or app build has occurred for this feature;
+Rust compilation, GUI threading and actual GPU drawing remain unverified.
+Do not initiate CI until all 3D display migration is complete and the
+user explicitly requests the final consolidated check/test run.

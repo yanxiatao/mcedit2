@@ -17,7 +17,8 @@ use mcedit2_world::editing::{parse_bounds,parse_state,BeScalarPreview,Bounds,Bru
 use mcedit2_world::region_plan::NativeRegionCandidate;
 use mcedit2_world::clipboard::HorizontalTransform;
 use mcedit2_world::region_transaction::{apply_single_region,apply_authenticated_be_single_region,finalize_single_region,rollback_pending_region};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap,VecDeque};
+use mcedit2_world::far_view::{self,FarChunkRequest,FarChunkPatch};
 use std::path::PathBuf;
 use std::time::{SystemTime,UNIX_EPOCH};
 
@@ -76,13 +77,13 @@ fn parse_scene_window(input:&str)->Result<Bounds,String>{
         Bounds::new((v[0],v[1],v[2]),(v[0],v[1],v[2]))
             .map_err(|e|e.to_string())?;
     }
-    for (index,maximum_size) in [(0,32),(1,48),(2,32)]{
+    for (index,maximum_size) in [(0,64),(1,48),(2,64)]{
         if maximum[index] as i64-minimum[index] as i64+1>maximum_size{
-            return Err("3D view is limited to 32x32x48 known source cells".into());
+            return Err("3D view is limited to 64x64x48 source cells".into());
         }
     }
     // A display-only selection can exceed the unchanged 4096 edit limit.
-    // The strict read-only 49152-source-cell limit is enforced by the backend.
+    // The strict read-only 196608-source-cell limit is enforced by the backend.
     Ok(Bounds{minimum,maximum})
 }
 fn shifted_scene(input:&str,dx:i32,dy:i32,dz:i32)->Result<String,String>{
@@ -100,6 +101,10 @@ fn shifted_scene(input:&str,dx:i32,dy:i32,dz:i32)->Result<String,String>{
     Ok(text)
 }
 
+struct FarProgress{
+    nonce:u64,key:(usize,usize),center:(i32,i32),radius:u16,
+    remaining:VecDeque<FarChunkRequest>,total:usize,complete:usize,errors:usize,
+}
 #[derive(Default)]
 struct App{
     path:String,
@@ -128,6 +133,7 @@ struct App{
     corner_b:Option<(i32,i32,i32)>,
     surface_hover:Option<(i32,i32,i32)>,
     surface:Option<(usize,usize,SurfaceView)>,
+    far:Option<FarProgress>,far_nonce:u64,
     surface_report:String,
     slice_grid:Option<(usize,usize,Slice)>,
     vertical_grid:Option<(usize,usize,VerticalSlice)>,
@@ -177,6 +183,8 @@ enum Message{
     SurfaceArea(String),InspectSurface,InspectVolume,PickSurface(i32,i32,i32),RotateSurface,
     PickSurfaceFace(i32,i32,i32,Face),
     Shift3D(i32,i32,i32),Center3DOnPicked,ScenePreset(u8),
+    StartFarView(u16),ShiftFarView(i32,i32),
+    FarBatchLoaded(u64,Vec<Result<FarChunkPatch,String>>),
     Toggle3DFrame,Toggle3DAxes,Toggle3DChunkGrid,Toggle3DSections,
     Cut3DTop(i32),Reset3DCut,
     Set3DCornerA,Set3DCornerB,Use3DBox,Clear3DBox,
@@ -208,6 +216,7 @@ enum Message{
 }
 impl App{
     fn inspect_surface(&mut self,exposed_volume:bool){
+        self.far=None;
         self.surface_exposed=exposed_volume;
         if !exposed_volume{self.surface_cut_top=None;}
         self.surface=None;self.selected_surface=None;self.selected_surface_face=None;
@@ -220,8 +229,8 @@ impl App{
                 Ok(bounds)=>{
                     let w=bounds.maximum[0] as i64-bounds.minimum[0] as i64+1;
                     let depth=bounds.maximum[2] as i64-bounds.minimum[2] as i64+1;
-                    if w<=0 || w>32 || depth<=0 || depth>32{
-                        "Original 3D surface footprint must fit 32x32.".into()
+                    if w<=0 || w>64 || depth<=0 || depth>64{
+                        "Original 3D surface footprint must fit 64x64.".into()
                     }else{
                         let cut_top=self.surface_cut_top;
                         match self.current_session(key).and_then(|session|
@@ -313,8 +322,107 @@ impl App{
             Err(e)=>self.surface_report=format!("3D center refused: {e}"),
         }
     }
+    fn start_far_view(&mut self,radius:u16,requested:Option<(i32,i32)>)
+        ->iced::Task<Message>{
+        self.far=None;
+        self.far_nonce=self.far_nonce.wrapping_add(1);
+        self.surface=None;self.surface_cut_top=None;self.surface_hover=None;
+        self.selected_surface=None;self.selected_surface_face=None;
+        self.corner_a=None;self.corner_b=None;
+        let Some(key)=self.current_key() else{
+            self.surface_report="Select a Java world for distant terrain.".into();
+            return iced::Task::none();
+        };
+        let center=requested.or_else(||
+            parse_xyz(&self.query_coordinates).ok().map(|(x,_,z)|(x,z)))
+            .or_else(||parse_scene_window(&self.surface_area).ok().and_then(|v|{
+                let x=(v.minimum[0] as i64+v.maximum[0] as i64)/2;
+                let z=(v.minimum[2] as i64+v.maximum[2] as i64)/2;
+                Some((i32::try_from(x).ok()?,i32::try_from(z).ok()?))
+            })).unwrap_or((0,0));
+        let version=match self.current_session(key){
+            Ok(session)=>session.original_world().data_version,
+            Err(e)=>{self.surface_report=e;return iced::Task::none();}
+        };
+        let (y_min,y_max)=if version.is_some_and(|v|v>=2860){
+            (-64,319)
+        }else{(0,255)};
+        let plan=match far_view::plan_far_chunks(center.0,center.1,radius){
+            Ok(plan)=>plan,
+            Err(e)=>{self.surface_report=e.to_string();return iced::Task::none();}
+        };
+        let view=match far_view::empty_far_view(center.0,center.1,
+            y_min,y_max,radius){
+            Ok(view)=>view,
+            Err(e)=>{self.surface_report=e.to_string();return iced::Task::none();}
+        };
+        self.surface=Some((key.0,key.1,view));
+        self.surface_exposed=false;
+        self.surface_report=format!(
+            "Streaming original terrain within {radius} chunk radius, {} planned source tiles. No entities or source edits.",
+            plan.len());
+        self.far=Some(FarProgress{nonce:self.far_nonce,key,center,radius,
+            total:plan.len(),complete:0,errors:0,
+            remaining:plan.into_iter().collect()});
+        self.next_far_batch()
+    }
+    fn next_far_batch(&mut self)->iced::Task<Message>{
+        let Some(progress)=self.far.as_mut() else{
+            return iced::Task::none();
+        };
+        if progress.remaining.is_empty(){return iced::Task::none();}
+        let take=progress.remaining.len().min(far_view::FAR_BATCH_CHUNKS);
+        let requests:Vec<_>=progress.remaining.drain(..take).collect();
+        let (nonce,key)=(progress.nonce,progress.key);
+        let (min_y,max_y)=match self.surface.as_ref(){
+            Some((wi,di,view))if(*wi,*di)==key=>(view.y_min,view.y_max),
+            _=>return iced::Task::none(),
+        };
+        let session=match self.current_session(key){
+            Ok(s)=>s.clone(),
+            Err(e)=>{
+                self.surface_report=e;self.far=None;return iced::Task::none();
+            }
+        };
+        iced::Task::perform(async move {
+            requests.into_iter().map(|req|
+                far_view::inspect_far_chunk(&session,req,min_y,max_y)
+                    .map_err(|e|format!("chunk {},{}: {e}",req.cx,req.cz))
+            ).collect::<Vec<_>>()
+        },move |results|Message::FarBatchLoaded(nonce,results))
+    }
+    fn finish_far_batch(&mut self,nonce:u64,
+        results:Vec<Result<FarChunkPatch,String>>)->iced::Task<Message>{
+        let current=self.current_key();
+        let Some(progress)=self.far.as_mut()else{
+            return iced::Task::none();
+        };
+        if progress.nonce!=nonce||current!=Some(progress.key){
+            return iced::Task::none();
+        }
+        let Some((wi,di,view))=self.surface.as_mut()else{
+            return iced::Task::none();
+        };
+        if (*wi,*di)!=progress.key{return iced::Task::none();}
+        for result in results{
+            progress.complete+=1;
+            match result{
+                Ok(patch)=>far_view::append_chunk(view,patch),
+                Err(e)=>{
+                    progress.errors+=1;
+                    if progress.errors<=3{
+                        self.surface_report=format!("Distant source warning: {e}");
+                    }
+                }
+            }
+        }
+        self.surface_report=format!(
+            "Far terrain: {}/{} chunk tiles, {} source errors, radius {} chunks. Distant LOD is never an editable block.",
+            progress.complete,progress.total,progress.errors,progress.radius);
+        self.next_far_batch()
+    }
     fn scene_preset(&mut self,side:u8){
-        if side!=16&&side!=32{return;}
+        if !matches!(side,16|32|64){return;}
         let current=match parse_scene_window(&self.surface_area){
             Ok(bounds)=>bounds,
             Err(e)=>{self.surface_report=format!("Cannot resize viewport: {e}");return;}
@@ -327,7 +435,7 @@ impl App{
             (Some(x),Some(z))=>(x,z),
             _=>{self.surface_report="Viewport coordinate overflow".into();return;}
         };
-        let height=if side==32{48}else{32};
+        let height=if side>=32{48}else{32};
         let Some(y1)=min[1].checked_add(height-1)else{
             self.surface_report="Viewport Y overflow".into();return;
         };
@@ -906,7 +1014,7 @@ impl App{
         if succeeded&&displayed{self.inspect_surface(self.surface_exposed);}
     }
 }
-fn update(app:&mut App,message:Message){
+fn update(app:&mut App,message:Message)->iced::Task<Message>{
     match message{
         Message::Path(x)=>app.path=x,
         Message::TexturePath(x)=>app.texture_path=x,
@@ -930,12 +1038,26 @@ fn update(app:&mut App,message:Message){
                 Err(e)=>app.texture_report=format!("Resource pack refused (previous assets retained): {e}"),
             }
         },
-        Message::SurfaceArea(value)=>{app.surface_area=value;app.surface=None;app.surface_cut_top=None;},
+        Message::SurfaceArea(value)=>{app.surface_area=value;app.surface=None;app.far=None;app.surface_cut_top=None;},
         Message::InspectSurface=>app.inspect_surface(false),
         Message::InspectVolume=>app.inspect_surface(true),
         Message::Shift3D(x,y,z)=>app.shift_3d(x,y,z),
         Message::Center3DOnPicked=>app.center_3d(),
         Message::ScenePreset(side)=>app.scene_preset(side),
+        Message::StartFarView(radius)=>return app.start_far_view(radius,None),
+        Message::ShiftFarView(dx,dz)=>{
+            let Some(far)=app.far.as_ref()else{return iced::Task::none()};
+            let (radius,(x,z))=(far.radius,far.center);
+            let Some(nx)=x.checked_add(dx.saturating_mul(16))else{
+                return iced::Task::none();
+            };
+            let Some(nz)=z.checked_add(dz.saturating_mul(16))else{
+                return iced::Task::none();
+            };
+            return app.start_far_view(radius,Some((nx,nz)));
+        },
+        Message::FarBatchLoaded(nonce,patches)=>
+            return app.finish_far_batch(nonce,patches),
         Message::Toggle3DFrame=>app.surface_frame=!app.surface_frame,
         Message::Toggle3DAxes=>app.surface_axes=!app.surface_axes,
         Message::Toggle3DChunkGrid=>app.surface_chunk_grid=!app.surface_chunk_grid,
@@ -1676,7 +1798,7 @@ fn update(app:&mut App,message:Message){
         Message::Clear=>{
             app.be_save_phrase.clear();
             app.be_prepared=None;
-            app.surface=None;
+            app.surface=None;app.far=None;
             app.save_preview=None;
             app.slice_grid=None;
             app.vertical_grid=None;
@@ -1689,6 +1811,7 @@ fn update(app:&mut App,message:Message){
             app.block_result.clear();app.slice_result.clear();app.messages.clear();
         }
     }
+    iced::Task::none()
 }
 fn view(app:&App)->Element<'_,Message>{
     let controls=row![
@@ -1761,7 +1884,7 @@ fn view(app:&App)->Element<'_,Message>{
         ].spacing(7));
         if !app.texture_report.is_empty(){body=body.push(text(&app.texture_report));}
         body=body.push(row![
-            text_input("Read-only 3D XYZ window (max 32x32x48; edit limit stays 4096)",
+            text_input("Read-only 3D XYZ window (max 64x64x48; edit limit stays 4096)",
                 &app.surface_area).on_input(Message::SurfaceArea).width(Length::Fill),
             button("Top-surface 3D").on_press(Message::InspectSurface),
             button("Exposed multi-layer 3D").on_press(Message::InspectVolume)
@@ -1769,8 +1892,29 @@ fn view(app:&App)->Element<'_,Message>{
         body=body.push(row![
             button("16×16×32 inspect").on_press(Message::ScenePreset(16)),
             button("32×32×48 inspect").on_press(Message::ScenePreset(32)),
-            text("Read-only cross-chunk view; no new editing permissions.")
+            button("64×64×48 inspect").on_press(Message::ScenePreset(64)),
+            text("Exact near-field preview; edit limit remains 4096.")
         ].spacing(8));
+        body=body.push(row![
+            text("Progressive distant terrain:"),
+            button("16 chunks").on_press(Message::StartFarView(16)),
+            button("32 chunks").on_press(Message::StartFarView(32)),
+            button("64 chunks").on_press(Message::StartFarView(64)),
+            button("128 chunks").on_press(Message::StartFarView(128)),
+            button("256 chunks").on_press(Message::StartFarView(256)),
+        ].spacing(6));
+        if let Some(far)=app.far.as_ref(){
+            if app.current_key()==Some(far.key){
+                body=body.push(row![
+                    text(format!("Far preview {}/{} tiles, errors {}. LOD tiles are non-editable.",
+                        far.complete,far.total,far.errors)),
+                    button("Far X -16 chunks").on_press(Message::ShiftFarView(-16,0)),
+                    button("Far X +16 chunks").on_press(Message::ShiftFarView(16,0)),
+                    button("Far Z -16 chunks").on_press(Message::ShiftFarView(0,-16)),
+                    button("Far Z +16 chunks").on_press(Message::ShiftFarView(0,16)),
+                ].spacing(6));
+            }
+        }
         body=body.push(row![
             button("X -16").on_press(Message::Shift3D(-16,0,0)),
             button("X +16").on_press(Message::Shift3D(16,0,0)),
@@ -2203,9 +2347,9 @@ mod tests{
         assert_eq!(a.volume().unwrap(),8192);
         assert_eq!(shifted_scene("0,-64,0;15,-33,15",-16,0,-16).unwrap(),
             "-16,-64,-16;-1,-33,-1");
-        assert_eq!(parse_scene_window("0,-64,0;31,-17,31").unwrap()
-            .volume().unwrap(),49_152);
-        assert!(parse_scene_window("0,-64,0;32,-33,15").is_err());
+        assert_eq!(parse_scene_window("0,-64,0;63,-17,63").unwrap()
+            .volume().unwrap(),196_608);
+        assert!(parse_scene_window("0,-64,0;64,-33,15").is_err());
         assert!(parse_scene_window("0,-64,0;15,-16,15").is_err());
         assert!(shifted_scene("29999980,0,0;29999995,15,15",16,0,0).is_err());
         assert_eq!(shifted_scene("-32,-64,-32;-1,-17,-1",16,0,16).unwrap(),

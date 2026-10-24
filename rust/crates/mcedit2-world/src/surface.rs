@@ -18,7 +18,7 @@ pub const FACE_NEG_Z:u8=32;
 pub const ALL_FACES:u8=63;
 /// Strict bounds for read-only 3D viewing. The editing batch limit remains
 /// unchanged: a larger scene is NOT a larger writable transaction.
-pub const MAX_VIEW_XZ:u8=32;
+pub const MAX_VIEW_XZ:u8=64;
 pub const MAX_VIEW_Y:i64=48;
 pub const MAX_VIEW_CELLS:u64=MAX_VIEW_XZ as u64*MAX_VIEW_XZ as u64*MAX_VIEW_Y as u64;
 fn validate_view(width:u8,depth:u8,y_min:i32,y_max:i32)->Result<(),WorldError>{
@@ -26,7 +26,7 @@ fn validate_view(width:u8,depth:u8,y_min:i32,y_max:i32)->Result<(),WorldError>{
     if width==0||width>MAX_VIEW_XZ||depth==0||depth>MAX_VIEW_XZ
         ||height<1||height>MAX_VIEW_Y
         ||width as u64*depth as u64*height as u64>MAX_VIEW_CELLS {
-        return Err(refuse("Read-only 3D scene exceeds 32x32x48 / 49152 source cells"));
+        return Err(refuse("Read-only 3D scene exceeds 64x64x48 / 196608 source cells"));
     }
     Ok(())
 }
@@ -76,6 +76,9 @@ pub struct SurfaceVoxel {
     /// Visual metadata only; has no effect on source NBT or editing.
     pub kind:VoxelMaterial,
     pub staged:bool,
+    /// Original X/Z cells represented by this sample (1 is exact).
+    /// Spans >1 are approximate and must never be treated as editable blocks.
+    pub span:u8,
 }
 /// One actual X/Z source chunk touched during the read-only scene pass.
 /// Missing chunks are never synthesized. Unknown Sections/columns remain
@@ -91,7 +94,7 @@ pub struct SourceChunkTile{
 pub struct SurfaceView {
     pub x:i32,pub z:i32,
     pub y_min:i32,pub y_max:i32,
-    pub width:u8,pub depth:u8,
+    pub width:u16,pub depth:u16,
     pub voxels:Vec<SurfaceVoxel>,
     pub missing_columns:usize,
     pub source_chunks:usize,
@@ -130,7 +133,7 @@ fn is_air(state:&State)->bool{
         "numeric:0")
 }
 /// Render a true-height voxel column surface from the current in-memory
-/// overlay. Bounded to 32x32 footprint by 48 Y levels (49152 reads).
+/// overlay. Bounded to 64x64 footprint by 48 Y levels (196608 reads).
 /// Each original chunk is decoded at most once within a request. No
 /// generation or disk write, and the editor's 4096-block write limit stays.
 pub fn inspect_surface(
@@ -143,7 +146,7 @@ pub fn inspect_surface(
     let far_z=z.checked_add(depth as i32-1)
         .ok_or_else(||refuse("Surface Z overflow"))?;
     // Bounds::new enforces the EDIT batch's 4096-cell limit. Read-only
-    // inspection can scan 49152 cells, so validate extrema individually.
+    // inspection can scan 196608 cells, so validate extrema individually.
     let _=crate::editing::Bounds::new((x,y_min,z),(x,y_min,z))?;
     let _=crate::editing::Bounds::new((far_x,y_max,far_z),(far_x,y_max,far_z))?;
     let mut cache:BTreeMap<(i32,i32),Option<Chunk>>=BTreeMap::new();
@@ -177,7 +180,7 @@ pub fn inspect_surface(
                 let voxel=SurfaceVoxel{
                     x:wx,y,z:wz,state,
                     original_block_entity:chunk.has_block_entity(wx,y,wz),
-                    faces:ALL_FACES,kind,staged:session.is_staged_block((wx,y,wz)),
+                    faces:ALL_FACES,kind,staged:session.is_staged_block((wx,y,wz)),span:1,
                 };
                 if fallback.is_none(){fallback=Some(voxel.clone());}
                 if !is_air(&voxel.state){
@@ -198,7 +201,7 @@ pub fn inspect_surface(
         }
     }
     Ok(SurfaceView{
-        x,z,y_min,y_max,width,depth,voxels,missing_columns,
+        x,z,y_min,y_max,width:width as u16,depth:depth as u16,voxels,missing_columns,
         source_chunks:cache.len(),source_tiles:tiles.into_values().collect(),
     })
 }
@@ -262,7 +265,7 @@ pub fn inspect_exposed_volume_cutaway(
                     solids.push(SurfaceVoxel{
                         x:wx,y,z:wz,state,
                         original_block_entity:chunk.has_block_entity(wx,y,wz),
-                        faces:0,kind,staged:session.is_staged_block((wx,y,wz)),
+                        faces:0,kind,staged:session.is_staged_block((wx,y,wz)),span:1,
                     });
                 }
             }
@@ -296,7 +299,7 @@ pub fn inspect_exposed_volume_cutaway(
         }
     }
     Ok(SurfaceView{
-        x,z,y_min,y_max,width,depth,voxels,missing_columns,
+        x,z,y_min,y_max,width:width as u16,depth:depth as u16,voxels,missing_columns,
         source_chunks:chunks.len(),source_tiles:tiles.into_values().collect(),
     })
 }
@@ -340,10 +343,10 @@ mod tests {
     }
     #[test]
     fn scene_budget_allows_3x3_chunks_but_never_unbounded_source_reads(){
-        assert_eq!(MAX_VIEW_CELLS,49_152);
-        assert!(validate_view(32,32,-64,-17).is_ok());
-        assert!(validate_view(32,32,-64,-16).is_err());
-        assert!(validate_view(33,1,-64,-64).is_err());
+        assert_eq!(MAX_VIEW_CELLS,196_608);
+        assert!(validate_view(64,64,-64,-17).is_ok());
+        assert!(validate_view(64,64,-64,-16).is_err());
+        assert!(validate_view(65,1,-64,-64).is_err());
         assert!(validate_view(0,1,0,0).is_err());
         assert!(validate_view(1,1,i32::MIN,i32::MAX).is_err());
         assert!(validate_view(1,1,-384,-337).is_ok());
@@ -359,7 +362,7 @@ mod tests {
                 x:0,y:-64,z:0,
                 state:State{name:"minecraft:glass".into(),properties:vec![]},
                 original_block_entity:true,faces:FACE_TOP|FACE_POS_X,
-                kind:VoxelMaterial::Transparent,staged:true,
+                kind:VoxelMaterial::Transparent,staged:true,span:1,
             }],
         };
         let stats=view.statistics();

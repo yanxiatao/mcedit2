@@ -74,7 +74,7 @@ impl Face {
             Self::PosZ=>FACE_POS_Z,Self::NegZ=>FACE_NEG_Z,
         }
     }
-    fn corners(self)->[[f32;3];4]{
+    pub(crate) fn corners(self)->[[f32;3];4]{
         match self{
             Self::Top=>[[-0.5,0.5,-0.5],[0.5,0.5,-0.5],
                         [0.5,0.5,0.5],[-0.5,0.5,0.5]],
@@ -309,9 +309,14 @@ impl IsometricSurface{
     fn scale(&self,size:Size)->f32{
         let depth=(self.surface.y_max as i64-self.surface.y_min as i64+1) as f32;
         let footprint=self.surface.width as f32+self.surface.depth as f32;
-        (size.width/(footprint+3.0)*0.95)
-            .min(size.height/(depth+footprint*0.65+3.0)*1.25)
-            .clamp(3.0,24.0)*self.zoom.clamp(0.5,3.0)
+        let natural=(size.width/(footprint+3.0)*0.95)
+            .min(size.height/(depth+footprint*0.65+3.0)*1.25);
+        // Huge distant terrain views must FIT instead of forcing at least
+        // three pixels per original block beyond the horizon.
+        let minimum=if self.surface.width>64||self.surface.depth>64{
+            0.01
+        }else{3.0};
+        natural.clamp(minimum,24.0)*self.zoom.clamp(0.5,3.0)
     }
     /// Subtract the source viewport origin in f64 before converting to
     /// f32 for the GPU. At Java's +/-30,000,000 world border, absolute
@@ -392,7 +397,8 @@ impl IsometricSurface{
         // Distinguish exact missing chunk tiles from merely empty or
         // unknown-section tiles without inventing rendered blocks.
         if self.show_chunk_grid{
-            for tile in &self.surface.source_tiles{
+            for tile in self.surface.source_tiles.iter().take(
+                if self.surface.width>64{256}else{usize::MAX}){
                 let tile_min_x=tile.chunk_x*16;
                 let tile_min_z=tile.chunk_z*16;
                 let x0=tile_min_x.max(x0) as f64-0.5;
@@ -479,25 +485,34 @@ impl IsometricSurface{
         for (voxel_index,voxel) in self.surface.voxels.iter().enumerate(){
             let base=material_color(voxel);
             let key=(voxel.state.name.clone(),voxel.state.properties.clone());
-            let boxes=shape_cache.entry(key.clone()).or_insert_with(||{
-                self.texture_bank.as_ref().and_then(|bank|bank.geometry(&voxel.state))
-                    .unwrap_or_else(||models::boxes(&voxel.state)
-                        .into_iter().map(models::Part::cube).collect())
-            });
+            // Distant spans are sampled terrain tiles, not exact JSON
+            // model instances: use one covering plane rather than inventing
+            // detailed model geometry for unsampled neighboring positions.
+            let distant=[models::Part::cube(models::Box3::FULL)];
+            let boxes:&[models::Part]=if voxel.span>1{&distant}else{
+                shape_cache.entry(key.clone()).or_insert_with(||{
+                    self.texture_bank.as_ref().and_then(|bank|
+                        bank.geometry(&voxel.state))
+                        .unwrap_or_else(||models::boxes(&voxel.state)
+                            .into_iter().map(models::Part::cube).collect())
+                }).as_slice()
+            };
             for (index,element) in boxes.iter().enumerate(){
               for face in [Face::Top,Face::Bottom,Face::PosX,Face::NegX,Face::PosZ,Face::NegZ]{
                 // Reuse exact JSON metadata across thousands of voxels with
                 // the same original state and model element.
-                let descriptor=*json_face_cache.entry((key.clone(),index,face.flag()))
-                    .or_insert_with(||{
-                        let defined=self.texture_bank.as_ref().and_then(|bank|
-                            bank.face_defined(&voxel.state,face,index));
-                        let cull=self.texture_bank.as_ref().and_then(|bank|
-                            bank.face_cull_direction(&voxel.state,face,index));
-                        let unshaded=self.texture_bank.as_ref().and_then(|bank|
-                            bank.element_unshaded(&voxel.state,index))==Some(true);
-                        (defined,cull,unshaded)
-                    });
+                let descriptor=if voxel.span>1{(None,None,false)}else{
+                    *json_face_cache.entry((key.clone(),index,face.flag()))
+                        .or_insert_with(||{
+                            let defined=self.texture_bank.as_ref().and_then(|bank|
+                                bank.face_defined(&voxel.state,face,index));
+                            let cull=self.texture_bank.as_ref().and_then(|bank|
+                                bank.face_cull_direction(&voxel.state,face,index));
+                            let unshaded=self.texture_bank.as_ref().and_then(|bank|
+                                bank.element_unshaded(&voxel.state,index))==Some(true);
+                            (defined,cull,unshaded)
+                        })
+                };
                 if descriptor.0==Some(false){continue;}
                 let normal=element.normal(face.normal());
                 let looking=[yaw.sin()*pitch.cos(),pitch.sin(),yaw.cos()*pitch.cos()];
@@ -524,9 +539,11 @@ impl IsometricSurface{
                 // center: the latter differs for angled/sloped elements.
                 let projected=element.face_vertices(face.corners()).map(|local|
                     self.project([
-                        voxel.x as f64+local[0] as f64,
+                        voxel.x as f64+(voxel.span as f64-1.0)*0.5
+                            +local[0] as f64*voxel.span as f64,
                         voxel.y as f64+local[1] as f64,
-                        voxel.z as f64+local[2] as f64
+                        voxel.z as f64+(voxel.span as f64-1.0)*0.5
+                            +local[2] as f64*voxel.span as f64
                     ],size)
                 );
                 let corners=projected.map(|(point,_)|point);
@@ -580,6 +597,11 @@ impl IsometricSurface{
         // Stable tie handling preserves the previous far->near ordering.
         self.faces_cached(size).iter().enumerate()
             .filter_map(|(i,face)|{
+                // An aggregated LOD tile is NOT one authenticated source
+                // voxel. Never let it populate the editor selection.
+                if self.surface.voxels[face.voxel_index].span>1{
+                    return None;
+                }
                 let depth=depth_at_cursor(p,face)?;
                 if self.show_textures{
                     if let Some(bank)=&self.texture_bank{
@@ -751,7 +773,7 @@ mod tests{
                     x:2,y:-63,z:3,
                     state:State{name:"minecraft:stone".into(),properties:vec![]},
                     original_block_entity:false,faces:FACE_TOP|FACE_POS_X|FACE_POS_Z,
-                    kind:VoxelMaterial::Solid,staged:false,
+                    kind:VoxelMaterial::Solid,staged:false,span:1,
                 }],
                 missing_columns:0,source_chunks:1,
                 source_tiles:vec![mcedit2_world::surface::SourceChunkTile{
@@ -820,6 +842,13 @@ mod tests{
         let different=cloned_for_canvas.faces_cached(Size::new(801.0,440.0));
         assert!(!Arc::ptr_eq(&a,&different));
         assert_eq!(different.len(),view.faces(Size::new(801.0,440.0)).len());
+    }
+    #[test]
+    fn distant_scene_fits_horizon_without_3px_minimum_scale(){
+        let mut view=example();
+        view.surface.width=8208;
+        view.surface.depth=8208;
+        assert!(view.scale(Size::new(1000.0,650.0))<1.0);
     }
     #[test]
     fn camera_relative_projection_preserves_neighboring_blocks_at_world_border(){
