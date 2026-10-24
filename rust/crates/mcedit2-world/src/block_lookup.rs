@@ -67,7 +67,7 @@ pub fn read_world_chunk_bytes(world:&WorldSummary,dimension:&str,cx:i32,cz:i32)
         return Err(invalid("Region file symlinks are not followed"));
     }
     let index=RegionIndex::open(&path)?;
-    index.read_chunk(cx.rem_euclid(32) as u8,cz.rem_euclid(32) as u8)
+    index.read_chunk_at(cx,cz)
 }
 
 /// Decode a source chunk and verify its storage coordinates and all Block
@@ -137,8 +137,7 @@ impl<'a> ReadOnlyRegionCache<'a>{
             self.regions.insert(key,region);
         }
         let raw=match self.regions.get(&key).and_then(Option::as_ref){
-            Some(region)=>region.read_chunk(cx.rem_euclid(32) as u8,
-                cz.rem_euclid(32) as u8)?,
+            Some(region)=>region.read_chunk_at(cx,cz)?,
             None=>None,
         };
         checked_original_chunk(raw,cx,cz)

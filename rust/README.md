@@ -1180,3 +1180,15 @@ rather than generating one independent mesh for every source voxel.
 Weighted counts and array size are bounded, and invalid metadata safely
 falls back to the existing conservative display. Entity and disk world
 operations remain excluded. This work is pending one final CI gate.
+
+## Read-only oversized Java chunk sidecars (.mcc)
+
+The native original-world reader now supports the vanilla external-stream
+flag and neighboring `c.X.Z.mcc` files for GZip, zlib and uncompressed NBT.
+An exact owning Region and original absolute chunk position are mandatory;
+symlink and non-regular sidecars are refused. Compressed input is limited
+to 32 MiB and expanded NBT to 64 MiB. An absent or malformed sidecar is
+never treated as air. The existing on-disk Region preflight still refuses
+saving external chunks; read support does not imply write support. LZ4 and
+custom compression remain unsupported. No CI, compilation or packaging was
+requested or run for this change.
