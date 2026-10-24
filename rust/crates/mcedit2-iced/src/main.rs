@@ -26,6 +26,53 @@ use std::time::{SystemTime,UNIX_EPOCH};
 
 /// Snapshot of the exact single-Region image explicitly approved in the UI.
 /// No file is ever changed merely by generating this preview.
+/// Snapshot-only read dispatch: the iced thread must never block on
+/// decoding original chunks, and results must not cross a world/dimension
+/// switch, a newer request, or an in-memory edit.
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+enum NearMode{Surface,Volume,Horizontal,Vertical}
+struct NearJob{
+    nonce:u64,key:(usize,usize),mode:NearMode,bounds:Bounds,
+    cut:Option<i32>,source:Session,
+}
+#[derive(Debug,Clone)]
+enum NearResult{
+    Surface(Result<SurfaceView,String>),
+    Horizontal(Result<Slice,String>),
+    Vertical(Result<VerticalSlice,String>),
+    WorkerStopped,
+}
+fn dispatch_near(job:NearJob)->iced::Task<Message>{
+    iced::Task::perform(async move {
+        let (nonce,key)=(job.nonce,job.key);
+        let (sender,receiver)=iced::futures::channel::oneshot::channel();
+        std::thread::spawn(move ||{
+            let b=job.bounds;
+            let result=match job.mode{
+                NearMode::Surface|NearMode::Volume=>{
+                    let width=(b.maximum[0] as i64-b.minimum[0] as i64+1) as u8;
+                    let depth=(b.maximum[2] as i64-b.minimum[2] as i64+1) as u8;
+                    let read=if job.mode==NearMode::Volume{
+                        mcedit2_world::surface::inspect_exposed_volume_cutaway(
+                            &job.source,b.minimum[0],b.minimum[2],
+                            b.minimum[1],b.maximum[1],width,depth,job.cut)
+                    }else{
+                        job.source.inspect_surface(b.minimum[0],b.minimum[2],
+                            b.minimum[1],b.maximum[1],width,depth)
+                    };
+                    NearResult::Surface(read.map_err(|e|e.to_string()))
+                }
+                NearMode::Horizontal=>NearResult::Horizontal(
+                    job.source.inspect_slice(b).map_err(|e|e.to_string())),
+                NearMode::Vertical=>NearResult::Vertical(
+                    job.source.inspect_vertical_slice(b).map_err(|e|e.to_string())),
+            };
+            let _=sender.send(result);
+        });
+        (nonce,key,receiver.await.unwrap_or(NearResult::WorkerStopped))
+    },|(nonce,key,result)|Message::NearLoaded(nonce,key,result))
+}
+
 struct SaveIntent {
     key:(usize,usize),
     timestamp:u32,
@@ -185,6 +232,9 @@ struct App{
     surface_hover:Option<(i32,i32,i32)>,
     surface:Option<(usize,usize,std::sync::Arc<SurfaceView>)>,
     far:Option<FarProgress>,far_nonce:u64,
+    near_nonce:u64,
+    near_job:Option<NearJob>,
+    near_busy:bool,
     surface_report:String,
     slice_grid:Option<(usize,usize,Slice)>,
     vertical_grid:Option<(usize,usize,VerticalSlice)>,
@@ -237,6 +287,7 @@ enum Message{
     Shift3D(i32,i32,i32),Center3DOnPicked,ScenePreset(u8),
     StartFarView(u16),ShiftFarView(i32,i32),
     FarBatchLoaded(u64,Vec<(FarChunkRequest,Result<FarChunkPatch,String>)>),
+    NearLoaded(u64,(usize,usize),NearResult),
     Toggle3DFrame,Toggle3DAxes,Toggle3DChunkGrid,Toggle3DSections,
     Cut3DTop(i32),Reset3DCut,
     Set3DCornerA,Set3DCornerB,Use3DBox,Clear3DBox,
@@ -280,51 +331,106 @@ impl App{
             show_textures:self.show_textures,
         }
     }
+    fn invalidate_near(&mut self){
+        self.near_nonce=self.near_nonce.wrapping_add(1);
+        self.near_job=None;
+    }
+    fn enqueue_near(&mut self,key:(usize,usize),mode:NearMode,
+        bounds:Bounds,cut:Option<i32>)->Result<(),String>{
+        let source=self.current_session(key)?.clone();
+        self.near_nonce=self.near_nonce.wrapping_add(1);
+        self.near_job=Some(NearJob{
+            nonce:self.near_nonce,key,mode,bounds,cut,source,
+        });
+        Ok(())
+    }
     fn inspect_surface(&mut self,exposed_volume:bool){
+        self.invalidate_near();
         self.far=None;
         self.surface_exposed=exposed_volume;
         if !exposed_volume{self.surface_cut_top=None;}
-        self.surface=None;self.selected_surface=None;self.selected_surface_face=None;
-        self.surface_hover=None;
-        self.corner_a=None;self.corner_b=None;
+        self.surface=None;
+        self.selected_surface=None;self.selected_surface_face=None;
+        self.surface_hover=None;self.corner_a=None;self.corner_b=None;
         self.surface_report=match self.current_key(){
             None=>"Select a Java world first.".into(),
             Some(key)=>match parse_scene_window(&self.surface_area){
-                Err(e)=>format!("Invalid 3D surface bounds: {e}"),
+                Err(e)=>format!("Invalid 3D source bounds: {e}"),
                 Ok(bounds)=>{
-                    let w=bounds.maximum[0] as i64-bounds.minimum[0] as i64+1;
+                    let width=bounds.maximum[0] as i64-bounds.minimum[0] as i64+1;
                     let depth=bounds.maximum[2] as i64-bounds.minimum[2] as i64+1;
-                    if w<=0 || w>64 || depth<=0 || depth>64{
-                        "Original 3D surface footprint must fit 64x64.".into()
+                    if !(1..=64).contains(&width)||!(1..=64).contains(&depth){
+                        "3D source footprint must fit 64x64.".into()
                     }else{
-                        let cut_top=self.surface_cut_top;
-                        match self.current_session(key).and_then(|session|
-                            (if exposed_volume{
-                                mcedit2_world::surface::inspect_exposed_volume_cutaway(
-                                    session,bounds.minimum[0],bounds.minimum[2],
-                                    bounds.minimum[1],bounds.maximum[1],
-                                    w as u8,depth as u8,cut_top)
-                            }else{
-                                session.inspect_surface(
-                                    bounds.minimum[0],bounds.minimum[2],
-                                    bounds.minimum[1],bounds.maximum[1],
-                                    w as u8,depth as u8)
-                            }).map_err(|e|e.to_string())){
-                            Ok(result)=>{
-                                let message=format!(
-                                    "Read-only 3D {}: {} visible voxels, {} missing source columns across {} real chunks. Picked block still obeys the independent 4096-cell edit budget; viewport cuts are not inferred air.",
-                                    if exposed_volume{"exposed multilayer volume"}else{"highest-column surface"},
-                                    result.voxels.len(),result.missing_columns,result.source_chunks
-                                );
-                                self.surface=Some((key.0,key.1,std::sync::Arc::new(result)));
-                                message
-                            },
-                            Err(e)=>format!("3D surface refused: {e}"),
+                        let mode=if exposed_volume{NearMode::Volume}
+                            else{NearMode::Surface};
+                        match self.enqueue_near(key,mode,bounds,self.surface_cut_top){
+                            Ok(())=>format!(
+                                "Loading original 3D {} in a read-only worker; UI remains responsive.",
+                                if exposed_volume{"exposed volume"}else{"top surface"}),
+                            Err(e)=>format!("3D source refused: {e}"),
                         }
                     }
                 }
             }
         };
+    }
+    fn near_loaded(&mut self,nonce:u64,key:(usize,usize),result:NearResult){
+        // Exactly one reader runs at a time, including when its result is
+        // obsolete. Release the slot before the nonce/identity check, so the
+        // newest queued request can start even after a stale completion.
+        self.near_busy=false;
+        // An earlier worker may finish after another world, region view,
+        // staging operation or changed input. Its data must never publish.
+        if nonce!=self.near_nonce||self.current_key()!=Some(key){return;}
+        match result{
+            NearResult::Surface(result)=>{
+                self.surface_report=match result{
+                    Ok(scene)=>{
+                        let report=format!(
+                            "Read-only 3D: {} original-visible voxels, {} unknown columns, {} source chunks; edit limit remains 4096.",
+                            scene.voxels.len(),scene.missing_columns,scene.source_chunks);
+                        self.surface=Some((key.0,key.1,std::sync::Arc::new(scene)));
+                        report
+                    }
+                    Err(e)=>format!("3D source read refused: {e}"),
+                };
+            }
+            NearResult::Horizontal(result)=>{
+                self.slice_result=match result{
+                    Ok(slice)=>{
+                        let width=slice.rows.first().map_or(0,Vec::len);
+                        let height=slice.rows.len();
+                        let legend=if width<=16&&height<=16{
+                            format!("\n{}",slice.text_map())
+                        }else{String::new()};
+                        self.slice_grid=Some((key.0,key.1,slice));
+                        format!(
+                            "Interactive {width}x{height} original 2D map. Gray=air, purple=missing chunk, amber=missing Section, gold=BE.{legend}")
+                    }
+                    Err(e)=>format!("Horizontal source read refused: {e}"),
+                };
+            }
+            NearResult::Vertical(result)=>{
+                self.vertical_report=match result{
+                    Ok(slice)=>{
+                        let width=slice.rows.first().map_or(0,Vec::len);
+                        let height=slice.rows.len();
+                        let legend=if width<=16&&height<=16{
+                            format!("\n{}",slice.text_map())
+                        }else{String::new()};
+                        self.vertical_grid=Some((key.0,key.1,slice));
+                        format!("Interactive {width}x{height} vertical source map. Highest Y first; unknown source cells are not editable.{legend}")
+                    }
+                    Err(e)=>format!("Vertical source read refused: {e}"),
+                };
+            }
+            NearResult::WorkerStopped=>{
+                self.surface_report="Background source read worker stopped; no partial data accepted.".into();
+                self.slice_result=self.surface_report.clone();
+                self.vertical_report=self.surface_report.clone();
+            }
+        }
     }
     fn selection_box(&self)->Option<Bounds>{
         let a=self.corner_a?;let b=self.corner_b?;
@@ -389,6 +495,7 @@ impl App{
     }
     fn start_far_view(&mut self,radius:u16,requested:Option<(i32,i32)>)
         ->iced::Task<Message>{
+        self.invalidate_near();
         let previous=self.far.take();
         self.far_nonce=self.far_nonce.wrapping_add(1);
         self.surface=None;self.surface_cut_top=None;self.surface_hover=None;
@@ -576,28 +683,16 @@ impl App{
         );
     }
     fn inspect_vertical_view(&mut self){
+        self.invalidate_near();
         self.vertical_grid=None;
-        self.vertical_report=match self.current_key(){
-            None=>"Select a Java world first.".into(),
-            Some(key)=>match parse_bounds(&self.vertical_area){
-                Err(e)=>format!("Invalid vertical area: {e}"),
-                Ok(bounds)=>match self.current_session(key)
-                    .and_then(|editor|editor.inspect_vertical_slice(bounds)
-                        .map_err(|e|e.to_string())){
-                    Ok(slice)=>{
-                        let explanation=slice.text_map();
-                        let h=slice.rows.len();
-                        let width=slice.rows.first().map_or(0,Vec::len);
-                        self.vertical_grid=Some((key.0,key.1,slice));
-                        if width<=16&&h<=16{
-                            format!("Interactive {width}x{h} original vertical plane.\n{explanation}")
-                        }else{
-                            format!("Interactive {width}x{h} original vertical plane. Colored map preserves unknown source cells and original BE markers; pick exact blocks below.")
-                        }
-                    },
-                    Err(e)=>format!("Vertical inspection refused: {e}"),
-                }
-            }
+        self.vertical_report=match (self.current_key(),parse_bounds(&self.vertical_area)){
+            (None,_)=>"Select a Java world first.".into(),
+            (_,Err(e))=>format!("Invalid vertical area: {e}"),
+            (Some(key),Ok(bounds))=>match self.enqueue_near(
+                key,NearMode::Vertical,bounds,None){
+                Ok(())=>"Reading vertical source plane in a read-only worker.".into(),
+                Err(e)=>format!("Vertical source refused: {e}"),
+            },
         };
     }
     fn pick_vertical(&mut self,row:usize,col:usize){
@@ -621,34 +716,16 @@ impl App{
         self.block_result=format!("Selected vertical plane original block at ({x},{y},{z}); inspect the source Block Entity before editing.");
     }
     fn inspect_slice_view(&mut self){
+        self.invalidate_near();
         self.slice_grid=None;
-        self.slice_result=match self.current_key() {
-            None=>"Select an indexed Java world first.".into(),
-            Some(key)=>match parse_bounds(&self.slice_area) {
-                Err(e)=>format!("Invalid 2D slice bounds: {e}"),
-                Ok(bounds)=>{
-                    let width=(bounds.maximum[0] as i64-bounds.minimum[0] as i64)+1;
-                    let depth=(bounds.maximum[2] as i64-bounds.minimum[2] as i64)+1;
-                    if bounds.minimum[1]!=bounds.maximum[1]{
-                        "2D slice view requires one Y layer.".into()
-                    }else {
-                        match self.current_session(key)
-                            .and_then(|session|session.inspect_slice(bounds)
-                                .map_err(|e|e.to_string())) {
-                            Ok(slice)=>{
-                                let legend=slice.text_map();
-                                self.slice_grid=Some((key.0,key.1,slice));
-                                if width<=16&&depth<=16{
-                                    format!("Interactive 2D grid ({width}x{depth}).\n{legend}")
-                                }else{
-                                    format!("Interactive 2D grid ({width}x{depth}). Gold square=original BE; amber diagonal=missing Section; dark purple=missing chunk. Air is dark gray. Click a known cell to inspect/select.")
-                                }
-                            }
-                            Err(e)=>format!("2D slice read refused: {e}"),
-                        }
-                    }
-                }
-            }
+        self.slice_result=match (self.current_key(),parse_bounds(&self.slice_area)){
+            (None,_)=>"Select an indexed Java world first.".into(),
+            (_,Err(e))=>format!("Invalid 2D slice bounds: {e}"),
+            (Some(key),Ok(bounds))=>match self.enqueue_near(
+                key,NearMode::Horizontal,bounds,None){
+                Ok(())=>"Reading horizontal source slice in a read-only worker.".into(),
+                Err(e)=>format!("Horizontal source refused: {e}"),
+            },
         };
     }
     fn pan_slice(&mut self,dx:i32,dy:i32,dz:i32){
@@ -1132,6 +1209,22 @@ impl App{
 }
 fn update(app:&mut App,message:Message)->iced::Task<Message>{
     let before=app.render_signature();
+    // Source mutations or stale-view navigation revoke all outstanding
+    // near-field worker snapshots. Rendering-only camera/texture events do
+    // not revoke an otherwise valid in-flight read.
+    if matches!(&message,
+        Message::ApplyEdit|Message::UndoEdit|Message::RedoEdit|
+        Message::DiscardEdits|Message::ImportPatch|Message::Open|
+        Message::Select(_)|Message::Dimension(_)|Message::Clear|
+        Message::StageBeScalar|Message::UndoBeScalar|Message::RedoBeScalar|
+        Message::StageBeBatch|Message::ImportBeJournal|
+        Message::ConfirmWorldSave|Message::ConfirmBeSave|
+        Message::FinalizeRegion|Message::RollbackRegion|
+        Message::SurfaceArea(_)|Message::SliceText(_)|
+        Message::VerticalText(_))
+    {
+        app.invalidate_near();
+    }
     let task=update_impl(app,message);
     if before!=app.render_signature(){
         let mut cache=app.render_face_cache.lock()
@@ -1140,6 +1233,12 @@ fn update(app:&mut App,message:Message)->iced::Task<Message>{
         let mut gpu=app.render_gpu_cache.lock()
             .unwrap_or_else(|poison|poison.into_inner());
         *gpu=None;
+    }
+    if !app.near_busy{
+        if let Some(job)=app.near_job.take(){
+            app.near_busy=true;
+            return iced::Task::batch([task,dispatch_near(job)]);
+        }
     }
     task
 }
@@ -1210,6 +1309,7 @@ fn update_impl(app:&mut App,message:Message)->iced::Task<Message>{
         },
         Message::FarBatchLoaded(nonce,patches)=>
             return app.finish_far_batch(nonce,patches),
+        Message::NearLoaded(nonce,key,result)=>app.near_loaded(nonce,key,result),
         Message::Toggle3DFrame=>app.surface_frame=!app.surface_frame,
         Message::Toggle3DAxes=>app.surface_axes=!app.surface_axes,
         Message::Toggle3DChunkGrid=>app.surface_chunk_grid=!app.surface_chunk_grid,

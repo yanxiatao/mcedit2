@@ -1263,3 +1263,27 @@ lookup uses a binary search instead of a per-block linear traversal
 through 1.18+ tall-world Sections; missing Y remains absent rather than
 invented air. New negative-Y and missing-Section regression tests are
 included but unrun; CI/build/packaging remain disabled.
+
+## Asynchronous original near-field read dispatch (pending compile verification)
+
+Near-field top-surface/exposed-volume 3D and up-to-64x64 horizontal/vertical
+2D source inspections now dispatch their synchronous Java chunk decoders
+on bounded OS reader workers instead of blocking iced's UI event handler.
+A cloned in-memory Session captures original-world identity plus staged
+block overlay at dispatch; workers NEVER modify world NBT. The UI queue
+tracks a monotonic request nonce, and discards superseded results after
+view changes, current-world/dimension switches or any staging/save action.
+The background result never silently substitutes air for missing chunks
+or missing Sections. Source coordinates, per-chunk BE checks and the
+independent write-preview budget are unchanged. Validation remains pending;
+CI, cargo check, cargo test and packaging have NOT been run.
+
+### Near-field worker backpressure
+
+Near-field source work is serialized to at most **one active worker**.
+Rapid pan/zoom/slice changes replace the queued snapshot with the newest
+request; an obsolete completion releases the slot but cannot publish
+old world data. This bounds source I/O, decoded chunk memory and native
+threads under frequent interactions. Worker errors release the same slot.
+No more than one pending near-field view is retained in memory; far terrain
+maintains its independent bounded progressive reader. No CI was triggered.
