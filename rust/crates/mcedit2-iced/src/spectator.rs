@@ -571,6 +571,145 @@ impl canvas::Program<Message> for Controls {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spectator_mesh_uses_original_thin_connection_shapes_without_json_assets() {
+        use mcedit2_world::sections::State;
+        use mcedit2_world::surface::ALL_FACES;
+        let build_one = |name: &str, properties: &[(&str, &str)]| {
+            let source = SurfaceView {
+                x: 0, z: 0, y_min: 64, y_max: 111,
+                width: 16, depth: 16,
+                voxels: vec![SurfaceVoxel {
+                    x: 0, y: 70, z: 0, span: 1,
+                    state: State {
+                        name: name.into(),
+                        properties: properties.iter()
+                            .map(|(key, value)| ((*key).into(), (*value).into()))
+                            .collect(),
+                    },
+                    biome: None, staged: false, original_block_entity: false,
+                    faces: ALL_FACES, kind: VoxelMaterial::Solid,
+                }],
+                source_tiles: vec![], source_chunks: 1, missing_columns: 0,
+            };
+            let scene = SpectatorScene {
+                surface: Arc::new(source),
+                texture_bank: None,
+                show_textures: false,
+                camera: Camera::default(),
+                quality: Quality::Balanced,
+                cache: Arc::new(Mutex::new(None)),
+                pending: Arc::new(Mutex::new(false)),
+                chunk_cache: Arc::new(Mutex::new(
+                    crate::chunk_mesh_cache::ChunkMeshCache::default(),
+                )),
+            };
+            build(&scene)
+        };
+        let pane = build_one(
+            "minecraft:glass_pane",
+            &[("north", "true"), ("south", "false")],
+        );
+        assert!(!pane.is_empty());
+        assert!(pane.iter().all(|v| v.xyz[0].abs() <= 0.0625));
+        assert!(pane.iter().any(|v| v.xyz[2] == -0.5));
+        assert!(!pane.iter().any(|v| v.xyz[2] == 0.5));
+        let wall = build_one(
+            "minecraft:cobblestone_wall",
+            &[("up", "false"), ("north", "low")],
+        );
+        assert!(!wall.is_empty());
+        assert!(wall.iter().all(|v| v.xyz[1] <= 70.0 - 64.0 + 0.375));
+        let open_gate = build_one("minecraft:oak_fence_gate", &[("open", "true")]);
+        let closed_gate = build_one("minecraft:oak_fence_gate", &[("open", "false")]);
+        assert!(open_gate.iter().all(|v| v.xyz[0].abs() >= 0.375));
+        let bridges_passage = |mesh: &[Vertex]| {
+            mesh.chunks_exact(6).any(|quad| {
+                let min_x = quad.iter().map(|v| v.xyz[0]).fold(f32::INFINITY, f32::min);
+                let max_x = quad.iter().map(|v| v.xyz[0]).fold(f32::NEG_INFINITY, f32::max);
+                min_x < -0.3 && max_x > 0.3
+            })
+        };
+        assert!(!bridges_passage(&open_gate));
+        assert!(bridges_passage(&closed_gate));
+    }
+
+    #[test]
+    fn spectator_stair_corner_mesh_uses_source_shape_not_generic_straight_steps() {
+        use mcedit2_world::sections::State;
+        use mcedit2_world::surface::ALL_FACES;
+        let build_one = |shape: &str| {
+            let view = SurfaceView {
+                x: 0,
+                z: 0,
+                y_min: 64,
+                y_max: 111,
+                width: 16,
+                depth: 16,
+                voxels: vec![SurfaceVoxel {
+                    x: 0,
+                    y: 70,
+                    z: 0,
+                    span: 1,
+                    state: State {
+                        name: "minecraft:stone_brick_stairs".into(),
+                        properties: vec![
+                            ("facing".into(), "north".into()),
+                            ("half".into(), "bottom".into()),
+                            ("shape".into(), shape.into()),
+                        ],
+                    },
+                    biome: None,
+                    staged: false,
+                    original_block_entity: false,
+                    faces: ALL_FACES,
+                    kind: VoxelMaterial::Solid,
+                }],
+                source_tiles: vec![],
+                source_chunks: 1,
+                missing_columns: 0,
+            };
+            let scene = SpectatorScene {
+                surface: Arc::new(view),
+                texture_bank: None,
+                show_textures: false,
+                camera: Camera::default(),
+                quality: Quality::Balanced,
+                cache: Arc::new(Mutex::new(None)),
+                pending: Arc::new(Mutex::new(false)),
+                chunk_cache: Arc::new(Mutex::new(
+                    crate::chunk_mesh_cache::ChunkMeshCache::default(),
+                )),
+            };
+            let mesh = build(&scene);
+            // Inspect only the top surface of the *upper stair step*.
+            // Each center is a real quad emitted by the 3D mesh builder,
+            // not a prediction from the Box3 fallback implementation.
+            let mut tops = Vec::new();
+            for face in mesh.chunks_exact(6) {
+                if face.iter().all(|v| (v.xyz[1] - 6.5).abs() < 0.0001) {
+                    let east = face.iter().map(|v| v.xyz[0]).sum::<f32>() / 6.0 > 0.0;
+                    let south = face.iter().map(|v| v.xyz[2]).sum::<f32>() / 6.0 > 0.0;
+                    tops.push((east, south));
+                }
+            }
+            tops.sort_unstable();
+            tops.dedup();
+            tops
+        };
+        assert_eq!(build_one("straight"), vec![(false, false), (true, false)]);
+        assert_eq!(build_one("outer_left"), vec![(false, false)]);
+        assert_eq!(build_one("outer_right"), vec![(true, false)]);
+        assert_eq!(
+            build_one("inner_left"),
+            vec![(false, false), (false, true), (true, false)]
+        );
+        assert_eq!(
+            build_one("inner_right"),
+            vec![(false, false), (true, false), (true, true)]
+        );
+    }
     #[test]
     fn internal_faces_of_adjacent_model_boxes_are_hidden() {
         let left = models::Part::cube(models::Box3 {

@@ -107,3 +107,34 @@ lower-priority image and its animation metadata remain intact. This is
 display-only: assets are not extracted or written back. Four regression
 tests cover corruption, archive ordering, layered fallback, and identical
 directory/ZIP lookup behavior.
+
+## Native shape fallback for connected vanilla blocks
+
+When a texture-only resource pack omits the original Java blockstate/model
+JSON, spectator rendering uses state-aware, read-only geometric fallbacks
+instead of full placeholder cubes for glass panes, stained glass panes, iron
+bars, low/tall walls, fence gates and wooden fences. North/east/south/west
+connections, wall post flags, gate facing/open/in-wall flags and independent
+upper/lower fence rails all affect the native 3D vertices. This is a bounded
+fallback, not a substitute for arbitrary modded geometry or the complete
+Minecraft special renderer. When genuine resource-pack JSON resolves, its
+declared geometry **always wins**. Unknown namespaces stay conservative.
+
+Seven Rust regressions exercise the original connection-state geometry,
+resource-model precedence and the actual perspective mesh's open/closed
+passage. No source NBT is changed, and the distant sampled LOD is untouched.
+
+## Original stair corner geometry
+
+For vanilla stair blocks without a resolvable Java blockstate/model JSON,
+the native 3D spectator renderer now respects the original `shape` property:
+`straight`, `inner_left`, `inner_right`, `outer_left` and `outer_right`.
+Combined with four `facing` directions and `top`/`bottom` halves, these
+produce 40 tested source-state arrangements rather than one rectangular
+tread. The upper or lower step is split into exact quarter-block cuboids
+to preserve inner corners and prevent oversized outer corners; exact shared
+inner faces remain subject to mesh occlusion. Unknown shape/facing values
+fail closed to a conservative selection cube, and custom Mod namespaces
+are never assigned vanilla stair geometry. Loaded resource-pack JSON model
+elements remain authoritative instead of using these fallback boxes.
+Tests include a world-space spectator mesh inspection of all five shapes.

@@ -569,33 +569,71 @@ pub(crate) fn boxes(state: &State) -> Vec<Box3> {
             _ => vec![Box3::FULL],
         };
     }
+
     if name.ends_with("_stairs") {
+        // Java's five stair shapes select cells in a 2x2 horizontal grid.
+        // A stair has a full lower/upper slab plus a second half-height
+        // tread. Split the tread into exact quarters so inner/outer corners
+        // cannot draw unsupported diagonal or full-width step geometry.
+        let facing = match property(state, "facing").unwrap_or("north") {
+            "north" => "north",
+            "south" => "south",
+            "east" => "east",
+            "west" => "west",
+            _ => return vec![Box3::FULL],
+        };
+        let shape = match property(state, "shape").unwrap_or("straight") {
+            "straight" => "straight",
+            "inner_left" => "inner_left",
+            "inner_right" => "inner_right",
+            "outer_left" => "outer_left",
+            "outer_right" => "outer_right",
+            _ => return vec![Box3::FULL],
+        };
         let top = property(state, "half") == Some("top");
-        let (y0, y1, a, b) = if top {
+        let (base_y0, base_y1, tread_y0, tread_y1) = if top {
             (0.0, 0.5, -0.5, 0.0)
         } else {
             (-0.5, 0.0, 0.0, 0.5)
         };
-        let mut elements = vec![Box3::from_six(-0.5, y0, -0.5, 0.5, y1, 0.5)];
-        let second = match property(state, "facing").unwrap_or("north") {
-            "north" => Box3::from_six(-0.5, a, -0.5, 0.5, b, 0.0),
-            "south" => Box3::from_six(-0.5, a, 0.0, 0.5, b, 0.5),
-            "west" => Box3::from_six(-0.5, a, -0.5, 0.0, b, 0.5),
-            "east" => Box3::from_six(0.0, a, -0.5, 0.5, b, 0.5),
-            _ => return vec![Box3::FULL],
-        };
-        // Correct the top-half flight: the tread occupies the other half.
-        if top {
-            elements.push(Box3::from_six(
-                second.min[0],
-                -0.5,
-                second.min[2],
-                second.max[0],
-                0.0,
-                second.max[2],
-            ));
-        } else {
-            elements.push(second);
+        let mut elements = vec![Box3::from_six(-0.5, base_y0, -0.5, 0.5, base_y1, 0.5)];
+        // Directional left is defined from the point of view of a player
+        // facing the stair's stored direction, not camera yaw.
+        for east in [false, true] {
+            for south in [false, true] {
+                let forward = match facing {
+                    "north" => !south,
+                    "south" => south,
+                    "east" => east,
+                    "west" => !east,
+                    _ => unreachable!(),
+                };
+                let left = match facing {
+                    "north" => !east,
+                    "south" => east,
+                    "east" => !south,
+                    "west" => south,
+                    _ => unreachable!(),
+                };
+                let present = match shape {
+                    "straight" => forward,
+                    "inner_left" => forward || left,
+                    "inner_right" => forward || !left,
+                    "outer_left" => forward && left,
+                    "outer_right" => forward && !left,
+                    _ => unreachable!(),
+                };
+                if present {
+                    elements.push(Box3::from_six(
+                        if east { 0.0 } else { -0.5 },
+                        tread_y0,
+                        if south { 0.0 } else { -0.5 },
+                        if east { 0.5 } else { 0.0 },
+                        tread_y1,
+                        if south { 0.5 } else { 0.0 },
+                    ));
+                }
+            }
         }
         return elements;
     }
@@ -640,28 +678,105 @@ pub(crate) fn boxes(state: &State) -> Vec<Box3> {
             _ => Box3::FULL,
         }];
     }
-    if name.ends_with("_fence") && !name.ends_with("_fence_gate") {
-        let mut out = vec![Box3::from_six(-0.125, -0.5, -0.125, 0.125, 0.5, 0.125)];
-        for (key, rail) in [
-            (
-                "north",
-                Box3::from_six(-0.125, -0.375, -0.5, 0.125, 0.375, -0.125),
-            ),
-            (
-                "south",
-                Box3::from_six(-0.125, -0.375, 0.125, 0.125, 0.375, 0.5),
-            ),
-            (
-                "west",
-                Box3::from_six(-0.5, -0.375, -0.125, -0.125, 0.375, 0.125),
-            ),
-            (
-                "east",
-                Box3::from_six(0.125, -0.375, -0.125, 0.5, 0.375, 0.125),
-            ),
+
+    // The full Java client JSON model takes priority when present. These
+    // read-only fallbacks prevent texture-only packs and missing vanilla
+    // model parents from rendering thin shapes as full stone-sized cubes.
+    if name.ends_with("_glass_pane") || name == "glass_pane" || name == "iron_bars" {
+        // The pane/bars center is two model units across. Only *verified*
+        // boolean connections grow an arm to the edge of the source cell.
+        let mut out = vec![Box3::from_six(-0.0625, -0.5, -0.0625, 0.0625, 0.5, 0.0625)];
+        for (direction, arm) in [
+            ("north", Box3::from_six(-0.0625, -0.5, -0.5, 0.0625, 0.5, -0.0625)),
+            ("south", Box3::from_six(-0.0625, -0.5, 0.0625, 0.0625, 0.5, 0.5)),
+            ("west", Box3::from_six(-0.5, -0.5, -0.0625, -0.0625, 0.5, 0.0625)),
+            ("east", Box3::from_six(0.0625, -0.5, -0.0625, 0.5, 0.5, 0.0625)),
         ] {
-            if property(state, key) == Some("true") {
-                out.push(rail);
+            if property(state, direction) == Some("true") {
+                out.push(arm);
+            }
+        }
+        return out;
+    }
+    if name.ends_with("_wall") {
+        // A straight wall can have no post; low and tall arms differ.
+        let mut out = Vec::new();
+        if property(state, "up") != Some("false") {
+            out.push(Box3::from_six(-0.25, -0.5, -0.25, 0.25, 0.5, 0.25));
+        }
+        for (direction, bounds) in [
+            ("north", [-0.1875, -0.5, -0.5, 0.1875, 0.5, -0.25]),
+            ("south", [-0.1875, -0.5, 0.25, 0.1875, 0.5, 0.5]),
+            ("west", [-0.5, -0.5, -0.1875, -0.25, 0.5, 0.1875]),
+            ("east", [0.25, -0.5, -0.1875, 0.5, 0.5, 0.1875]),
+        ] {
+            let top = match property(state, direction) {
+                Some("low") => 0.375,
+                Some("tall") => 0.5,
+                _ => continue,
+            };
+            out.push(Box3::from_six(
+                bounds[0], bounds[1], bounds[2], bounds[3], top, bounds[5],
+            ));
+        }
+        // Incomplete source state must remain visible, never vanish.
+        return if out.is_empty() {
+            vec![Box3::from_six(-0.25, -0.5, -0.25, 0.25, 0.5, 0.25)]
+        } else {
+            out
+        };
+    }
+    if name.ends_with("_fence_gate") {
+        // The hinged fence gate switches between two leaves across the
+        // passage and leaves folded alongside its posts. in_wall lowers it.
+        let in_wall = property(state, "in_wall") == Some("true");
+        let post_top = if in_wall { 0.3125 } else { 0.5 };
+        let mut out = vec![
+            Box3::from_six(-0.5, -0.5, -0.125, -0.375, post_top, 0.125),
+            Box3::from_six(0.375, -0.5, -0.125, 0.5, post_top, 0.125),
+        ];
+        let height_shift = if in_wall { -0.1875 } else { 0.0 };
+        let mut push_leaf = |x0: f32, y0: f32, z0: f32, x1: f32, y1: f32, z1: f32| {
+            out.push(Box3::from_six(
+                x0, y0 + height_shift, z0, x1, y1 + height_shift, z1,
+            ));
+        };
+        if property(state, "open") == Some("true") {
+            for (x0, x1) in [(-0.5, -0.375), (0.375, 0.5)] {
+                for (y0, y1) in [(-0.1875, -0.0625), (0.125, 0.25)] {
+                    push_leaf(x0, y0, -0.4375, x1, y1, 0.4375);
+                }
+            }
+        } else {
+            for (y0, y1) in [(-0.1875, -0.0625), (0.125, 0.25)] {
+                push_leaf(-0.375, y0, -0.125, 0.375, y1, 0.125);
+            }
+        }
+        let angle = match property(state, "facing") {
+            Some("east") => 90,
+            Some("south") => 180,
+            Some("west") => 270,
+            _ => 0,
+        };
+        return out.into_iter().filter_map(|b| b.rotate(0, angle)).collect();
+    }
+    if name.ends_with("_fence") && !name.ends_with("_fence_gate") {
+        // Match the 4x4 vanilla post and the 2x3 upper/lower rails. A
+        // single tall beam incorrectly fills the gap between fence rails.
+        let mut out = vec![Box3::from_six(-0.125, -0.5, -0.125, 0.125, 0.5, 0.125)];
+        for (direction, extents) in [
+            ("north", [-0.0625, -0.5, 0.0625, -0.125]),
+            ("south", [-0.0625, 0.125, 0.0625, 0.5]),
+            ("west", [-0.5, -0.0625, -0.125, 0.0625]),
+            ("east", [0.125, -0.0625, 0.5, 0.0625]),
+        ] {
+            if property(state, direction) != Some("true") {
+                continue;
+            }
+            for (y_min, y_max) in [(-0.125, 0.0625), (0.25, 0.4375)] {
+                out.push(Box3::from_six(
+                    extents[0], y_min, extents[1], extents[2], y_max, extents[3],
+                ));
             }
         }
         return out;
@@ -978,18 +1093,135 @@ mod tests {
             -0.4375
         );
     }
+
     #[test]
     fn stair_shapes_and_face_culling_require_full_cover() {
         let stairs = boxes(&state(
             "minecraft:oak_stairs",
             &[("half", "bottom"), ("facing", "north")],
         ));
-        assert_eq!(stairs.len(), 2);
+        // Two exact quarter treads and one full-width base allow adjacent
+        // quarter faces to disappear without dropping partial outer corners.
+        assert_eq!(stairs.len(), 3);
         assert_eq!(stairs[0].max[1], 0.0);
-        assert_eq!(stairs[1].min[1], 0.0);
+        assert!(stairs.iter().skip(1).all(|b| b.min[1] == 0.0));
         assert!(!stairs[0].face_on_boundary(1, true));
         assert!(stairs[1].face_on_boundary(1, true));
         assert!(!stairs[0].occluded_by(&stairs[1], 1, true));
+    }
+    #[test]
+    fn five_stair_shapes_select_exact_directional_quarters_for_both_halves() {
+        fn footprints(name: &str, facing: &str, shape: &str, half: &str) -> Vec<(bool, bool)> {
+            let parts = boxes(&state(
+                name,
+                &[("facing", facing), ("shape", shape), ("half", half)],
+            ));
+            let (base_bottom, base_top, tread_bottom, tread_top) = if half == "top" {
+                (0.0, 0.5, -0.5, 0.0)
+            } else {
+                (-0.5, 0.0, 0.0, 0.5)
+            };
+            assert_eq!(parts[0].min[1], base_bottom);
+            assert_eq!(parts[0].max[1], base_top);
+            let mut cells: Vec<_> = parts[1..]
+                .iter()
+                .map(|b| {
+                    assert_eq!(b.min[1], tread_bottom);
+                    assert_eq!(b.max[1], tread_top);
+                    assert_eq!(b.max[0] - b.min[0], 0.5);
+                    assert_eq!(b.max[2] - b.min[2], 0.5);
+                    (b.min[0] == 0.0, b.min[2] == 0.0)
+                })
+                .collect();
+            cells.sort_unstable();
+            cells
+        }
+        let forward = |facing: &str, east: bool, south: bool| match facing {
+            "north" => !south,
+            "south" => south,
+            "east" => east,
+            "west" => !east,
+            _ => unreachable!(),
+        };
+        let left = |facing: &str, east: bool, south: bool| match facing {
+            "north" => !east,
+            "south" => east,
+            "east" => !south,
+            "west" => south,
+            _ => unreachable!(),
+        };
+        for facing in ["north", "south", "east", "west"] {
+            for half in ["bottom", "top"] {
+                for (shape, total) in [
+                    ("straight", 2),
+                    ("inner_left", 3),
+                    ("inner_right", 3),
+                    ("outer_left", 1),
+                    ("outer_right", 1),
+                ] {
+                    let cells = footprints("minecraft:stone_brick_stairs", facing, shape, half);
+                    assert_eq!(cells.len(), total, "{facing} {half} {shape}");
+                    for east in [false, true] {
+                        for south in [false, true] {
+                            let front = forward(facing, east, south);
+                            let port = left(facing, east, south);
+                            let expected = match shape {
+                                "straight" => front,
+                                "inner_left" => front || port,
+                                "inner_right" => front || !port,
+                                "outer_left" => front && port,
+                                "outer_right" => front && !port,
+                                _ => unreachable!(),
+                            };
+                            assert_eq!(
+                                cells.contains(&(east, south)),
+                                expected,
+                                "{facing} {half} {shape} at east={east},south={south}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn stair_missing_or_unrecognized_properties_do_not_invent_modded_shapes() {
+        assert_eq!(
+            boxes(&state("example:granite_stairs", &[("shape", "inner_left")])),
+            vec![Box3::FULL]
+        );
+        assert_eq!(
+            boxes(&state("minecraft:oak_stairs", &[("shape", "unsupported")])),
+            vec![Box3::FULL]
+        );
+        assert_eq!(
+            boxes(&state("minecraft:oak_stairs", &[("facing", "diagonal")])),
+            vec![Box3::FULL]
+        );
+        assert_eq!(boxes(&state("minecraft:oak_stairs", &[])).len(), 3);
+    }
+    #[test]
+    fn java_stair_json_parts_override_shape_based_fallbacks() {
+        let mut bank = crate::resource_models::ModelBank::default();
+        bank.insert(
+            "assets/minecraft/blockstates/oak_stairs.json",
+            br#"{"variants":{"facing=north,half=bottom,shape=inner_left":{"model":"minecraft:block/test_steps"}}}"#,
+        ).unwrap();
+        bank.insert(
+            "assets/minecraft/models/block/test_steps.json",
+            br##"{"textures":{"all":"minecraft:block/oak_planks"},"elements":[
+                {"from":[0,0,0],"to":[16,4,16],"faces":{"up":{"texture":"#all"}}}
+            ]}"##,
+        )
+        .unwrap();
+        let source = state(
+            "minecraft:oak_stairs",
+            &[("facing", "north"), ("half", "bottom"), ("shape", "inner_left")],
+        );
+        assert_eq!(boxes(&source).len(), 4);
+        let model = bank.parts_at(&source, (32, 70, 12)).unwrap();
+        assert_eq!(model.len(), 1);
+        assert_eq!(model[0].bounds.max[1], -0.25);
     }
     #[test]
     fn zero_thickness_model_planes_are_supported_only_as_explicit_surfaces() {
@@ -1042,6 +1274,94 @@ mod tests {
         ]);
         assert!(vertices.iter().any(|p| p[0].abs() > 0.125));
         assert!(!part.boundary(0, true));
+    }
+
+    #[test]
+    fn glass_panes_and_iron_bars_keep_thin_centers_and_only_true_connections() {
+        for material in ["minecraft:glass_pane", "minecraft:lime_stained_glass_pane", "minecraft:iron_bars"] {
+            let disconnected = boxes(&state(material, &[("north", "false")]));
+            assert_eq!(disconnected.len(), 1, "{material}");
+            assert_eq!(disconnected[0].min, [-0.0625, -0.5, -0.0625]);
+            let joined = boxes(&state(material, &[("north", "true"), ("east", "true"), ("south", "false")]));
+            assert_eq!(joined.len(), 3, "{material}");
+            assert!(joined.iter().any(|b| b.min[2] == -0.5));
+            assert!(joined.iter().any(|b| b.max[0] == 0.5));
+            assert!(!joined.iter().any(|b| b.max[2] == 0.5));
+        }
+    }
+    #[test]
+    fn vanilla_walls_follow_none_low_tall_and_up_states() {
+        let wall = "minecraft:cobblestone_wall";
+        let shaped = boxes(&state(wall, &[("up", "false"), ("north", "low"), ("west", "tall"), ("east", "none")]));
+        assert_eq!(shaped.len(), 2);
+        assert!(shaped.iter().any(|b| b.min[2] == -0.5 && b.max[1] == 0.375));
+        assert!(shaped.iter().any(|b| b.min[0] == -0.5 && b.max[1] == 0.5));
+        assert!(!shaped.iter().any(|b| b.max[0] == 0.5));
+        let upright = boxes(&state(wall, &[("up", "true"), ("north", "none")]));
+        assert_eq!(upright.len(), 1);
+        assert_eq!(upright[0].min, [-0.25, -0.5, -0.25]);
+        assert_eq!(boxes(&state(wall, &[("up", "false")])).len(), 1);
+    }
+    #[test]
+    fn vanilla_fence_connected_arms_have_distinct_upper_and_lower_rails() {
+        let fence = "minecraft:oak_fence";
+        let post = boxes(&state(fence, &[("north", "false")]));
+        assert_eq!(post.len(), 1);
+        assert_eq!(post[0].min, [-0.125, -0.5, -0.125]);
+        let north = boxes(&state(fence, &[("north", "true")]));
+        assert_eq!(north.len(), 3);
+        assert_eq!(north[1].min, [-0.0625, -0.125, -0.5]);
+        assert_eq!(north[1].max, [0.0625, 0.0625, -0.125]);
+        assert_eq!(north[2].min[1], 0.25);
+        assert_eq!(north[2].max[1], 0.4375);
+        let crossed = boxes(&state(fence, &[("north", "true"), ("east", "true")]));
+        assert_eq!(crossed.len(), 5);
+        assert_eq!(crossed[3].max[0], 0.5);
+        assert_eq!(crossed[4].max[0], 0.5);
+        assert!(!crossed.iter().skip(1).any(|b| b.min[1] < -0.125));
+    }
+    #[test]
+    fn fence_gate_opening_and_facing_change_shape_not_block_identity() {
+        let gate = "minecraft:oak_fence_gate";
+        let closed = boxes(&state(gate, &[("open", "false"), ("facing", "north")]));
+        let open = boxes(&state(gate, &[("open", "true"), ("facing", "north")]));
+        let west = boxes(&state(gate, &[("open", "false"), ("facing", "west")]));
+        assert_eq!(closed.len(), 4);
+        assert_eq!(open.len(), 6);
+        assert_eq!(west.len(), 4);
+        assert!(closed.iter().any(|b| b.min[0] == -0.375 && b.max[0] == 0.375));
+        assert!(!open.iter().any(|b| b.min[0] == -0.375 && b.max[0] == 0.375));
+        assert!(west.iter().any(|b| b.min[2] == -0.375 && b.max[2] == 0.375));
+        let lowered = boxes(&state(gate, &[("in_wall", "true")]));
+        assert_eq!(lowered[0].max[1], 0.3125);
+        assert!(lowered[2].max[1] < closed[2].max[1]);
+    }
+    #[test]
+    fn available_java_resource_model_overrides_fallback_structural_geometry() {
+        let mut original = crate::resource_models::ModelBank::default();
+        original.insert(
+            "assets/minecraft/blockstates/iron_bars.json",
+            br#"{"variants":{"":{"model":"minecraft:block/iron_bars_exact"}}}"#,
+        ).unwrap();
+        original.insert(
+            "assets/minecraft/models/block/iron_bars_exact.json",
+            br##"{"textures":{"all":"minecraft:block/iron_bars"},"elements":[
+                {"from":[6,0,6],"to":[10,8,10],
+                 "faces":{"up":{"texture":"#all"}}}]}"##,
+        ).unwrap();
+        let block = state("minecraft:iron_bars", &[]);
+        let from_json = original.parts_at(&block, (0, 70, 0)).unwrap();
+        assert_eq!(from_json.len(), 1);
+        assert_eq!(from_json[0].bounds.min, [-0.125, -0.5, -0.125]);
+        assert_eq!(from_json[0].bounds.max, [0.125, 0.0, 0.125]);
+        assert_eq!(boxes(&block).len(), 1);
+        assert_ne!(from_json[0].bounds, boxes(&block)[0]);
+    }
+    #[test]
+    fn foreign_namespaces_never_inherit_vanilla_thin_geometry() {
+        for block in ["other:iron_bars", "mod:glass_pane", "other:cobblestone_wall", "other:oak_fence_gate"] {
+            assert_eq!(boxes(&state(block, &[("north", "true")])), vec![Box3::FULL]);
+        }
     }
     #[test]
     fn no_modded_block_model_is_invented() {
