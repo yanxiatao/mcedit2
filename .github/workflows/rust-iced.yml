@@ -1,0 +1,66 @@
+name: Rust iced rewrite compile and tests
+
+# No application build, package creation, executable uploads or cargo run in CI.
+# Explicit manual trigger; local executable builds and packaging are user-managed.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust-world-cli:
+    name: Linux Rust core and CLI tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Check and test world and CLI crates
+        working-directory: rust
+        run: |
+          cargo check -p mcedit2-world -p mcedit2-cli
+          cargo test -p mcedit2-world -p mcedit2-cli
+
+  rust-linux:
+    name: Linux full Rust workspace check and tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Install native desktop test dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libwayland-dev libxkbcommon-dev \
+            libx11-dev libxcb1-dev libxrandr-dev \
+            libxi-dev libxcursor-dev libgl1-mesa-dev
+      - name: Check and test workspace (no app build)
+        working-directory: rust
+        run: |
+          cargo check --workspace
+          cargo test --workspace
+
+  rust-windows:
+    name: Windows MSVC full Rust workspace check and tests
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Check and test workspace (no app build or packaging)
+        working-directory: rust
+        shell: pwsh
+        run: |
+          cargo check --workspace
+          cargo test --workspace
