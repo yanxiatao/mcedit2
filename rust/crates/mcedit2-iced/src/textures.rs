@@ -1326,6 +1326,29 @@ impl TextureBank {
             region.page,
         ))
     }
+    /// Raw source UVs for arbitrary JSON models, before atlas clipping.
+    /// Generic static tiling is independent of individual block identities.
+    pub fn atlas_repeating_face_at(
+        &self, state: &State, face: crate::isometric::Face,
+        element_index: usize, pos: (i32, i32, i32),
+    ) -> Option<([[f32; 2]; 4], AtlasUv)> {
+        let spec = self.models.element_face_at(state, face, element_index, pos)?;
+        if spec.uv.iter().all(|v| (0.0..=16.0).contains(v)) {
+            return None;
+        }
+        let id = if self.tiles.contains_key(&spec.texture) {
+            spec.texture.as_str()
+        } else {
+            MISSING_TEXTURE_ID
+        };
+        let atlas = self.atlas.as_ref()?.entries.get(id)?.clone();
+        let [u0, v0, u1, v1] = spec.uv;
+        let mut corners = [[u0, v0], [u1, v0], [u1, v1], [u0, v1]];
+        for _ in 0..(spec.rotation / 90) {
+            corners.rotate_right(1);
+        }
+        Some((orient_uv(corners, spec.uvlock), atlas))
+    }
     /// Deterministic vanilla biome color approximations for the verified source
     /// biome ID. This remains high-gamma/fullbright: RGB tint never adds shadows.
     /// Custom/modded biomes use neutral vanilla colors until their registry

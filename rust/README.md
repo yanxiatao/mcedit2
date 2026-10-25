@@ -181,3 +181,19 @@ entity model rigs, shader-specific animated geometry, runtime OBJ/custom
 loaders, multipart non-JSON renderer hooks and true tiled UVs outside
 0–16 still require specialized rendering work. No remote shader, executable
 or Mod code is loaded. Render samples never become edit sources.
+
+## Generic static atlas-safe repeated UV rendering
+
+The perspective spectator renderer can now display original static JSON face
+UV ranges in [-256, 256] without incorrectly stretching or clamping a texture
+at the 0–16 boundary. A renderer-agnostic partitioner splits each face along
+the original 16-unit texture periods, preserves UV quarter turns/reflections
+and exact 3D vertex geometry, and maps each subface back into the original
+atlas slot. Because GPU atlas sampling remains clamped, UV repetition never
+samples a neighboring Mod sprite. Work is capped at 256 tiles/source face
+plus the existing total mesh face limits. Independent tests and a resource-pack
+to GPU-vertex integration test validate actual repeated quads and UV bounds.
+
+This is generic static model handling, not per-block renderer special cases.
+Dynamic NBT-dependent block entity shapes and non-JSON loaders still need a
+source-aware plugin/model contract; no Mod executable render code is loaded.

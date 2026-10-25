@@ -292,3 +292,44 @@ fn generic_mod_model_sprites_resolve_in_both_zip_and_directory() {
         assert!(bank.atlas().unwrap().entries.contains_key("create.addon:entity/machine/side"));
     }
 }
+
+#[test]
+fn original_json_repeating_uvs_emit_real_atlas_safe_spectator_faces() {
+    use mcedit2_world::sections::State;
+    use mcedit2_world::surface::{SurfaceView, SurfaceVoxel, VoxelMaterial, ALL_FACES};
+    use std::sync::{Arc, Mutex};
+    let fx = Fixture::new();
+    let path = fx.path("uv_pack");
+    put(&path, "assets/example/textures/item/tiling.png", &png(&[105, 80, 230, 255], 1));
+    put(&path, "assets/example/blockstates/tile.json", br#"{"variants":{"":{"model":"example:block/tiling"}}}"#);
+    put(&path, "assets/example/models/block/tiling.json", br##"{
+        "textures":{"all":"example:item/tiling"},
+        "elements":[{"from":[0,0,0],"to":[16,16,16],
+        "faces":{"up":{"texture":"#all","uv":[-16,0,32,32]}}}]
+    }"##);
+    let bank = Arc::new(TextureBank::open(&path).unwrap());
+    let state = State { name: "example:tile".into(), properties: vec![] };
+    assert!(bank.atlas_repeating_face_at(&state, crate::isometric::Face::Top, 0, (0,70,0)).is_some());
+    let slot = bank.atlas().unwrap().entries.get("example:item/tiling").unwrap().clone();
+    let scene = crate::spectator::SpectatorScene {
+        surface: Arc::new(SurfaceView {
+            x:0,z:0,y_min:64,y_max:111,width:16,depth:16,
+            voxels:vec![SurfaceVoxel {
+                x:0,y:70,z:0,span:1,state,biome:None,
+                original_block_entity:false,staged:false,
+                faces:ALL_FACES,kind:VoxelMaterial::Solid,
+            }],
+            source_tiles:vec![],source_chunks:1,missing_columns:0,
+        }),
+        texture_bank:Some(bank),show_textures:true,
+        camera:crate::spectator::Camera::default(),
+        quality:crate::gpu_mesh::Quality::Balanced,
+        cache:Arc::new(Mutex::new(None)),pending:Arc::new(Mutex::new(false)),
+        chunk_cache:Arc::new(Mutex::new(crate::chunk_mesh_cache::ChunkMeshCache::default())),
+    };
+    let mesh = crate::spectator::build(&scene);
+    assert_eq!(mesh.len(), 36);
+    assert!(mesh.iter().all(|v| v.uv[0] >= slot.start[0] && v.uv[0] <= slot.end[0]));
+    assert!(mesh.iter().all(|v| v.uv[1] >= slot.start[1] && v.uv[1] <= slot.end[1]));
+    assert!(mesh.iter().all(|v| v.atlas_page == slot.page));
+}

@@ -464,7 +464,28 @@ pub(crate) fn build_cancellable(
                 if shade.a < 0.999 {
                     mode = AlphaMode::Blend;
                 }
-                quad_vertices(&mut out, corners, uv, shade, mode, page);
+                // Keep every repeated UV period within its own atlas slot;
+                // using sampler Repeat would sample adjacent Mod sprites.
+                if voxel.span == 1 && view.show_textures {
+                    if let Some((raw_uv, region)) = bank.and_then(|b| {
+                        b.atlas_repeating_face_at(&voxel.state, face, index, sample)
+                    }) {
+                        let remaining = limit.saturating_sub(out.len() / 6);
+                        let mut emitted = 0usize;
+                        if !crate::repeating_uv::tiles(corners, raw_uv, &region, |xyz, tex| {
+                            if emitted < remaining {
+                                quad_vertices(&mut out, xyz, tex, shade, mode, page);
+                                emitted += 1;
+                            }
+                        }) {
+                            quad_vertices(&mut out, corners, uv, shade, mode, page);
+                        }
+                    } else {
+                        quad_vertices(&mut out, corners, uv, shade, mode, page);
+                    }
+                } else {
+                    quad_vertices(&mut out, corners, uv, shade, mode, page);
+                }
                 if is_wall {
                     rendered_walls += 1;
                 }

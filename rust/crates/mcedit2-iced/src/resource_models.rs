@@ -887,7 +887,7 @@ impl ModelBank {
             let mut out = [0f32; 4];
             for (i, item) in a.iter().enumerate() {
                 let value = item.as_f64()? as f32;
-                if !value.is_finite() || !(0.0..=16.0).contains(&value) {
+                if !value.is_finite() || !(-256.0..=256.0).contains(&value) {
                     return None;
                 }
                 out[i] = value;

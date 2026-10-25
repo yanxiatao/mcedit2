@@ -11,6 +11,7 @@ mod mesh_async;
 mod models;
 mod palette;
 mod resource_models;
+mod repeating_uv;
 mod resource_ids;
 mod slice_canvas;
 mod spectator;
