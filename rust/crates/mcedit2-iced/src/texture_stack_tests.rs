@@ -197,3 +197,98 @@ fn zip_and_directory_use_the_same_asset_classifier_and_overlay_rules() {
     assert_eq!(dir_bank.count(), zip_bank.count());
     assert_eq!(dir_bank.atlas().unwrap().entries, zip_bank.atlas().unwrap().entries);
 }
+
+#[test]
+fn spectator_emits_real_extended_modded_model_vertices_with_valid_atlas_uv() {
+    use std::sync::{Arc, Mutex};
+    use mcedit2_world::sections::State;
+    use mcedit2_world::surface::{SurfaceView, SurfaceVoxel, VoxelMaterial, ALL_FACES};
+    let temp = Fixture::new();
+    let path = temp.path("mod_assets");
+    put(&path,"assets/example/textures/item/large.png",&png(&[31,102,202,255],1));
+    put(&path,"assets/example/blockstates/large.json",
+        br#"{"variants":{"":{"model":"example:item/large"}}}"#);
+    put(&path,"assets/example/models/item/large.json",
+        br##"{"textures":{"all":"example:item/large"},"elements":[
+        {"from":[-16,0,-8],"to":[32,16,24],"faces":{
+          "up":{"texture":"#all","uv":[0,0,16,16]},
+          "north":{"texture":"#all","uv":[0,0,16,16]}}}]}"##);
+    let bank = Arc::new(TextureBank::open(&path).unwrap());
+    let state = State { name:"example:large".into(), properties:vec![] };
+    let scene = crate::spectator::SpectatorScene {
+        surface:Arc::new(SurfaceView {
+            x:0,z:0,y_min:64,y_max:111,width:16,depth:16,
+            voxels:vec![SurfaceVoxel {
+                x:0,y:70,z:0,span:1,state,biome:None,
+                original_block_entity:false,staged:false,
+                faces:ALL_FACES,kind:VoxelMaterial::Solid,
+            }],
+            source_tiles:vec![],source_chunks:1,missing_columns:0,
+        }),
+        texture_bank:Some(bank),
+        show_textures:true,
+        camera:crate::spectator::Camera::default(),
+        quality:crate::gpu_mesh::Quality::Balanced,
+        cache:Arc::new(Mutex::new(None)),
+        pending:Arc::new(Mutex::new(false)),
+        chunk_cache:Arc::new(Mutex::new(
+            crate::chunk_mesh_cache::ChunkMeshCache::default()
+        )),
+    };
+    let mesh = crate::spectator::build(&scene);
+    assert_eq!(mesh.len(),12);
+    let extents = |axis:usize| (
+        mesh.iter().map(|v|v.xyz[axis]).fold(f32::INFINITY,f32::min),
+        mesh.iter().map(|v|v.xyz[axis]).fold(f32::NEG_INFINITY,f32::max),
+    );
+    assert_eq!(extents(0),(-1.5,1.5));
+    assert_eq!(extents(1),(5.5,6.5));
+    assert_eq!(extents(2),(-1.0,1.0));
+    assert!(mesh.iter().all(|v|v.uv.iter().all(|component|component.is_finite())));
+}
+
+#[test]
+fn generic_mod_model_sprites_resolve_in_both_zip_and_directory() {
+    let fixture = Fixture::new();
+    let directory = fixture.path("nested_model");
+    let archive = fixture.path("nested_model.zip");
+    let entries = [
+        ("assets/create.addon/textures/item/machine/gizmo.png",
+            png(&[22, 66, 204, 255], 1)),
+        ("assets/create.addon/textures/entity/machine/side.png",
+            png(&[208, 32, 78, 255], 1)),
+        ("assets/create.addon/blockstates/gizmo.json",
+            br#"{"variants":{"":{"model":"create.addon:item/machine/gizmo"}}}"#.to_vec()),
+        ("assets/create.addon/models/item/machine/gizmo.json",
+            br##"{"parent":"create.addon:custom/model/base","textures":{
+                "all":"create.addon:item/machine/gizmo",
+                "side":"create.addon:entity/machine/side"}}"##.to_vec()),
+        ("assets/create.addon/models/custom/model/base.json",
+            br##"{"elements":[{"from":[-16,0,-8],"to":[32,16,24],"faces":{
+                "north":{"texture":"#side","uv":[0,0,16,16]},
+                "up":{"texture":"#all","uv":[0,0,16,16]}}}]}"##.to_vec()),
+    ];
+    for (filename, contents) in &entries { put(&directory,filename,contents); }
+    let mut zip = zip::ZipWriter::new(File::create(&archive).unwrap());
+    for (filename, contents) in entries.iter().rev() {
+        zip.start_file(*filename,zip::write::SimpleFileOptions::default()).unwrap();
+        zip.write_all(contents).unwrap();
+    }
+    zip.finish().unwrap();
+    for pack in [directory,archive] {
+        let bank = TextureBank::open(&pack).unwrap();
+        assert_eq!(color(&bank,"create.addon:item/machine/gizmo"),[22,66,204,255]);
+        assert_eq!(color(&bank,"create.addon:entity/machine/side"),[208,32,78,255]);
+        let state = mcedit2_world::sections::State {
+            name:"create.addon:gizmo".into(),properties:vec![]
+        };
+        let elements = bank.geometry_at(&state,(1,64,1)).unwrap();
+        assert_eq!(elements.len(),1);
+        assert_eq!(elements[0].bounds.min,[-1.5,-0.5,-1.0]);
+        for face in [crate::isometric::Face::Top, crate::isometric::Face::NegZ] {
+            assert!(bank.atlas_face_style_at(&state,face,0,(1,64,1)).is_some());
+        }
+        assert!(bank.atlas().unwrap().entries.contains_key("create.addon:item/machine/gizmo"));
+        assert!(bank.atlas().unwrap().entries.contains_key("create.addon:entity/machine/side"));
+    }
+}

@@ -151,3 +151,33 @@ fallback; existing blockstate/model JSON always takes precedence. Source
 world data, block entities and other editor state are never modified.
 Regression tests cover all 4 directions, both hinges, open/closed panels,
 upper/lower alignment and the real world-space GPU vertex extents.
+
+## General Java block JSON 3D model coverage
+
+The native 3D model/texture pipeline no longer assumes that every block
+model or sprite lives under `models/block/` or `textures/block/`.
+Blockstate files can reference **namespaced model parents and elements** in
+`models/item/`, `models/custom/` or other original JSON model families.
+Their face textures can resolve namespaced sprites in `textures/item/`,
+`textures/entity/` or other Java resource folders. Canonical
+`textures/block/` and historical `textures/blocks/` names retain their
+existing shared block sprite IDs without colliding with non-block families.
+
+Authentic model elements may extend outside the source block, within Java's
+bounded [-16,32] source model unit range. They retain their exact
+read-only 3D vertex coordinates and declared UVs; models with up to 256
+elements each and 512 elements total per blockstate are supported before
+conservatively falling back rather than consuming unbounded CPU/GPU memory.
+Model parent recursion, resource path validation, archive byte budgets and
+render face limits remain enforced. New regressions check directory/ZIP
+model/PNG parity, nested item/custom model inheritance, namespaced item and
+entity textures, large multipart models, malicious paths, and the emitted
+GPU spectator vertices for a real out-of-cell Mod block model.
+
+This improves arbitrary static JSON-defined block display but **does not
+claim every special renderer is implemented**. Minecraft block-entity
+renderers (e.g. chests, banners, signs and beds with dynamic NBT content),
+entity model rigs, shader-specific animated geometry, runtime OBJ/custom
+loaders, multipart non-JSON renderer hooks and true tiled UVs outside
+0–16 still require specialized rendering work. No remote shader, executable
+or Mod code is loaded. Render samples never become edit sources.

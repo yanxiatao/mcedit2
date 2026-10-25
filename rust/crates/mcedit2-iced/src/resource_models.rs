@@ -36,15 +36,20 @@ fn asset_id(path: &str) -> Option<String> {
     if !resource_ids::namespace(namespace) {
         return None;
     }
-    let (kind, start) = if parts.get(2) == Some(&"blockstates") {
-        ("state", 3)
-    } else if parts.get(2) == Some(&"models") && parts.get(3) == Some(&"block") {
-        ("model", 4)
-    } else {
-        return None;
+    let (kind, start) = match parts.get(2).copied() {
+        Some("blockstates") => ("state", 3),
+        Some("models") if parts.len() >= 5 => ("model", 3),
+        _ => return None,
     };
     let relative = parts[start..].join("/");
     let id = relative.strip_suffix(".json")?;
+    // block/ IDs historically omit their parent folder. Preserve every
+    // other model family to avoid item/entity/custom name collisions.
+    let id = if kind == "model" {
+        id.strip_prefix("block/").unwrap_or(id)
+    } else {
+        id
+    };
     resource_ids::path(id, 160).then(|| format!("{kind}:{namespace}:{id}"))
 }
 fn normalize_model(value: &str, default_ns: &str) -> Option<String> {
@@ -387,7 +392,7 @@ fn implicit_face_uv(element: &Value, face: Face) -> Option<[f32; 4]> {
         let mut out = [0f32; 3];
         for (i, v) in coords.iter().enumerate() {
             out[i] = v.as_f64()? as f32;
-            if !out[i].is_finite() || !(0.0..=16.0).contains(&out[i]) {
+            if !out[i].is_finite() || !(-16.0..=32.0).contains(&out[i]) {
                 return None;
             }
         }
@@ -509,7 +514,7 @@ impl ModelBank {
         index: usize,
         pos: (i32, i32, i32),
     ) -> Option<(ChosenModel, &Value)> {
-        if index >= 128 {
+        if index >= 512 {
             return None;
         }
         let mut remaining = index;
@@ -696,7 +701,7 @@ impl ModelBank {
         let mut out = Vec::new();
         for model in chosen {
             let elements = self.model_elements(&model.key)?;
-            if elements.is_empty() || elements.len() > 64 || out.len() + elements.len() > 128 {
+            if elements.is_empty() || elements.len() > 256 || out.len() + elements.len() > 512 {
                 return None;
             }
             for entry in elements {
@@ -769,7 +774,7 @@ impl ModelBank {
         let mut out = Vec::new();
         for model in chosen {
             let elements = self.model_elements(&model.key)?;
-            if elements.is_empty() || elements.len() > 64 || out.len() + elements.len() > 128 {
+            if elements.is_empty() || elements.len() > 256 || out.len() + elements.len() > 512 {
                 return None;
             }
             for entry in elements {
@@ -1135,7 +1140,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(bank.texture(&s("minecraft:loop", &[]), Face::Top), None);
-        assert!(!bank
+        // Non-block model families are valid parents for source blocks.
+        assert!(bank
             .insert("assets/minecraft/models/item/bad.json", b"{}")
             .unwrap());
         assert!(!bank
@@ -1391,6 +1397,64 @@ mod tests {
             bank.element_face(&st, Face::NegZ, 1).unwrap().texture,
             "test:flower_png"
         );
+    }
+    #[test]
+    fn nested_modded_item_models_and_custom_parent_support_extended_exact_geometry() {
+        let mut bank = ModelBank::default();
+        bank.insert("assets/create.addon/blockstates/gizmo.json",
+            br#"{"variants":{"":{"model":"create.addon:item/machine/gizmo"}}}"#).unwrap();
+        bank.insert("assets/create.addon/models/item/machine/gizmo.json",
+            br##"{"parent":"create.addon:custom/complex/base","textures":{
+                "all":"create.addon:item/machine/gizmo",
+                "side":"create.addon:entity/machine/side"}}"##).unwrap();
+        bank.insert("assets/create.addon/models/custom/complex/base.json",
+            br##"{"elements":[{"from":[-16,0,-8],"to":[32,16,24],"faces":{
+                "north":{"texture":"#side","uv":[0,0,16,16]},
+                "up":{"texture":"#all","uv":[0,0,16,16]}}}]}"##).unwrap();
+        let state = s("create.addon:gizmo", &[]);
+        let parts = bank.parts_at(&state, (34, 66, -42)).unwrap();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].bounds.min, [-1.5, -0.5, -1.0]);
+        assert_eq!(parts[0].bounds.max, [1.5, 0.5, 1.0]);
+        assert_eq!(
+            bank.element_face_at(&state, Face::NegZ, 0, (34, 66, -42)).unwrap().texture,
+            "create.addon:entity/machine/side"
+        );
+        assert_eq!(
+            bank.element_face_at(&state, Face::Top, 0, (34, 66, -42)).unwrap().texture,
+            "create.addon:item/machine/gizmo"
+        );
+        for bad in [
+            "assets/create.addon/models/item/../escape.json",
+            "assets/create.addon/models/UPPER.json",
+            "assets/create.addon/models/item//empty.json",
+        ] {
+            assert!(!bank.insert(bad, b"{}").unwrap(), "{bad}");
+        }
+    }
+    #[test]
+    fn bounded_large_block_models_render_all_selected_elements_consistently() {
+        let mut bank = ModelBank::default();
+        bank.insert("assets/example/blockstates/engine.json",
+            br#"{"variants":{"":{"model":"example:block/engine"}}}"#).unwrap();
+        let one = serde_json::json!({"from":[0,0,0],"to":[16,16,16],
+            "faces":{"north":{"texture":"#all"}}});
+        let model = serde_json::json!({"textures":{"all":"example:block/engine"},
+            "elements":vec![one.clone(); 160]});
+        bank.insert("assets/example/models/block/engine.json",
+            &serde_json::to_vec(&model).unwrap()).unwrap();
+        let state = s("example:engine", &[]);
+        assert_eq!(bank.parts_at(&state, (1, 2, 3)).unwrap().len(), 160);
+        assert_eq!(
+            bank.element_face_at(&state, Face::NegZ, 159, (1, 2, 3)).unwrap().texture,
+            "example:engine"
+        );
+        assert_eq!(bank.face_defined_at(&state, Face::Top, 159, (1, 2, 3)), Some(false));
+        let too_many = serde_json::json!({"textures":{"all":"example:block/engine"},
+            "elements":vec![one; 257]});
+        bank.insert("assets/example/models/block/engine.json",
+            &serde_json::to_vec(&too_many).unwrap()).unwrap();
+        assert!(bank.parts_at(&state, (1, 2, 3)).is_none());
     }
     #[test]
     fn dotted_mod_resource_json_resolves_texture_and_keeps_namespace() {

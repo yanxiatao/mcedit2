@@ -632,14 +632,15 @@ pub(crate) struct TextureBank {
     pub source: String,
     pub warnings: Vec<String>,
 }
+/// Parse source texture locations from all Java block-model-capable
+/// namespaces. Keep block/ and legacy blocks/ aliases backward compatible;
+/// retain other folders in the identity so similarly-named sprites cannot
+/// collide. The atlas loader still applies its existing memory budget.
 fn texture_id(path: &str) -> Option<String> {
     let parts: Vec<_> = path.split('/').collect();
-    // Java 1.13 flattened textures/blocks/ to textures/block/.
-    // Both layouts must resolve to the same namespaced block texture IDs.
     if parts.len() < 5
         || parts[0] != "assets"
         || parts[2] != "textures"
-        || !matches!(parts[3], "block" | "blocks")
         || !path.ends_with(".png")
     {
         return None;
@@ -648,11 +649,19 @@ fn texture_id(path: &str) -> Option<String> {
     if !resource_ids::namespace(namespace) {
         return None;
     }
-    let relative = parts[4..].join("/");
+    let relative = parts[3..].join("/");
     let name = relative.strip_suffix(".png")?;
-    if !resource_ids::path(name, 150) {
+    if !resource_ids::path(name, 160) {
         return None;
     }
+    // Climate tables have an independent 256x256 source decoder.
+    if namespace == "minecraft" && matches!(name, "colormap/grass" | "colormap/foliage") {
+        return None;
+    }
+    let name = name
+        .strip_prefix("block/")
+        .or_else(|| name.strip_prefix("blocks/"))
+        .unwrap_or(name);
     Some(format!("{namespace}:{name}"))
 }
 fn decode_png_frames(bytes: &[u8]) -> Result<Vec<Tile>, String> {
@@ -828,7 +837,7 @@ impl PackAsset {
             return Some(Self::Texture(id));
         }
         (name.ends_with(".json")
-            && (name.contains("/models/block/") || name.contains("/blockstates/")))
+            && (name.contains("/models/") || name.contains("/blockstates/")))
         .then_some(Self::Model)
     }
     fn max_bytes(&self) -> u64 {
@@ -1920,7 +1929,10 @@ mod tests {
             texture_id("assets/minecraft/textures/blocks/stone.png"),
             Some("minecraft:stone".into())
         );
-        assert_eq!(texture_id("assets/minecraft/textures/item/stone.png"), None);
+        assert_eq!(
+            texture_id("assets/minecraft/textures/item/stone.png"),
+            Some("minecraft:item/stone".into())
+        );
     }
     #[test]
     fn atlas_packs_sorted_ids_without_cross_tile_color_bleed() {
@@ -2194,6 +2206,36 @@ mod tests {
         assert!(decode_png(&bytes).unwrap_err().contains("dimensions"));
     }
     #[test]
+    fn all_model_texture_families_are_namespaced_and_collision_free() {
+        assert_eq!(
+            texture_id("assets/create.addon/textures/item/machine/gizmo.png"),
+            Some("create.addon:item/machine/gizmo".into())
+        );
+        assert_eq!(
+            texture_id("assets/create.addon/textures/entity/machine/gizmo.png"),
+            Some("create.addon:entity/machine/gizmo".into())
+        );
+        assert_eq!(
+            texture_id("assets/create.addon/textures/block/machine/gizmo.png"),
+            Some("create.addon:machine/gizmo".into())
+        );
+        assert_eq!(
+            texture_id("assets/create.addon/textures/blocks/machine/gizmo.png"),
+            Some("create.addon:machine/gizmo".into())
+        );
+        assert_eq!(
+            texture_id("assets/minecraft/textures/colormap/grass.png"), None
+        );
+        for invalid in [
+            "assets/mod/textures/entity/../escape.png",
+            "assets/mod/textures/item//empty.png",
+            "assets/mod/textures/entity/UPPER.png",
+            "assets/mod/textures/item/./secret.png",
+        ] {
+            assert_eq!(texture_id(invalid), None);
+        }
+    }
+    #[test]
     fn dotted_modded_namespace_and_texture_filename_load_without_loss() {
         assert_eq!(
             texture_id("assets/create.addon/textures/block/machine/gear.v2.png"),
@@ -2240,7 +2282,10 @@ mod tests {
             Some("example:machine/casing".into())
         );
         assert_eq!(texture_id("assets/../textures/block/test.png"), None);
-        assert_eq!(texture_id("assets/minecraft/textures/item/stone.png"), None);
+        assert_eq!(
+            texture_id("assets/minecraft/textures/item/stone.png"),
+            Some("minecraft:item/stone".into())
+        );
     }
     #[test]
     fn exact_face_rule_and_mod_namespace() {

@@ -15,14 +15,15 @@ impl Box3 {
         min: [-0.5, -0.5, -0.5],
         max: [0.5, 0.5, 0.5],
     };
-    /// Vanilla model JSON uses coordinates in the [0,16] cube. Refuse
-    /// malformed/inverted/nonfinite shapes, not approximate them.
+    /// Java block model elements may extend outside the local block volume.
+    /// Preserve the bounded [-16,32] source coordinates rather than
+    /// replacing hanging/oversized models with a full cube.
     pub fn from_model_units(from: [f32; 3], to: [f32; 3]) -> Option<Self> {
         if (0..3).any(|i| {
             !from[i].is_finite()
                 || !to[i].is_finite()
-                || from[i] < 0.0
-                || to[i] > 16.0
+                || from[i] < -16.0
+                || to[i] > 32.0
                 || from[i] >= to[i]
         }) {
             return None;
@@ -40,8 +41,8 @@ impl Box3 {
         for axis in 0..3 {
             if !from[axis].is_finite()
                 || !to[axis].is_finite()
-                || from[axis] < 0.0
-                || to[axis] > 16.0
+                || from[axis] < -16.0
+                || to[axis] > 32.0
                 || from[axis] > to[axis]
             {
                 return None;
@@ -1269,12 +1270,23 @@ mod tests {
         assert!(Box3::from_model_units_plane([0.0, 0.0, 0.0], [16.0, 16.0, 16.0]).is_none());
     }
     #[test]
+    fn bounded_extended_java_models_preserve_outside_block_geometry() {
+        let b = Box3::from_model_units([-16.0, 0.0, -8.0], [32.0, 16.0, 24.0]).unwrap();
+        assert_eq!(b.min, [-1.5, -0.5, -1.0]);
+        assert_eq!(b.max, [1.5, 0.5, 1.0]);
+        assert!(Box3::from_model_units([-16.01, 0.0, 0.0], [16.0, 16.0, 16.0]).is_none());
+        assert!(Box3::from_model_units([0.0, 0.0, 0.0], [32.01, 16.0, 16.0]).is_none());
+        assert!(Box3::from_model_units_plane([-16.0, 8.0, 0.0], [32.0, 8.0, 24.0]).is_some());
+        assert!(Box3::from_model_units_plane([-16.0, 8.0, 0.0], [32.01, 8.0, 24.0]).is_none());
+        assert!(Box3::from_model_units([0.0, 0.0, 0.0], [f32::INFINITY, 16.0, 16.0]).is_none());
+    }
+    #[test]
     fn model_unit_boxes_check_signed_scale_and_invalid_dimensions() {
         let a = Box3::from_model_units([2.0, 0.0, 4.0], [14.0, 8.0, 12.0]).unwrap();
         assert_eq!(a.min, [-0.375, -0.5, -0.25]);
         assert_eq!(a.max, [0.375, 0.0, 0.25]);
         assert!(Box3::from_model_units([0.0, 0.0, 0.0], [0.0, 16.0, 16.0]).is_none());
-        assert!(Box3::from_model_units([0.0, 0.0, 0.0], [17.0, 16.0, 16.0]).is_none());
+        assert!(Box3::from_model_units([0.0, 0.0, 0.0], [17.0, 16.0, 16.0]).is_some());
     }
     #[test]
     fn java_y_and_x_quarter_turns_preserve_exact_box_dimensions() {
