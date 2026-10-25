@@ -1,3 +1,2 @@
-2026-10-24 user-requested Windows x64 ZIP retry after first run 40108651245 found misplaced Cargo.toml dependencies.
-Move rfd and sys-locale declarations into [dependencies], not [[bin]] metadata.
-Run release Rust tests and optimized GUI/CLI package; ZIP artifact only; no Release/default-branch changes.
+2026-10-25 rerun Windows package after removing obsolete 36px atlas page width test assertion.
+Test now verifies page geometry invariants and sampled texel isolation.

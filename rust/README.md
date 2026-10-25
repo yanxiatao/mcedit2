@@ -1442,3 +1442,136 @@ This PR only modifies the Draft Rust branch, so the native Actions button
 will not be visible until an equivalent workflow is separately approved
 and added to the default branch. The build itself is guarded to execute
 only on `rust-iced-rewrite`; no default-branch merge occurs here.
+
+## Minecraft-like spectator perspective (source-only preview)
+
+The main 3D viewport now defaults to an actual **world-space perspective
+camera** instead of the old flattened/isometric screen projection. The
+wgpu vertex shader projects real model-local 3D vertices through a 75°
+field-of-view camera and depth test, with perspective-correct PNG UVs,
+source-aware neighboring full-face culling, an opaque sky backdrop, and a
+center crosshair. The immutable original-world near view loads an **exposed
+32×32×48 voxel volume** (including supported caves/partial block models)
+from the verified source NBT; it is not just a top-surface height image.
+
+Controls: **W/A/S/D** fly, **Space** rise, **Shift or Q** descend, **Ctrl**
+sprint, **hold right mouse button and drag** to turn and look up/down.
+The current XYZ/yaw/pitch are displayed below the viewport; there is no
+collision or gravity. Crossing the read-only volume window asynchronously
+requests a new one without mutating the source world. Texture selection
+still uses the existing resource-pack ZIP/JAR/folder control. The previous
+2D overhead and older isometric view remain optional modes.
+
+The static world-space mesh remains on the existing bounded background
+worker and is **not rebuilt on every camera movement**: just the tiny
+80-byte GPU camera uniform changes. Camera-relative float coordinates
+remain precise near signed Minecraft world borders. Triangles have a
+hard safety cap and no Block Entity/entity data is altered.
+
+**Remaining differences from Minecraft proper:** Iced canvas currently
+uses right-drag rather than native captured/locked mouse-look; source
+volume reads are limited to 32×32×48 and distant terrain uses separate
+sparse LOD. Dynamic Minecraft lighting, fog, shaders, world biome tint,
+particle/entity animation and complete third-party model parity are not
+implemented. This is a real perspective rendering path, but NOT an
+embedded Minecraft client. New code is committed but **not yet compiled,
+CI-tested, or Windows GPU-tested**. Run CI only when explicitly requested.
+
+## Continuous spectator render-distance streaming and larger resource packs
+
+The first-person spectator workspace progressively visits **all real Java
+source chunk coordinates** in concentric rings (configurable radius
+8/16/32/64 chunks), instead of only shifting one exact 32×32×48 fixed
+window. The near observer window and first two surrounding rings decode
+**actual exposed 3D voxel/JSON block models** across 48 vertical levels;
+rings 3–12 render 4-block height-sampled squares, 13–24 use 8-block
+samples, and beyond that 16-block samples. More distant LOD is
+**visual-only and never editable**. Every request uses validated original
+chunk coords, bounded decoder limits and Region header checks. A
+one-at-a-time worker submits bounded batches; moving two source chunks
+reorders/reuses the cached ring and drops obsolete results by nonce.
+Decoded original source patches, visible voxels and geometry publication
+are capped; no entities, mob ticking or new world writes occur.
+
+**Minecraft texture pack support:** The 1,024/4,096 PNG and 4,096
+model-JSON entry limits were replaced with decoded-source-memory budgets,
+a multi-page GPU texture array, and a portable layer/memory budget.
+Page and UV mappings remain stable across animation frames; source sprite
+resolution is retained where possible (16–4096px) and selectively
+downsampled as the atlas approaches GPU limits. Individual compressed
+PNG sources may be up to 32MiB, decoded PNG memory 512MiB in total,
+and original model-JSON source up to 256MiB in total.
+ZIP/directory entry safeguards still reject clearly abusive archives.
+
+Resource ZIP/JAR/folder loading now runs **off the iced UI thread**, with
+latest-request wins and stale results refused. If no pack was selected,
+the app looks for a corresponding installed original Minecraft client
+JAR in conventional local launcher parent directories and reads
+supported block sprites/models from it without downloading assets.
+User-selected packs always override automatic assets.
+
+Distant terrain surfaces display the original sampled block's actual
+PNG tile when available instead of forced solid colors. The GPU now samples paged sprite UVs using a shared 2D-array binding,
+with per-face flat page selection and per-page animated updates.
+Full Minecraft shader/light/connected-texture behavior and
+multiple-resource-pack stacking remain separate compatibility features.
+No CI, cargo compilation, Windows packaging or live GPU render test
+has been executed for these changes.
+
+## Paged block atlases: GPU 2D-array binding and animated source images
+
+The GPU and CPU rendering paths use a **paged** atlas rather than a
+single 8192px bitmap or a hard-coded texture-count limit.
+
+- Each loaded original block PNG obtains a stable
+  `(atlas page, UV rectangle)` address in a namespaced resource table.
+  Every render face carries its page index as an integer vertex attribute,
+  marked flat in WGSL; the shader reads a `texture_2d_array` layer.
+  This keeps one draw call for meshes spanning multiple pages, without
+  treating two equal UVs on different pages as the same source texture.
+- Every page is independently allocated and CPU-has-source pixels.
+  The page layout selects the highest affordable source sprite resolution
+  (power-of-two 16–4096 px) subject to source sprite size, a maximum
+  8192px texture edge on large HD pages, portable 256 array layers and
+  a 768 MiB total GPU atlas allocation budget. When too many high-res
+  sprites would exceed the budget, the chosen cell resolution decreases
+  before decoding or uploading the atlas; the loader emits a diagnostic.
+  Packs are never silently cut off at 1,024, 4,096 or 57,599 sprites.
+- The atlas is built read-only on the texture-pack loader's worker.
+  Animated PNG frames retain their original sprite-to-page/UV mappings;
+  only pages containing changed frames are cloned (copy-on-write).
+  The wgpu upload checks each page's `Arc` identity and transfers only
+  changed layers. Layout changes atomically recreate the GPU array and
+  invalidate stale bind groups. Switching packs constructs a new atlas;
+  source world block NBT stays untouched.
+- The GPU perspective spectator mesh, classic GPU isometric view,
+  Canvas isometric fallback, alpha-aware picking and 2D slice Canvas
+  all resolve the same per-face source `(page, UV, alpha)` metadata.
+  Transparent/cutout sprites keep their original alpha with duplicated
+  1px gutters to prevent neighboring sprite color leaks.
+
+**Scope:** This adds actual multi-page texture array management, **not**
+Minecraft's complete resource reload pipeline. Original custom shaders,
+entity atlases, multi-pack priority stacking, connected textures, custom
+render layers, biome-dependent tint, emissive overlays and exact full
+Minecraft model parity remain separate concerns. Portable GPU layer and
+memory budgets remain safeguards; some hardware can support higher limits.
+No Rust compilation, automated CI, Windows package or visual GPU run was
+performed as part of this source-only migration.
+
+## Mixed-resolution GPU atlas packing
+
+Block sprite atlases now shelf-pack source tiles at **individual, power-of-two
+resolutions** (with per-tile extrusion gutters) into stable-indexed equal-size
+wgpu texture-array pages. A 512px modded texture no longer forces thousands
+of unrelated vanilla 16px sprites to allocate 512px slots or downsample to
+16px merely to stay within the atlas GPU memory budget. Sprite UV and page
+index are assigned from immutable physical placements. Animated PNGs update
+only their owning array pages and preserve UV coordinates. A read-only
+regression verifies the coexistence of 1,000 small sprites and a 512px HD
+sprite without unintended resampling or wrong page addressing.
+
+The outer GPU texture-array pages currently share one dimension per atlas;
+there is still a 768MiB GPU atlas budget and a maximum of 256 array pages.
+This is not yet the full Minecraft resource reload/multi-pack namespace
+system. New code remains **uncompiled and untested by CI** in this turn.
