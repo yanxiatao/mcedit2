@@ -1,7 +1,7 @@
 //! Optional non-mutating Java resource-pack block PNG reader.
 //! Supports an extracted pack directory or a ZIP, never executes or extracts
 //! pack data; missing/unknown textures retain the existing safe color guide.
-use crate::resource_models::ModelBank;
+use crate::{resource_ids, resource_models::ModelBank};
 use image::ImageFormat;
 use mcedit2_world::sections::State;
 use std::collections::{BTreeMap, BTreeSet};
@@ -624,6 +624,9 @@ pub(crate) struct TextureBank {
     foliage_colormap: Option<Tile>,
     modern_textures: BTreeSet<String>,
     modern_metadata: BTreeSet<String>,
+    // Track identities replaced in each overlay independently of entry order.
+    layer_png: BTreeSet<String>,
+    layer_metadata: BTreeSet<String>,
     atlas: Option<Arc<TextureAtlas>>,
     animation_tick: u64,
     pub source: String,
@@ -642,22 +645,12 @@ fn texture_id(path: &str) -> Option<String> {
         return None;
     }
     let namespace = parts[1];
-    if namespace.is_empty()
-        || namespace.len() > 80
-        || !namespace
-            .bytes()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_' || c == b'-')
-    {
+    if !resource_ids::namespace(namespace) {
         return None;
     }
     let relative = parts[4..].join("/");
     let name = relative.strip_suffix(".png")?;
-    if name.is_empty()
-        || name.len() > 150
-        || !name.bytes().all(|c| {
-            c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_' || c == b'-' || c == b'/'
-        })
-    {
+    if !resource_ids::path(name, 150) {
         return None;
     }
     Some(format!("{namespace}:{name}"))
@@ -811,7 +804,70 @@ fn biome_color(biome: Option<&str>, name: &str) -> [f32; 3] {
     ]
 }
 
+/// The source archive and directory walkers share one canonical resource
+/// classifier. In particular, a high-priority texture's identity is only
+/// committed after its bytes decode, regardless of ZIP entry order.
+enum PackAsset {
+    Colormap(&'static str),
+    Model,
+    Metadata(String),
+    Texture(String),
+}
+impl PackAsset {
+    fn classify(name: &str) -> Option<Self> {
+        if name == "assets/minecraft/textures/colormap/grass.png" {
+            return Some(Self::Colormap("grass"));
+        }
+        if name == "assets/minecraft/textures/colormap/foliage.png" {
+            return Some(Self::Colormap("foliage"));
+        }
+        if let Some(name) = name.strip_suffix(".mcmeta") {
+            return texture_id(name).map(Self::Metadata);
+        }
+        if let Some(id) = texture_id(name) {
+            return Some(Self::Texture(id));
+        }
+        (name.ends_with(".json")
+            && (name.contains("/models/block/") || name.contains("/blockstates/")))
+        .then_some(Self::Model)
+    }
+    fn max_bytes(&self) -> u64 {
+        match self {
+            Self::Model => 2 * 1024 * 1024,
+            Self::Metadata(_) => MAX_ANIMATION_META as u64,
+            Self::Colormap(_) | Self::Texture(_) => MAX_TEXTURE_BYTES,
+        }
+    }
+}
+
 impl TextureBank {
+    fn ingest_asset(&mut self, name: &str, asset: PackAsset, bytes: Vec<u8>, memory: &mut usize) {
+        match asset {
+            PackAsset::Colormap(which) => {
+                if let Err(e) = self.insert_colormap(which, &bytes) {
+                    self.warnings.push(format!("Skipped {name}: {e}"));
+                }
+            }
+            PackAsset::Model => {
+                if let Err(e) = Arc::make_mut(&mut self.models).insert(name, &bytes) {
+                    self.warnings.push(format!("Skipped model {name}: {e}"));
+                }
+            }
+            PackAsset::Metadata(id) => {
+                if self.accept_metadata_path(&id, name) && self.metadata.len() < 65536 {
+                    self.layer_metadata.insert(id.clone());
+                    self.metadata.insert(id, bytes);
+                }
+            }
+            PackAsset::Texture(id) => {
+                if self.accept_texture_path(&id, name) {
+                    if let Err(e) = self.insert_texture_path(id.clone(), name, &bytes, memory) {
+                        self.warnings.push(format!("Skipped {id}: {e}"));
+                    }
+                }
+            }
+        }
+    }
     fn insert(&mut self, id: String, data: &[u8], memory: &mut usize) -> Result<(), String> {
         // Source limits are validated against mixed GPU page layout after loading.
         let frames = decode_png_frames(data)?;
@@ -831,6 +887,7 @@ impl TextureBank {
             return Err("Decoded texture memory exceeds the 512MiB safety budget".into());
         }
         *memory = next;
+        self.layer_png.insert(id.clone());
         let tile = frames[0].clone();
         // A later replacement may be a static image. Remove any old
         // animation instead of playing frames from another source file.
@@ -877,12 +934,25 @@ impl TextureBank {
             rgba[2] as f32 / 255.0,
         ])
     }
-    fn accept_texture_path(&mut self, id: &str, path: &str) -> bool {
-        let modern = path.contains("/textures/block/");
-        if modern {
-            self.modern_textures.insert(id.to_owned());
+    /// Within one pack, a successfully decoded modern block/ PNG wins over
+    /// the legacy blocks/ alias. Invalid PNG data must NOT reserve that
+    /// identity: an intact legacy sprite (or a lower-priority pack) can still
+    /// render the block instead of being silently replaced by missingno.
+    fn accept_texture_path(&self, id: &str, path: &str) -> bool {
+        path.contains("/textures/block/") || !self.modern_textures.contains(id)
+    }
+    fn insert_texture_path(
+        &mut self,
+        id: String,
+        path: &str,
+        data: &[u8],
+        memory: &mut usize,
+    ) -> Result<(), String> {
+        self.insert(id.clone(), data, memory)?;
+        if path.contains("/textures/block/") {
+            self.modern_textures.insert(id);
         }
-        modern || !self.modern_textures.contains(id)
+        Ok(())
     }
     fn accept_metadata_path(&mut self, id: &str, path: &str) -> bool {
         let modern = path.contains("/textures/block/");
@@ -902,11 +972,27 @@ impl TextureBank {
         if depth > 20 {
             return Err("Resource-pack folder nesting over 20".into());
         }
-        if !folder.is_dir() {
+        let metadata = match fs::symlink_metadata(folder) {
+            Ok(metadata) => metadata,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.to_string()),
+        };
+        // The initial assets/ directory must obey the same rule as its
+        // children; is_dir() alone would follow a linked outside tree.
+        if metadata.file_type().is_symlink() {
+            return Err("Linked resource-pack assets directory is refused".into());
+        }
+        if !metadata.is_dir() {
             return Ok(());
         }
-        for item in fs::read_dir(folder).map_err(|e| e.to_string())? {
-            let item = item.map_err(|e| e.to_string())?;
+        // Directory enumeration order is not portable. This also makes the
+        // behavior of within-pack alias and model insertion deterministic.
+        let mut items = fs::read_dir(folder)
+            .map_err(|e| e.to_string())?
+            .collect::<std::io::Result<Vec<_>>>()
+            .map_err(|e| e.to_string())?;
+        items.sort_by_key(|item| item.file_name());
+        for item in items {
             *entries += 1;
             if *entries > 250_000 {
                 return Err("Resource pack exceeds 250,000 directory entries safety budget".into());
@@ -923,81 +1009,37 @@ impl TextureBank {
                     continue;
                 };
                 let name = relative.to_string_lossy().replace('\\', "/");
-                let id = texture_id(&name);
-                let meta_id = name.strip_suffix(".mcmeta").and_then(texture_id);
-                let colormap = name
-                    .strip_prefix("assets/minecraft/textures/colormap/")
-                    .and_then(|name| name.strip_suffix(".png"))
-                    .filter(|name| matches!(*name, "grass" | "foliage"));
-                let is_model = name.ends_with(".json")
-                    && (name.contains("/models/block/") || name.contains("/blockstates/"));
-                if id.is_none() && meta_id.is_none() && !is_model && colormap.is_none() {
+                let Some(asset) = PackAsset::classify(&name) else {
                     continue;
-                }
+                };
+                let max_size = asset.max_bytes();
                 let meta = fs::metadata(&path).map_err(|e| e.to_string())?;
-                if meta.len()
-                    > (if is_model {
-                        2 * 1024 * 1024
-                    } else if meta_id.is_some() {
-                        MAX_ANIMATION_META as u64
-                    } else {
-                        MAX_TEXTURE_BYTES
-                    })
-                {
+                if meta.len() > max_size {
                     self.warnings.push(format!("Skipped oversize {name}"));
                     continue;
                 }
                 let bytes = fs::read(&path).map_err(|e| e.to_string())?;
-                if let Some(kind) = colormap {
-                    if let Err(e) = self.insert_colormap(kind, &bytes) {
-                        self.warnings.push(format!("Skipped {name}: {e}"));
-                    }
-                } else if is_model {
-                    if let Err(e) = Arc::make_mut(&mut self.models).insert(&name, &bytes) {
-                        self.warnings.push(format!("Skipped model {name}: {e}"));
-                    }
-                } else if let Some(id) = meta_id {
-                    if self.accept_metadata_path(&id, &name) && self.metadata.len() < 65536 {
-                        self.metadata.insert(id, bytes);
-                    }
-                } else if let Some(id) = id {
-                    if self.accept_texture_path(&id, &name) {
-                        if let Err(e) = self.insert(id.clone(), &bytes, memory) {
-                            self.warnings.push(format!("Skipped {id}: {e}"));
-                        }
-                    }
+                if bytes.len() as u64 > max_size {
+                    self.warnings.push(format!("Skipped oversize {name}"));
+                    continue;
                 }
+                self.ingest_asset(&name, asset, bytes, memory);
             }
         }
         Ok(())
     }
-    fn read_zip<R: Read + Seek>(&mut self, r: R) -> Result<(), String> {
+    fn read_zip<R: Read + Seek>(&mut self, r: R, memory: &mut usize) -> Result<(), String> {
         let mut archive = zip::ZipArchive::new(r).map_err(|e| e.to_string())?;
         if archive.len() > 1_000_000 {
             return Err("ZIP exceeds 1,000,000 entries safety budget".into());
         }
-        let mut memory = 0;
         for i in 0..archive.len() {
             let mut member = archive.by_index(i).map_err(|e| e.to_string())?;
             let name = member.name().to_string();
-            let id = texture_id(&name);
-            let meta_id = name.strip_suffix(".mcmeta").and_then(texture_id);
-            let colormap = name
-                .strip_prefix("assets/minecraft/textures/colormap/")
-                .and_then(|name| name.strip_suffix(".png"))
-                .filter(|name| matches!(*name, "grass" | "foliage"));
-            let is_model = name.ends_with(".json")
-                && (name.contains("/models/block/") || name.contains("/blockstates/"));
-            if id.is_none() && meta_id.is_none() && !is_model && colormap.is_none() {
+            let Some(asset) = PackAsset::classify(&name) else {
                 continue;
-            }
-            let max_size = if is_model {
-                2 * 1024 * 1024
-            } else if meta_id.is_some() {
-                MAX_ANIMATION_META as u64
-            } else {
-                MAX_TEXTURE_BYTES
             };
+            let max_size = asset.max_bytes();
             if member.size() > max_size {
                 self.warnings.push(format!("Skipped oversize {name}"));
                 continue;
@@ -1008,25 +1050,11 @@ impl TextureBank {
                 .take(max_size + 1)
                 .read_to_end(&mut bytes)
                 .map_err(|e| e.to_string())?;
-            if let Some(kind) = colormap {
-                if let Err(e) = self.insert_colormap(kind, &bytes) {
-                    self.warnings.push(format!("Skipped {name}: {e}"));
-                }
-            } else if is_model {
-                if let Err(e) = Arc::make_mut(&mut self.models).insert(&name, &bytes) {
-                    self.warnings.push(format!("Skipped model {name}: {e}"));
-                }
-            } else if let Some(id) = meta_id {
-                if self.accept_metadata_path(&id, &name) && self.metadata.len() < 65536 {
-                    self.metadata.insert(id, bytes);
-                }
-            } else if let Some(id) = id {
-                if self.accept_texture_path(&id, &name) {
-                    if let Err(e) = self.insert(id.clone(), &bytes, &mut memory) {
-                        self.warnings.push(format!("Skipped {id}: {e}"));
-                    }
-                }
+            if bytes.len() as u64 > max_size {
+                self.warnings.push(format!("Skipped oversize {name}"));
+                continue;
             }
+            self.ingest_asset(&name, asset, bytes, memory);
         }
         Ok(())
     }
@@ -1083,45 +1111,71 @@ impl TextureBank {
             .map(|atlas| Arc::new(atlas.advance(&self.animations, self.animation_tick, ticks)));
         Some(next)
     }
+    /// A single pack uses the same path as ordered overlays.
     pub fn open(path: &Path) -> Result<Self, String> {
-        if path.as_os_str().is_empty() {
-            return Err("Select a resource-pack directory or ZIP".into());
+        Self::open_stack(&[path.to_path_buf()])
+    }
+
+    /// Merge client and resource packs in increasing priority. Only source
+    /// identity maps are overlaid; the GPU atlas is allocated once at the end.
+    pub fn open_stack(paths: &[std::path::PathBuf]) -> Result<Self, String> {
+        if paths.is_empty() || paths.iter().any(|p| p.as_os_str().is_empty()) {
+            return Err("Select at least one resource-pack directory or ZIP".into());
+        }
+        if paths.len() > 32 {
+            return Err("Resource-pack stack exceeds 32 layers".into());
         }
         let mut out = Self {
-            source: path.display().to_string(),
+            source: paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(" -> "),
             ..Self::default()
         };
-        if path.is_dir() {
-            let root = path.canonicalize().map_err(|e| e.to_string())?;
-            let mut memory = 0;
-            let mut entries = 0;
-            out.walk(&root, &root.join("assets"), &mut memory, 0, &mut entries)?;
-        } else if path.is_file() {
-            if !matches!(
-                path.extension().and_then(|v| v.to_str()),
-                Some("zip" | "jar")
-            ) {
-                return Err(
-                    "Only directories, .zip packs and .jar client assets are supported".into(),
-                );
+        let mut memory = 0;
+        for path in paths {
+            // Canonical block/ beats legacy blocks/ within one pack only;
+            // a higher pack's legacy sprite must still replace base sprites.
+            out.modern_textures.clear();
+            out.modern_metadata.clear();
+            out.layer_png.clear();
+            out.layer_metadata.clear();
+            if path.is_dir() {
+                let root = path.canonicalize().map_err(|e| e.to_string())?;
+                let mut entries = 0;
+                out.walk(&root, &root.join("assets"), &mut memory, 0, &mut entries)?;
+            } else if path.is_file() {
+                if !matches!(
+                    path.extension().and_then(|ext| ext.to_str()),
+                    Some("zip" | "jar")
+                ) {
+                    return Err(
+                        "Only directories, .zip packs and .jar client assets are supported".into(),
+                    );
+                }
+                out.read_zip(File::open(path).map_err(|e| e.to_string())?, &mut memory)?;
+            } else {
+                return Err(format!("Resource-pack layer does not exist: {}", path.display()));
             }
-            let file = File::open(path).map_err(|e| e.to_string())?;
-            out.read_zip(file)?;
-        } else {
-            return Err("Resource pack does not exist".into());
+            // A new static image must never inherit lower-priority animated
+            // PNG metadata. Metadata-only overlays are deliberately allowed.
+            for id in &out.layer_png {
+                if !out.layer_metadata.contains(id) {
+                    out.metadata.remove(id);
+                }
+            }
         }
         if out.tiles.is_empty() {
-            return Err("Pack contains no supported assets/*/textures/block/*.png".into());
+            return Err("Packs contain no supported assets/*/textures/block/*.png".into());
         }
-        // Reserve an actual GPU atlas entry, including its own safe UV
-        // padding and page. It works in both GPU and CPU Canvas paths.
         Arc::make_mut(&mut out.tiles).insert(MISSING_TEXTURE_ID.into(), missing_texture());
         out.finalize_animations();
         let chosen = mixed_layout(&out.tiles)?;
         let source_max = out
             .tiles
             .values()
-            .map(|t| t.width.max(t.height))
+            .map(|tile| tile.width.max(tile.height))
             .max()
             .unwrap_or(16);
         if source_max > chosen.max_cell {
@@ -1847,6 +1901,10 @@ mod tests {
         let id = "minecraft:stone";
         assert!(bank.accept_texture_path(id, "assets/minecraft/textures/blocks/stone.png"));
         assert!(bank.accept_texture_path(id, "assets/minecraft/textures/block/stone.png"));
+        // Classification alone cannot reserve the modern identity: the
+        // candidate's PNG may be malformed. A successful insert marks it.
+        assert!(bank.accept_texture_path(id, "assets/minecraft/textures/blocks/stone.png"));
+        bank.modern_textures.insert(id.into());
         assert!(!bank.accept_texture_path(id, "assets/minecraft/textures/blocks/stone.png"));
         assert!(bank.accept_metadata_path(id, "assets/minecraft/textures/blocks/stone.png.mcmeta"));
         assert!(bank.accept_metadata_path(id, "assets/minecraft/textures/block/stone.png.mcmeta"));
@@ -2136,6 +2194,42 @@ mod tests {
         assert!(decode_png(&bytes).unwrap_err().contains("dimensions"));
     }
     #[test]
+    fn dotted_modded_namespace_and_texture_filename_load_without_loss() {
+        assert_eq!(
+            texture_id("assets/create.addon/textures/block/machine/gear.v2.png"),
+            Some("create.addon:machine/gear.v2".into())
+        );
+        assert_eq!(
+            texture_id("assets/create.addon/textures/blocks/machine/gear.v2.png"),
+            Some("create.addon:machine/gear.v2".into())
+        );
+        for filename in [
+            "assets/create.addon/textures/block/../secret.png",
+            "assets/create.addon/textures/block/./gear.png",
+            "assets/create.addon/textures/block/a//gear.png",
+            "assets/create.addon/textures/block/A.png",
+            "assets/../textures/block/stone.png",
+        ] {
+            assert_eq!(texture_id(filename), None, "{filename}");
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn external_assets_directory_symlink_is_not_traversed() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!(
+            "mcedit2-linked-assets-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("pack")).unwrap();
+        std::fs::create_dir_all(root.join("external")).unwrap();
+        symlink(root.join("external"), root.join("pack/assets")).unwrap();
+        let error = TextureBank::open(&root.join("pack")).unwrap_err();
+        assert!(error.contains("Linked resource-pack assets directory"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+    #[test]
     fn path_parser_is_namespaced_and_does_not_accept_traversal() {
         assert_eq!(
             texture_id("assets/minecraft/textures/block/stone.png"),
@@ -2178,3 +2272,7 @@ mod tests {
         assert_eq!(tile.pixel(9.0, 9.0), [10, 11, 12, 0]);
     }
 }
+
+#[cfg(test)]
+#[path = "texture_stack_tests.rs"]
+mod stack_tests;

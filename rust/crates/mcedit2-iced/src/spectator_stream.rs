@@ -7,8 +7,8 @@ use mcedit2_world::{
     editing::Session,
     far_view::{self, FarChunkPatch, FarChunkRequest},
     surface::{
-        SurfaceView, SurfaceVoxel, VoxelMaterial, FACE_BOTTOM, FACE_NEG_X, FACE_NEG_Z, FACE_POS_X,
-        FACE_POS_Z, FACE_TOP,
+        exact_face_exposed_against, SurfaceView, SurfaceVoxel, VoxelMaterial, FACE_BOTTOM,
+        FACE_NEG_X, FACE_NEG_Z, FACE_POS_X, FACE_POS_Z, FACE_TOP,
     },
     WorldError,
 };
@@ -92,11 +92,48 @@ pub(crate) fn plan(location: [f64; 3], radius: u16) -> Result<Vec<FarChunkReques
     }
     Ok(result)
 }
-/// Keep the planned visible tile order stable, but issue the first inexpensive
-/// LOD batch before expensive complete near-chunk reads.
+/// Quantize Minecraft yaw so mouse movement does not continuously re-sort.
+fn look_sector(yaw: f32) -> u8 {
+    if !yaw.is_finite() {
+        return 0;
+    }
+    ((yaw.rem_euclid(360.0) / 45.0).round() as u8) % 8
+}
+fn front_vector(sector: u8) -> (i64, i64) {
+    const VECTORS: [(i64, i64); 8] = [
+        (0, 1), (-1, 1), (-1, 0), (-1, -1),
+        (0, -1), (1, -1), (1, 0), (1, 1),
+    ];
+    VECTORS[sector as usize % VECTORS.len()]
+}
+/// Sort strictly by distance ring, then prefer chunks in front of the
+/// spectator. Stable integer scoring avoids float ordering anomalies.
+fn sort_facing(
+    requests: &mut [FarChunkRequest],
+    center: (i32, i32),
+    sector: u8,
+) {
+    let (fx, fz) = front_vector(sector);
+    requests.sort_by_key(|request| {
+        let dx = i64::from(request.cx) - i64::from(center.0);
+        let dz = i64::from(request.cz) - i64::from(center.1);
+        (
+            dx.abs().max(dz.abs()),
+            -(dx * fx + dz * fz),
+            (dx * fz - dz * fx).abs(),
+            request.cx,
+            request.cz,
+        )
+    });
+}
+/// Every source chunk remains queued, including behind the camera.
+/// Only the first distant warmup and the subsequent exact/LOD priority
+/// change; this source data never enters editing operations.
 fn prioritized_pending(
     requests: &[FarChunkRequest],
     cached: &BTreeMap<Key, Arc<FarChunkPatch>>,
+    center: (i32, i32),
+    sector: u8,
 ) -> VecDeque<FarChunkRequest> {
     let mut exact = VecDeque::new();
     let mut distant = VecDeque::new();
@@ -110,6 +147,12 @@ fn prioritized_pending(
             distant.push_back(request);
         }
     }
+    let mut exact = exact.into_iter().collect::<Vec<_>>();
+    let mut distant = distant.into_iter().collect::<Vec<_>>();
+    sort_facing(&mut exact, center, sector);
+    sort_facing(&mut distant, center, sector);
+    let mut exact = VecDeque::from(exact);
+    let mut distant = VecDeque::from(distant);
     let mut pending = VecDeque::with_capacity(exact.len() + distant.len());
     // Include only the nearest LOD samples in the initial warmup. We never
     // skip or synthesize a source chunk: all remaining requests follow.
@@ -161,120 +204,58 @@ fn evict_farthest(
         }
     }
 }
-/// Only faces between verified full vanilla opaque cubes can be removed
-/// after independently-read chunks are merged. Keep all other boundaries:
-/// missing cells, modded models, partial blocks, liquids and LOD are not
-/// evidence of a solid occluder.
-fn full_opaque_cube(voxel: &SurfaceVoxel) -> bool {
-    if voxel.span != 1
-        || voxel.kind != VoxelMaterial::Solid
-        || !voxel.state.name.starts_with("minecraft:")
-    {
-        return false;
-    }
-    let name = voxel.state.name.strip_prefix("minecraft:").unwrap_or("");
-    // Positive allowlist instead of guessing that an unfamiliar vanilla
-    // state is a full cube. Unknown future blocks must remain visible.
-    matches!(
-        name,
-        "stone"
-            | "granite"
-            | "diorite"
-            | "andesite"
-            | "deepslate"
-            | "cobbled_deepslate"
-            | "cobblestone"
-            | "mossy_cobblestone"
-            | "dirt"
-            | "coarse_dirt"
-            | "rooted_dirt"
-            | "grass_block"
-            | "sand"
-            | "red_sand"
-            | "gravel"
-            | "bedrock"
-            | "netherrack"
-            | "end_stone"
-            | "obsidian"
-            | "crying_obsidian"
-            | "clay"
-            | "bricks"
-            | "stone_bricks"
-            | "mossy_stone_bricks"
-            | "cracked_stone_bricks"
-            | "chiseled_stone_bricks"
-            | "tuff"
-            | "calcite"
-            | "dripstone_block"
-            | "mud"
-            | "packed_mud"
-            | "mud_bricks"
-            | "snow_block"
-            | "ice"
-            | "packed_ice"
-            | "blue_ice"
-    ) || name.ends_with("_planks")
-        || name.ends_with("_log")
-        || name.ends_with("_wood")
-        || name.ends_with("_concrete")
-        || name.ends_with("_terracotta")
-        || name.ends_with("_wool")
-        || name.ends_with("_ore")
-        || name.ends_with("_metal_block")
-        || name.ends_with("_concrete_powder")
-}
-/// Verified classes: 0 is an opaque full cube, 1 and 2 are distinct
-/// original vanilla fluids. Non-exact LOD cells and unknown model shapes
-/// must never be used to infer neighboring source geometry.
-fn seam_material(v: &SurfaceVoxel) -> Option<u8> {
-    if full_opaque_cube(v) {
-        return Some(0);
-    }
-    if v.span != 1 || v.kind != VoxelMaterial::Liquid {
-        return None;
-    }
-    match v.state.name.as_str() {
-        "minecraft:water" => Some(1),
-        "minecraft:lava" => Some(2),
-        _ => None,
-    }
-}
+/// Reconcile exact block faces from independently loaded chunks using the
+/// same source-world occlusion predicate as intra-chunk reads. Only proven
+/// span=1 cells count as neighbors: approximate LOD, absent Sections, unknown
+/// modded geometry and transparent boundaries must not invent occluders.
+///
+/// Compute masks before mutating voxel flags so borrowed source states can
+/// be reused without cloning potentially tens of thousands of palettes.
 fn reconcile_exact_seams(view: &mut SurfaceView) {
-    let occupied: BTreeMap<(i32, i32, i32), u8> = view
-        .voxels
-        .iter()
-        .filter_map(|v| seam_material(v).map(|class| ((v.x, v.y, v.z), class)))
-        .collect();
-    for v in &mut view.voxels {
-        let Some(kind) = seam_material(v) else {
-            continue;
-        };
-        for (dx, dy, dz, face) in [
-            (0, 1, 0, FACE_TOP),
-            (0, -1, 0, FACE_BOTTOM),
-            (1, 0, 0, FACE_POS_X),
-            (-1, 0, 0, FACE_NEG_X),
-            (0, 0, 1, FACE_POS_Z),
-            (0, 0, -1, FACE_NEG_Z),
-        ] {
-            if let (Some(x), Some(y), Some(z)) = (
-                v.x.checked_add(dx),
-                v.y.checked_add(dy),
-                v.z.checked_add(dz),
-            ) {
-                // Opaque/opaque: eliminate hidden inner faces.
-                // Fluid/fluid: hide only equal fluids, even at different
-                // levels, to preserve continuously interpolated surfaces.
-                // Fluid/opaque: no fluid wall is visible through stone;
-                // still retain the opaque face visible through the water.
-                let occluded = occupied.get(&(x, y, z)).is_some_and(|&other| {
-                    (kind == 0 && other == 0) || (kind != 0 && (other == kind || other == 0))
-                });
-                if occluded {
-                    v.faces &= !face;
+    let hidden: Vec<u8> = {
+        let occupied: BTreeMap<(i32, i32, i32), (&mcedit2_world::sections::State, VoxelMaterial)> =
+            view.voxels
+                .iter()
+                .filter(|v| v.span == 1)
+                .map(|v| ((v.x, v.y, v.z), (&v.state, v.kind)))
+                .collect();
+        view.voxels
+            .iter()
+            .map(|v| {
+                if v.span != 1 {
+                    return 0;
                 }
-            }
-        }
+                let mut mask = 0;
+                for (dx, dy, dz, face) in [
+                    (0, 1, 0, FACE_TOP),
+                    (0, -1, 0, FACE_BOTTOM),
+                    (1, 0, 0, FACE_POS_X),
+                    (-1, 0, 0, FACE_NEG_X),
+                    (0, 0, 1, FACE_POS_Z),
+                    (0, 0, -1, FACE_NEG_Z),
+                ] {
+                    if v.faces & face == 0 {
+                        continue;
+                    }
+                    let (Some(x), Some(y), Some(z)) = (
+                        v.x.checked_add(dx),
+                        v.y.checked_add(dy),
+                        v.z.checked_add(dz),
+                    ) else {
+                        continue;
+                    };
+                    if let Some(&(neighbor, kind)) = occupied.get(&(x, y, z)) {
+                        if !exact_face_exposed_against(&v.state, v.kind, Some((neighbor, kind))) {
+                            mask |= face;
+                        }
+                    }
+                }
+                mask
+            })
+            .collect()
+    };
+    for (voxel, mask) in view.voxels.iter_mut().zip(hidden) {
+        voxel.faces &= !mask;
     }
 }
 pub(crate) struct Stream {
@@ -282,6 +263,7 @@ pub(crate) struct Stream {
     pub source: Arc<Session>,
     pub center: (i32, i32),
     pub radius: u16,
+    look_sector: u8,
     pub exact_y_min: i32,
     pub nonce: u64,
     pub running: bool,
@@ -317,6 +299,7 @@ impl Stream {
         source: Arc<Session>,
         location: [f64; 3],
         radius: u16,
+        yaw: f32,
         nonce: u64,
     ) -> Result<Self, String> {
         let exact_y_min = Self::height_window(&source, location);
@@ -325,6 +308,7 @@ impl Stream {
             source,
             center: center_chunk(location),
             radius,
+            look_sector: look_sector(yaw),
             exact_y_min,
             nonce,
             running: false,
@@ -339,13 +323,22 @@ impl Stream {
             cached_voxels: 0,
             dirty: true,
         };
-        state.replan(location, radius, nonce)?;
+        state.replan(location, radius, yaw, nonce)?;
         Ok(state)
     }
     /// Camera navigation never mutates world state. A pending old batch
     /// may finish; the UI nonce check discards it before publishing.
-    pub fn replan(&mut self, location: [f64; 3], radius: u16, nonce: u64) -> Result<(), String> {
-        let requests = plan(location, radius)?;
+    pub fn replan(
+        &mut self,
+        location: [f64; 3],
+        radius: u16,
+        yaw: f32,
+        nonce: u64,
+    ) -> Result<(), String> {
+        let mut requests = plan(location, radius)?;
+        let center = center_chunk(location);
+        self.look_sector = look_sector(yaw);
+        sort_facing(&mut requests, center, self.look_sector);
         let exact_y_min = Self::height_window(&self.source, location);
         let changed_height = self.exact_y_min != exact_y_min;
         let needed: BTreeSet<_> = requests.iter().copied().map(key).collect();
@@ -361,8 +354,8 @@ impl Stream {
             .count();
         self.total = requests.len();
         self.published = self.complete;
-        self.pending = prioritized_pending(&requests, &self.cache);
-        self.center = center_chunk(location);
+        self.pending = prioritized_pending(&requests, &self.cache, center, self.look_sector);
+        self.center = center;
         self.radius = radius;
         self.nonce = nonce;
         // Invalidate old queued batches before a fresh one starts. The
@@ -382,6 +375,19 @@ impl Stream {
             || (target.0 - self.center.0).abs() >= 2
             || (target.1 - self.center.1).abs() >= 2
             || (Self::height_window(&self.source, location) - self.exact_y_min).abs() >= 16
+    }
+    /// Only rotate queued requests on eight yaw sectors, preserving any
+    /// active read and its nonce. Reorder displayed budget by facing too.
+    pub fn orient(&mut self, yaw: f32) {
+        let sector = look_sector(yaw);
+        if sector == self.look_sector {
+            return;
+        }
+        self.look_sector = sector;
+        sort_facing(&mut self.wanted, self.center, sector);
+        let unread = self.pending.drain(..).collect::<Vec<_>>();
+        self.pending = prioritized_pending(&unread, &self.cache, self.center, sector);
+        self.dirty = true;
     }
     pub fn fetch(&mut self) -> Task<Message> {
         if self.running || self.pending.is_empty() {
@@ -591,7 +597,7 @@ mod tests {
     #[test]
     fn first_batch_previews_horizon_then_restores_nearby_detail() {
         let requests = plan([0.0, 80.0, 0.0], 16).unwrap();
-        let pending = prioritized_pending(&requests, &BTreeMap::new());
+        let pending = prioritized_pending(&requests, &BTreeMap::new(), (0, 0), 0);
         assert_eq!(pending.len(), requests.len());
         let first: Vec<_> = pending.iter().take(HORIZON_WARMUP).copied().collect();
         assert!(first.iter().all(|r| r.span == 4));
@@ -603,6 +609,48 @@ mod tests {
         let original: BTreeSet<_> = requests.iter().copied().map(key).collect();
         let scheduled: BTreeSet<_> = pending.iter().copied().map(key).collect();
         assert_eq!(scheduled, original);
+    }
+    #[test]
+    fn camera_facing_prioritizes_complete_chunk_rings_without_skipping_sources() {
+        let planned = plan([0.0, 80.0, 0.0], 8).unwrap();
+        let unique = planned.iter().copied().map(key).collect::<BTreeSet<_>>();
+        for (yaw, ahead) in [
+            (0.0, (0, 1)),
+            (90.0, (-1, 0)),
+            (180.0, (0, -1)),
+            (270.0, (1, 0)),
+        ] {
+            let sector = look_sector(yaw);
+            let mut sorted = planned.clone();
+            sort_facing(&mut sorted, (0, 0), sector);
+            assert_eq!(sorted.iter().copied().map(key).collect::<BTreeSet<_>>(), unique);
+            assert_eq!((sorted[0].cx, sorted[0].cz), (0, 0));
+            assert_eq!((sorted[1].cx, sorted[1].cz), ahead);
+            let pending = prioritized_pending(&sorted, &BTreeMap::new(), (0, 0), sector);
+            assert_eq!(pending.len(), sorted.len());
+            assert!(pending.iter().take(HORIZON_WARMUP).all(|r| r.span == 4));
+            let first = pending.front().unwrap();
+            let (fx, fz) = front_vector(sector);
+            assert!(i64::from(first.cx) * fx + i64::from(first.cz) * fz > 0);
+        }
+    }
+    #[test]
+    fn reorientation_never_reschedules_already_fetched_chunks() {
+        let planned = plan([0.0, 80.0, 0.0], 8).unwrap();
+        let mut pending = prioritized_pending(&planned, &BTreeMap::new(), (0, 0), 0);
+        let consumed = pending.drain(..32).map(key).collect::<BTreeSet<_>>();
+        let expected = pending.iter().copied().map(key).collect::<BTreeSet<_>>();
+        let reordered = prioritized_pending(
+            &pending.into_iter().collect::<Vec<_>>(),
+            &BTreeMap::new(),
+            (0, 0),
+            4,
+        );
+        assert_eq!(reordered.iter().copied().map(key).collect::<BTreeSet<_>>(), expected);
+        assert!(reordered.iter().all(|r| !consumed.contains(&key(*r))));
+        assert_eq!(look_sector(f32::NAN), 0);
+        assert_eq!(look_sector(359.0), 0);
+        assert_eq!(look_sector(90.0), 2);
     }
     #[test]
     fn cancelled_stale_batch_stops_at_next_chunk_boundary() {
@@ -675,6 +723,104 @@ mod tests {
         view.voxels[0].faces = FACE_POS_X;
         reconcile_exact_seams(&mut view);
         assert_ne!(view.voxels[0].faces & FACE_POS_X, 0);
+    }
+    #[test]
+    fn exact_chunk_seams_keep_faces_behind_ice_and_partial_blocks() {
+        use mcedit2_world::sections::State;
+        let mk = |x: i32, name: &str, props: &[(&str, &str)]| SurfaceVoxel {
+            x,
+            y: 70,
+            z: 0,
+            span: 1,
+            state: State {
+                name: name.into(),
+                properties: props
+                    .iter()
+                    .map(|(key, value)| (key.to_string(), value.to_string()))
+                    .collect(),
+            },
+            biome: None,
+            original_block_entity: false,
+            staged: false,
+            faces: FACE_POS_X | FACE_NEG_X,
+            kind: if name.ends_with("ice") {
+                VoxelMaterial::Transparent
+            } else {
+                VoxelMaterial::Solid
+            },
+        };
+        let mut view = SurfaceView {
+            x: 15,
+            z: 0,
+            y_min: 64,
+            y_max: 111,
+            width: 32,
+            depth: 16,
+            voxels: vec![
+                mk(15, "minecraft:stone", &[]),
+                mk(16, "minecraft:ice", &[]),
+            ],
+            missing_columns: 0,
+            source_chunks: 2,
+            source_tiles: vec![],
+        };
+        reconcile_exact_seams(&mut view);
+        assert_ne!(view.voxels[0].faces & FACE_POS_X, 0); // stone through ice
+        // The original source masks ice against full stone but keeps the
+        // stone face, which must remain visible through translucent ice.
+        assert_eq!(view.voxels[1].faces & FACE_NEG_X, 0);
+        view.voxels[1] = mk(16, "minecraft:stone_slab", &[("type", "bottom")]);
+        reconcile_exact_seams(&mut view);
+        assert_ne!(view.voxels[0].faces & FACE_POS_X, 0);
+        view.voxels[1] = mk(16, "minecraft:stone_slab", &[("type", "double")]);
+        reconcile_exact_seams(&mut view);
+        assert_eq!(view.voxels[0].faces & FACE_POS_X, 0);
+        assert_eq!(view.voxels[1].faces & FACE_NEG_X, 0);
+        view.voxels[1] = mk(16, "minecraft:snow", &[("layers", "8")]);
+        view.voxels[0].faces |= FACE_POS_X;
+        reconcile_exact_seams(&mut view);
+        assert_eq!(view.voxels[0].faces & FACE_POS_X, 0);
+        view.voxels[1] = mk(16, "modded:opaque_machine", &[]);
+        view.voxels[0].faces |= FACE_POS_X;
+        reconcile_exact_seams(&mut view);
+        assert_ne!(view.voxels[0].faces & FACE_POS_X, 0);
+    }
+    #[test]
+    fn exact_chunk_seams_match_source_for_glass_leaves_and_liquid_boundaries() {
+        use mcedit2_world::sections::State;
+        let mk = |x, name: &str, kind| SurfaceVoxel {
+            x,
+            y: 70,
+            z: 0,
+            span: 1,
+            state: State { name: name.into(), properties: vec![] },
+            biome: None,
+            original_block_entity: false,
+            staged: false,
+            faces: FACE_NEG_X | FACE_POS_X,
+            kind,
+        };
+        let opaque = VoxelMaterial::Solid;
+        let trans = VoxelMaterial::Transparent;
+        let foliage = VoxelMaterial::Foliage;
+        let liquid = VoxelMaterial::Liquid;
+        let evaluate = |left_name, left_kind, right_name, right_kind| {
+            let mut view = SurfaceView {
+                x: 15, z: 0, y_min: 64, y_max: 111, width: 32, depth: 16,
+                voxels: vec![mk(15, left_name, left_kind), mk(16, right_name, right_kind)],
+                missing_columns: 0, source_chunks: 2, source_tiles: vec![],
+            };
+            reconcile_exact_seams(&mut view);
+            (view.voxels[0].faces & FACE_POS_X != 0, view.voxels[1].faces & FACE_NEG_X != 0)
+        };
+        assert_eq!(evaluate("minecraft:glass", trans, "minecraft:glass", trans), (false, false));
+        assert_eq!(evaluate("minecraft:glass", trans, "minecraft:ice", trans), (true, true));
+        assert_eq!(evaluate("minecraft:oak_leaves", foliage, "minecraft:oak_leaves", foliage), (false, false));
+        assert_eq!(evaluate("minecraft:stone", opaque, "minecraft:ice", trans), (true, false));
+        assert_eq!(evaluate("minecraft:stone", opaque, "minecraft:glass", trans), (true, false));
+        assert_eq!(evaluate("minecraft:stone", opaque, "minecraft:water", liquid), (true, false));
+        assert_eq!(evaluate("minecraft:water", liquid, "minecraft:lava", liquid), (true, true));
+        assert_eq!(evaluate("minecraft:water", liquid, "minecraft:water", liquid), (false, false));
     }
     #[test]
     fn streamed_water_seams_hide_only_verified_internal_faces() {

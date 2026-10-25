@@ -11,6 +11,7 @@ mod mesh_async;
 mod models;
 mod palette;
 mod resource_models;
+mod resource_ids;
 mod slice_canvas;
 mod spectator;
 mod spectator_stream;
@@ -690,6 +691,7 @@ impl App {
                 session,
                 self.spectator_camera.position,
                 radius,
+                self.spectator_camera.yaw,
                 self.spectator_stream_nonce,
             ) {
                 Ok(s) => Some(s),
@@ -708,12 +710,14 @@ impl App {
             if let Err(e) = stream.replan(
                 self.spectator_camera.position,
                 radius,
+                self.spectator_camera.yaw,
                 self.spectator_stream_nonce,
             ) {
                 self.surface_report = e;
                 return iced::Task::none();
             }
         }
+        stream.orient(self.spectator_camera.yaw);
         if stream.dirty || self.spectator_stream_near != Some(near_identity) {
             let scene = std::sync::Arc::new(stream.combined(&near));
             self.spectator_stream_view = Some(scene);
@@ -2163,6 +2167,9 @@ fn update_impl(app: &mut App, message: Message) -> iced::Task<Message> {
             app.texture_load_nonce = app.texture_load_nonce.wrapping_add(1);
             let nonce = app.texture_load_nonce;
             let path = PathBuf::from(app.texture_path.trim());
+            let base_world = app.current.and_then(|index| app.worlds.get(index)).map(|world| {
+                (world.root.clone(), world.version_name.clone().unwrap_or_default())
+            });
             app.texture_loading = true;
             app.texture_report = "Loading original resource PNG/JSON off the UI thread…".into();
             return iced::Task::perform(
@@ -2170,7 +2177,25 @@ fn update_impl(app: &mut App, message: Message) -> iced::Task<Message> {
                     let fallback_path = path.clone();
                     let (sender, receiver) = iced::futures::channel::oneshot::channel();
                     std::thread::spawn(move || {
-                        let result = textures::TextureBank::open(&path);
+                        let layers = path
+                            .to_string_lossy()
+                            .split(';')
+                            .map(|part| PathBuf::from(part.trim()))
+                            .collect::<Vec<_>>();
+                        let result = if layers.iter().any(|p| p.as_os_str().is_empty()) {
+                            Err("Resource-pack list contains an empty path".into())
+                        } else {
+                            let mut stack = Vec::new();
+                            if let Some((root, version)) = &base_world {
+                                if let Some(vanilla) = auto_assets::discover(root, version) {
+                                    if !layers.contains(&vanilla) {
+                                        stack.push(vanilla);
+                                    }
+                                }
+                            }
+                            stack.extend(layers);
+                            textures::TextureBank::open_stack(&stack)
+                        };
                         let _ = sender.send((path, result));
                     });
                     receiver.await.unwrap_or((
@@ -2223,6 +2248,8 @@ fn update_impl(app: &mut App, message: Message) -> iced::Task<Message> {
                                 "Installed vanilla textures could not be loaded: {error}. Choose a ZIP/JAR or folder manually.");
                         }
                     }
+                } else {
+                    app.texture_report = "No matching installed vanilla client JAR found. Select a resource pack or local Minecraft client ZIP/JAR manually.".into();
                 }
             }
         }
@@ -3501,7 +3528,7 @@ fn workspace_view(app: &App) -> Element<'_, Message> {
         ]
         .spacing(5),
     );
-    panel = panel.push(text(l.pick("资源包", "Resource pack")).size(16));
+    panel = panel.push(text(l.pick("资源包（按顺序叠加）", "Resource packs (ordered overlays)")).size(16));
     panel = panel.push(
         row![
             button(l.pick("打开 ZIP / JAR", "Open ZIP / JAR")).on_press(Message::ChooseTextureFile),
@@ -3720,7 +3747,7 @@ fn view(app: &App) -> Element<'_, Message> {
         body = body.push(
             row![
                 text_input(
-                    "Resource pack folder, .zip, or client .jar (read only)",
+                    "Packs low -> high priority; separate .zip/.jar/folders with ;",
                     &app.texture_path
                 )
                 .on_input(Message::TexturePath)

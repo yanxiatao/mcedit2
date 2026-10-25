@@ -93,7 +93,12 @@ fn known_partial_occluder(state: &State) -> bool {
 /// models, unfamiliar vanilla blocks and absent NBT sections are not solid
 /// evidence. Drawing an extra hidden face is safe; deleting a visible face
 /// creates irreversible holes in the renderer.
-fn known_full_occluder(state: &State) -> bool {
+///
+/// This is the shared, conservative rule for both original Section face
+/// inspection and seams between independently streamed exact chunks. Keep
+/// both consumers in agreement: transparent ice is not a full occluder,
+/// while double slabs and eight-layer snow are full blocks.
+pub fn known_full_occluder(state: &State) -> bool {
     let Some(n) = state.name.strip_prefix("minecraft:") else {
         return false;
     };
@@ -155,20 +160,34 @@ fn known_full_occluder(state: &State) -> bool {
         || n.ends_with("_concrete_powder")
         || n.ends_with("_bricks")
 }
-fn exposed_against(
+/// Whether an exact source face must remain visible when a verified
+/// neighboring full cell is known. Shared with streaming chunk seams so
+/// a transparent cube, full slab, fluid or unknown modded block is handled
+/// identically within a Region read and across independent chunk patches.
+/// LOD samples must never be supplied as exact neighboring cells.
+pub fn exact_face_exposed_against(
     state: &State,
     kind: VoxelMaterial,
-    neighbor: Option<&(State, VoxelMaterial)>,
+    neighbor: Option<(&State, VoxelMaterial)>,
 ) -> bool {
     match neighbor {
         None => true,
         Some((n, _)) if is_air(n) => true,
         Some((n, _)) if known_partial_occluder(n) => true,
-        Some((n, nkind)) if *nkind != VoxelMaterial::Solid => {
-            kind == VoxelMaterial::Solid || (*nkind != kind) || n.name != state.name
+        Some((n, nkind)) if nkind != VoxelMaterial::Solid => {
+            kind == VoxelMaterial::Solid || nkind != kind || n.name != state.name
         }
         Some((n, _)) => !known_full_occluder(n),
     }
+}
+// Preserve the original owned-palette lookup path while sharing the
+// exact same visibility semantics with spectator streaming.
+fn exposed_against(
+    state: &State,
+    kind: VoxelMaterial,
+    neighbor: Option<&(State, VoxelMaterial)>,
+) -> bool {
+    exact_face_exposed_against(state, kind, neighbor.map(|(s, material)| (s, *material)))
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SurfaceVoxel {
@@ -583,6 +602,28 @@ pub fn inspect_exposed_volume_cutaway(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn exact_surface_occluder_contract_preserves_transparency_and_partial_shapes() {
+        let state = |name: &str, properties: &[(&str, &str)]| State {
+            name: name.into(),
+            properties: properties
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+        };
+        for name in ["minecraft:ice", "minecraft:packed_ice", "minecraft:blue_ice",
+            "minecraft:glass", "minecraft:tinted_glass", "minecraft:oak_leaves",
+            "modded:stone"] {
+            assert!(!known_full_occluder(&state(name, &[])), "{name}");
+        }
+        for name in ["minecraft:stone", "minecraft:oak_planks", "minecraft:iron_ore"] {
+            assert!(known_full_occluder(&state(name, &[])), "{name}");
+        }
+        assert!(known_full_occluder(&state("minecraft:stone_slab", &[("type", "double")])));
+        assert!(!known_full_occluder(&state("minecraft:stone_slab", &[("type", "top")])));
+        assert!(known_full_occluder(&state("minecraft:snow", &[("layers", "8")])));
+        assert!(!known_full_occluder(&state("minecraft:snow", &[("layers", "3")])));
+    }
     #[test]
     fn unknown_source_sections_and_vanilla_plants_cannot_hide_faces() {
         let stone = State {

@@ -10,6 +10,27 @@ The root of this branch is the native rewrite, not the original Python applicati
 | `mcedit2-iced` | iced 0.14 desktop, wgpu 3D view and selection, streaming/chunk meshing, vanilla resource-pack models and multi-atlas textures |
 | `mcedit2-cli` | Headless source world inspection |
 
+## Resource-pack overlay order
+
+The native texture input supports multiple local folders, ZIP resource packs
+or client JAR paths separated by `;`, **lowest priority first**. If the active
+Java world has a locally discoverable vanilla client JAR, it becomes the lowest
+layer automatically. Upper packs override only matching block PNG, model or
+blockstate JSON identities; missing assets still use the original lower layer.
+A new static PNG does not inherit stale `.mcmeta` animation instructions
+from a lower layer. All decoding happens in the existing background worker,
+and the combined atlas is generated once under existing memory/GPU budgets.
+
+## Dotted mod resource identities and asset roots
+
+Minecraft Java namespaces and resource paths may contain periods (for example
+`create.addon:block/machine/casing.v2`). The native PNG and JSON readers
+now share strict canonical validation for these IDs, while rejecting invalid
+case, backslashes, empty or dot-only directory segments, and traversal
+components. Directory resource packs refuse an `assets/` symlink and ignore
+symlinked children; loading remains read-only. Directory iteration is
+deterministic even if the OS returns entries in a different order.
+
 ## Development commands
 
 From `rust/`:
@@ -37,3 +58,52 @@ Read [COMPATIBILITY.md](COMPATIBILITY.md) for the detailed data-version/storage 
 This is an active rewrite, not complete MCEdit2 feature parity. Old Python sources, Sphinx docs, PySide/Cython setup and Python-only benchmarks/tests are intentionally absent from **this branch**. They remain available in the original branch/history. Do not use the old Python app instructions for building the Rust binary.
 
 The latest code must be checked with the toolchain before a distributable build is described as verified. The previous Windows development ZIP does not automatically contain newer source changes.
+
+## Camera-facing full-ring streaming
+
+The native spectator still schedules **every** actual Java chunk inside the
+selected radius and keeps the exact nearby voxel sources separate from
+read-only sampled distant LOD. Within each ring, the streaming worker now
+prefers the chunks in front of the camera before those behind it. The first
+distant warmup uses the same priority, so the visible horizon can appear
+earlier without discarding nearby geometry. Eight quantized camera headings
+reorder only unread tasks and the display budget; already cached Region data,
+in-progress reads, edit history and source NBT are not changed. Priority never
+acts as a visibility or source-data filter.
+
+## Installed client auto-detection
+
+With the 3D spectator view enabled, MCEdit2 attempts to load the exact
+version-matched vanilla Java client JAR, first from paths adjacent to the
+world save and then from conventional Minecraft, PrismLauncher and MultiMC
+install locations under the user's OS application data or home directory.
+Only known candidate filenames are probed; the editor does not scan disks,
+search the network or modify the installed launcher/client. If no matching
+client is installed, a diagnostic tells the user to select a pack/JAR
+manually. A manually selected stack still overrides its vanilla base.
+
+## Exact 3D chunk seam visibility
+
+The native 3D spectator streamer now uses the original world reader's
+block-face occlusion predicate when independently loaded exact chunks
+meet. Identical glass and leaves hide only their proven internal faces;
+ice/stone and glass/stone keep the original visible opaque face, while
+full slabs, partial slabs, eight-layer snow, fluids, and unfamiliar mod
+blocks follow the same conservative rules as within a source chunk.
+Read-only distant LOD samples never count as an exact occluding neighbor.
+This avoids both visible internal seams and accidentally missing faces
+when a 3D camera crosses Region/chunk boundaries. The scanner borrows
+source blockstate data instead of duplicating all palette strings.
+
+## Corrupt resource-pack fallbacks
+
+Directory packs, ZIP packs and client JARs now share the same resource
+classifier, per-entry byte limits, and texture/model ingestion path. An
+invalid modern `textures/block/` PNG cannot reserve an ID or suppress a
+working legacy `textures/blocks/` PNG in the same pack. Valid modern
+textures still take precedence independently of ZIP member order. If a
+higher-priority pack has an unreadable block image, the previously loaded
+lower-priority image and its animation metadata remain intact. This is
+display-only: assets are not extracted or written back. Four regression
+tests cover corruption, archive ordering, layered fallback, and identical
+directory/ZIP lookup behavior.

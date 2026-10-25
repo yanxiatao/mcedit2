@@ -2,7 +2,7 @@
 //! A small conservative subset of Java JSON model inheritance is supported;
 //! unsupported multipart, rotations, random weighted variants and custom
 //! geometry use the ordinary named-texture fallback rather than guessing.
-use crate::isometric::Face;
+use crate::{isometric::Face, resource_ids};
 use crate::models::{Box3, ElementRotation, Part};
 use mcedit2_world::sections::State;
 use serde_json::Value;
@@ -28,45 +28,30 @@ pub(crate) struct ModelBank {
     total_json_bytes: usize,
 }
 fn asset_id(path: &str) -> Option<String> {
-    let p: Vec<&str> = path.split('/').collect();
-    if p.len() < 4 || p[0] != "assets" {
+    let parts: Vec<&str> = path.split('/').collect();
+    if parts.len() < 4 || parts[0] != "assets" {
         return None;
     }
-    let ns = p[1];
-    if ns.is_empty()
-        || ns.len() > 80
-        || !ns
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
-    {
+    let namespace = parts[1];
+    if !resource_ids::namespace(namespace) {
         return None;
     }
-    let (kind, start) = if p.get(2) == Some(&"blockstates") {
+    let (kind, start) = if parts.get(2) == Some(&"blockstates") {
         ("state", 3)
-    } else if p.get(2) == Some(&"models") && p.get(3) == Some(&"block") {
+    } else if parts.get(2) == Some(&"models") && parts.get(3) == Some(&"block") {
         ("model", 4)
     } else {
         return None;
     };
-    let rel = p[start..].join("/");
-    let stem = rel.strip_suffix(".json")?;
-    if stem.is_empty()
-        || stem.len() > 160
-        || !stem.bytes().all(|b| {
-            b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-' || b == b'/'
-        })
-    {
-        return None;
-    }
-    Some(format!("{kind}:{ns}:{stem}"))
+    let relative = parts[start..].join("/");
+    let id = relative.strip_suffix(".json")?;
+    resource_ids::path(id, 160).then(|| format!("{kind}:{namespace}:{id}"))
 }
 fn normalize_model(value: &str, default_ns: &str) -> Option<String> {
-    let (ns, path) = value.split_once(':').unwrap_or((default_ns, value));
+    let id = resource_ids::qualified(value, default_ns)?;
+    let (namespace, path) = id.split_once(':')?;
     let path = path.strip_prefix("block/").unwrap_or(path);
-    if ns.is_empty() || path.is_empty() || path.contains("..") || path.starts_with('/') {
-        return None;
-    }
-    Some(format!("model:{ns}:{path}"))
+    resource_ids::path(path, 160).then(|| format!("model:{namespace}:{path}"))
 }
 /// Vanilla's common block parent templates are not bundled in most
 /// resource packs. Resolve only known minecraft: parent IDs to trusted,
@@ -198,12 +183,10 @@ fn vanilla_parent_elements(id: &str) -> Option<&'static Vec<Value>> {
     templates.get(id)
 }
 fn normalize_texture(value: &str, default_ns: &str) -> Option<String> {
-    let (ns, path) = value.split_once(':').unwrap_or((default_ns, value));
+    let id = resource_ids::qualified(value, default_ns)?;
+    let (namespace, path) = id.split_once(':')?;
     let path = path.strip_prefix("block/").unwrap_or(path);
-    if ns.is_empty() || path.is_empty() || path.contains("..") || path.starts_with('/') {
-        return None;
-    }
-    Some(format!("{ns}:{path}"))
+    resource_ids::path(path, 160).then(|| format!("{namespace}:{path}"))
 }
 fn variant_matches(name: &str, state: &State) -> bool {
     name.split(',').all(|entry| {
@@ -1408,6 +1391,36 @@ mod tests {
             bank.element_face(&st, Face::NegZ, 1).unwrap().texture,
             "test:flower_png"
         );
+    }
+    #[test]
+    fn dotted_mod_resource_json_resolves_texture_and_keeps_namespace() {
+        let mut bank = ModelBank::default();
+        assert_eq!(
+            bank.insert(
+                "assets/create.addon/blockstates/machine/gearbox.v2.json",
+                br#"{"variants":{"":{"model":"create.addon:block/machine/gearbox.v2"}}}"#,
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            bank.insert(
+                "assets/create.addon/models/block/machine/gearbox.v2.json",
+                br##"{"parent":"minecraft:block/cube_all",
+                     "textures":{"all":"create.addon:block/machine/casing.v2"}}"##,
+            ),
+            Ok(true)
+        );
+        let state = s("create.addon:machine/gearbox.v2", &[]);
+        assert_eq!(
+            bank.element_face(&state, Face::Top, 0).unwrap().texture,
+            "create.addon:machine/casing.v2"
+        );
+        assert_eq!(
+            bank.insert("assets/create.addon/models/block/../secret.json", b"{}"),
+            Ok(false)
+        );
+        assert_eq!(normalize_texture("create.addon:block/../unsafe", "minecraft"), None);
+        assert_eq!(normalize_model("create.addon:block/a//b", "minecraft"), None);
     }
     #[test]
     fn model_bank_accepts_thousands_of_original_resource_models() {
