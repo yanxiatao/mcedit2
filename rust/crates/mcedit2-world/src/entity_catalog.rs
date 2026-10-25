@@ -6,7 +6,7 @@ use std::io::Write;
 use std::path::Path;
 use serde::{Serialize,Deserialize};
 use sha2::{Sha256,Digest};
-use crate::sections::{parse_root,Tag};
+use crate::sections::parse_root;
 use crate::block_lookup::read_world_chunk_bytes;
 use crate::{WorldError,WorldSummary,RegionIndex};
 fn fail(s:impl Into<String>)->WorldError{WorldError::Invalid(s.into())}

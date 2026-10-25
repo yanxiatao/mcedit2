@@ -6,7 +6,7 @@ use std::fs;
 use std::path::Path;
 use serde::Deserialize;
 use crate::editing::{Bounds,BrushShape,Preview,Session,parse_state};
-use crate::{WorldError,WorldSummary};
+use crate::WorldError;
 
 fn refuse(s:impl Into<String>)->WorldError{WorldError::Invalid(s.into())}
 #[derive(Debug,Deserialize)]

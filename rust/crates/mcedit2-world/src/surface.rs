@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use crate::block_lookup::ReadOnlyRegionCache;
 use crate::editing::Session;
 use crate::sections::{Chunk,State};
-use crate::{WorldError,WorldSummary};
+use crate::WorldError;
 
 fn refuse(s:impl Into<String>)->WorldError{WorldError::Invalid(s.into())}
 pub const FACE_TOP:u8=1;

@@ -1394,3 +1394,51 @@ no longer flags those placeholders as damaged Regions. A nonzero
 truncated Region header, overlapping sectors, symlink or malformed
 real chunk is still rejected; writer/backup safety is unchanged.
 The original ZIP is kept local and is NOT uploaded to GitHub.
+
+## Explicit Windows x64 release ZIP
+
+The standalone `.github/workflows/rust-windows-package.yml` is an opt-in
+Windows Server 2022/MSVC **release** build; normal development pushes and
+`.github/rust-ci-batch.trigger` do not create executable artifacts.
+Only an explicit `workflow_dispatch` or a change to the separate
+`.github/windows-package.trigger` path builds the deliverable.
+It runs the full Rust test suite, compiles the native iced application
+and CLI in release mode, validates their `--help` startup, and uploads
+`MCEdit2-Rust-Windows-x64.zip` with both standalone .exe files, a quick
+start, license and compatibility notes. The GUI release binary uses the
+Windows GUI subsystem (no console popup); the CLI retains its console.
+
+Download the named ZIP from that specific GitHub Actions run's Artifacts
+section and extract before executing `MCEdit2.exe`. Java saves must be
+extracted folders containing `level.dat`; this is experimental GUI
+software, not a fully migrated MCEdit2 release. Keep independent backups
+of any save you plan to edit. No upload to a GitHub Release, installation
+of drivers, online updater, or private save archive occurs in the build.
+
+## Primary workspace and native chooser migration
+
+Native rfd OS dialogs select Java world folders and resource-pack
+.zip/.jar/directory paths without blocking iced. World indexing now
+also computes the first 3D viewport's terrain Y from one verified
+source chunk on the index worker. Successful opens automatically
+schedule a 32×32×48 read-only source scene; app startup with positional
+world paths does the same. Original advanced controls are preserved.
+The main workspace supports 简体中文 and English; the older advanced tools
+retain legacy English labels and will need further translation.
+
+### Windows manual package trigger
+
+The package workflow declares `workflow_dispatch` with a `verify_tests`
+boolean (default true). From an eligible GitHub Actions workflow use
+**Run workflow → rust-iced-rewrite → Run workflow** to request a Windows
+x64 ZIP without editing the sentinel file; the optional input allows
+skipping the test pass when intentionally performing build-only diagnostics.
+The separate `.github/windows-package.trigger` commit remains available
+for explicitly authorized one-shot packaging on the PR branch.
+
+**GitHub restriction:** A manually dispatched workflow must also exist
+on the repository's **default branch** to expose the Run workflow control.
+This PR only modifies the Draft Rust branch, so the native Actions button
+will not be visible until an equivalent workflow is separately approved
+and added to the default branch. The build itself is guarded to execute
+only on `rust-iced-rewrite`; no default-branch merge occurs here.

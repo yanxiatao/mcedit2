@@ -265,7 +265,7 @@ fn sampled_source_tile_indices(total:usize,limit:usize)->Vec<usize>{
     let near=(limit/4).min(total);
     let remaining=limit-near;
     let span=total-near-1;
-    let mut result:(Vec<usize>)=(0..near).collect();
+    let mut result:Vec<usize>=(0..near).collect();
     if remaining==1{result.push(total-1);}
     else{
         for index in 0..remaining{
@@ -1100,7 +1100,7 @@ mod tests{
     }
     #[test]
     fn zero_thickness_crossed_model_face_is_a_renderable_polygon(){
-        let mut view=example();
+        let view=example();
         let part=models::Part{
             bounds:models::Box3::from_model_units_plane(
                 [0.8,0.0,8.0],[15.2,16.0,8.0]).unwrap(),
@@ -1214,7 +1214,7 @@ mod tests{
     }
     #[test]
     fn distant_lod_budget_spills_unused_capacity_back_into_exact_geometry(){
-        let mut view=example();
+        let view=example();
         let sample=view.faces(Size::new(700.0,440.0))[0].clone();
         let mut faces=vec![sample;180];
         prune_scene_faces(&mut faces,&view.surface,120);

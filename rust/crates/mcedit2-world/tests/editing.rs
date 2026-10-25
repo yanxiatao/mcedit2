@@ -873,7 +873,7 @@ fn original_block_only_clipboard_refuses_be_wrong_dimension_and_corrupted_size()
         "mcedit2-block-clipboard-invalid-{}-{}.mcedit2clip",
         std::process::id(),COUNTER.fetch_add(1,Ordering::Relaxed)
     ));
-    let mut editor=Session::new(fixture.metadata(),"minecraft:overworld").unwrap();
+    let editor=Session::new(fixture.metadata(),"minecraft:overworld").unwrap();
     let select=Bounds::new((0,-64,0),(0,-64,0)).unwrap();
     editor.export_clipboard(select,&path).unwrap();
     let original=fs::read(&path).unwrap();

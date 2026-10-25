@@ -1,3 +1,4 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 //! Native Rust + iced desktop with legacy MCEdit2 positional world arguments.
 mod isometric;
 mod slice_canvas;
@@ -9,6 +10,9 @@ mod palette;
 mod textures;
 mod models;
 mod resource_models;
+mod language;
+mod dialogs;
+use language::Language;
 use iced::widget::{button,canvas,column,container,row,scrollable,text,text_input};
 use mcedit2_world::surface::SurfaceView;
 use isometric::{Face,IsometricSurface};
@@ -77,11 +81,28 @@ fn dispatch_near(job:NearJob)->iced::Task<Message>{
 }
 
 /// World directory/level.dat indexing also belongs off the iced UI loop.
+/// Probe one verified source chunk for a plausible terrain-centered first view.
+fn initial_scene_height(world:&WorldSummary,index:usize)->i32{
+    let Some(dim)=world.dimensions.get(index)else{return 64;};
+    let Ok(Some(chunk))=mcedit2_world::block_lookup::read_world_chunk(
+        world,&dim.name,0,0)else{return 64;};
+    for y in (-64..=319).rev(){
+        if let Some(state)=chunk.block(8,y,8){
+            if !matches!(state.name.as_str(),
+                "minecraft:air"|"minecraft:cave_air"|"minecraft:void_air"|"numeric:0"){
+                return y;
+            }
+        }
+    }
+    64
+}
 fn dispatch_open(nonce:u64,path:PathBuf)->iced::Task<Message>{
     iced::Task::perform(async move {
         let (sender,receiver)=iced::futures::channel::oneshot::channel();
         std::thread::spawn(move ||{
-            let result=inspect_input(&path).map_err(|e|e.to_string());
+            let result=inspect_input(&path).map(|world|{
+                let height=initial_scene_height(&world,0);(world,height)
+            }).map_err(|e|e.to_string());
             let _=sender.send(result);
         });
         (nonce,receiver.await.unwrap_or_else(|_|
@@ -210,6 +231,8 @@ struct RenderSignature{
 #[derive(Default)]
 struct App{
     path:String,
+    language:Language,
+    show_advanced:bool,
     surface_area:String,
     surface_exposed:bool,
     surface_cut_top:Option<i32>,
@@ -299,7 +322,9 @@ struct App{
 }
 #[derive(Debug,Clone)]
 enum Message{
-    Path(String),Open,OpenFinished(u64,Result<WorldSummary,String>),
+    Path(String),Open,OpenFinished(u64,Result<(WorldSummary,i32),String>),
+    PickWorld,WorldChosen(Option<PathBuf>),ChooseTextureFile,ChooseTextureDirectory,
+    TextureChosen(Option<PathBuf>),ToggleLanguage,ToggleAdvanced,
     Select(usize),Coordinates(String),Dimension(usize),
     TexturePath(String),LoadTextures,UnloadTextures,ToggleTextures,ToggleGpu,CycleGpuQuality,ToggleTopDown,MeshWake,
     TextureTick,
@@ -558,7 +583,7 @@ impl App{
             Ok(view)=>view,
             Err(e)=>{self.surface_report=e.to_string();return iced::Task::none();}
         };
-        let (mut cache,mut order,mut cached_voxels)=compatible.map_or_else(
+        let (cache,order,cached_voxels)=compatible.map_or_else(
             ||(BTreeMap::new(),VecDeque::new(),0),
             |prior|(prior.cache,prior.cache_order,prior.cached_voxels));
         // If the user pan moves a far camera, fill the new view with cached
@@ -1043,7 +1068,7 @@ impl App{
             Err(e)=>self.edit_report=format!("Transaction resolution refused: {e}"),
         }
     }
-    fn boot(args:launch::Arguments)->Self{
+    fn boot(args:launch::Arguments)->(Self,iced::Task<Message>){
         let mut app=App{
             debug:args.debug,log:args.log,verbosity:args.verbosity,
             readonly:args.view,query_coordinates:"0, 64, 0".into(),
@@ -1060,9 +1085,11 @@ impl App{
             surface_section_guides:false,
             show_textures:true,use_gpu:true,..Default::default()
         };
+        let mut initial_y=64;
         for path in &args.worlds {
             match inspect_input(path) {
                 Ok(world)=>{
+                    initial_y=initial_scene_height(&world,0);
                     app.current=Some(app.worlds.len());
                     app.dimension_index=0;
                     app.block_result.clear();app.slice_result.clear();
@@ -1074,9 +1101,22 @@ impl App{
             }
         }
         if let Some(path)=args.worlds.first(){app.path=path.to_string_lossy().to_string();}
-        app
+        if app.current_key().is_some(){app.open_default_scene(initial_y);}
+        let task=if let Some(job)=app.near_job.take(){
+            app.near_busy=true;dispatch_near(job)
+        }else{iced::Task::none()};
+        (app,task)
     }
 
+    /// Read-only first scene uses the existing single bounded background reader.
+    fn open_default_scene(&mut self,terrain_y:i32){
+        if self.current_key().is_none(){return;}
+        let bottom=terrain_y.saturating_sub(24).clamp(-64,272);
+        self.surface_area=format!("-16,{bottom},-16;15,{},15",bottom+47);
+        self.show_advanced=false;
+        self.show_top_down=false;
+        self.inspect_surface(false);
+    }
     fn current_key(&self)->Option<(usize,usize)>{
         self.current.map(|index|(index,self.dimension_index))
     }
@@ -1563,7 +1603,26 @@ fn update_impl(app:&mut App,message:Message)->iced::Task<Message>{
         Message::ConfirmWorldSave=>app.confirm_save(),
         Message::FinalizeRegion=>app.recover_region(false),
         Message::RollbackRegion=>app.recover_region(true),
+        Message::PickWorld=>return dialogs::world_folder(),
+        Message::WorldChosen(path)=>{
+            if let Some(path)=path{
+                app.path=path.to_string_lossy().to_string();
+                return update_impl(app,Message::Open);
+            }
+        },
+        Message::ChooseTextureFile=>return dialogs::resource_file(),
+        Message::ChooseTextureDirectory=>return dialogs::resource_directory(),
+        Message::TextureChosen(path)=>{
+            if let Some(path)=path{
+                app.texture_path=path.to_string_lossy().to_string();
+                return update_impl(app,Message::LoadTextures);
+            }
+        },
+        Message::ToggleLanguage=>app.language=app.language.toggle(),
+        Message::ToggleAdvanced=>app.show_advanced=!app.show_advanced,
         Message::Open=>{
+            app.invalidate_near();
+            app.far=None;
             app.be_prepared=None;
             app.surface=None;
             app.save_preview=None;
@@ -1584,7 +1643,7 @@ fn update_impl(app:&mut App,message:Message)->iced::Task<Message>{
             app.open_busy=false;
             if nonce==app.open_nonce{
                 match result{
-                    Ok(world)=>{
+                    Ok((world,terrain_y))=>{
                         app.current=Some(app.worlds.len());
                         app.dimension_index=0;
                         app.block_result.clear();app.slice_result.clear();
@@ -1594,6 +1653,7 @@ fn update_impl(app:&mut App,message:Message)->iced::Task<Message>{
                             world.total_regions(),world.total_chunks()
                         ));
                         app.worlds.push(world);
+                        app.open_default_scene(terrain_y);
                     }
                     Err(e)=>app.messages.push(format!("Cannot inspect world: {e}")),
                 }
@@ -1613,6 +1673,9 @@ fn update_impl(app:&mut App,message:Message)->iced::Task<Message>{
                 app.block_result.clear();app.slice_result.clear();
                 app.prepared=None;
                 app.edit_report.clear();
+                let y=app.worlds.get(index)
+                    .map(|world|initial_scene_height(world,0)).unwrap_or(64);
+                app.open_default_scene(y);
             }
         }
         Message::Coordinates(value)=>{app.query_coordinates=value;app.be_prepared=None;},
@@ -1630,6 +1693,9 @@ fn update_impl(app:&mut App,message:Message)->iced::Task<Message>{
                 app.block_result.clear();app.slice_result.clear();
                 app.prepared=None;
                 app.edit_report.clear();
+                let y=app.current.and_then(|i|app.worlds.get(i))
+                    .map(|world|initial_scene_height(world,index)).unwrap_or(64);
+                app.open_default_scene(y);
             }
         }
         Message::InspectBlock=>{
@@ -2116,7 +2182,198 @@ fn update_impl(app:&mut App,message:Message)->iced::Task<Message>{
     }
     iced::Task::none()
 }
+fn render_surface<'a>(
+    app:&'a App,view:&'a std::sync::Arc<SurfaceView>,height:Length
+)->Element<'a,Message>{
+                let surface_canvas=IsometricSurface{
+                    surface:std::sync::Arc::clone(view),camera_quarters:app.surface_camera,
+                    texture_bank:app.texture_bank.clone(),show_textures:app.show_textures,
+                    yaw_degrees:app.surface_yaw,pitch_degrees:app.surface_pitch,
+                    zoom:app.surface_zoom,pan_x:app.surface_pan_x,
+                    pan_y:app.surface_pan_y,selected:app.selected_surface,
+                    hovered:app.surface_hover,
+                    selection_box:app.selection_box(),
+                    show_frame:app.surface_frame,show_axes:app.surface_axes,
+                    show_chunk_grid:app.surface_chunk_grid,
+                    show_section_guides:app.surface_section_guides,
+                    gpu_faces:app.use_gpu,
+                    gpu_quality:app.gpu_quality,
+                    frame_cache:std::sync::Arc::clone(&app.render_face_cache),
+                    gpu_frame_cache:std::sync::Arc::clone(&app.render_gpu_cache),
+                    gpu_pending:std::sync::Arc::clone(&app.render_gpu_pending),
+                };
+                let stage:Element<'_,Message>=if app.show_top_down{
+                    canvas(TopDown{
+                        source:std::sync::Arc::clone(view),
+                        zoom:app.surface_zoom,pan_x:app.surface_pan_x,
+                        pan_y:app.surface_pan_y,selected:app.selected_surface,
+                    }).width(Length::Fill).height(height).into()
+                }else if app.use_gpu{
+                    iced::widget::stack![
+                        iced::widget::shader(GpuScene(surface_canvas.clone()))
+                            .width(Length::Fill).height(height),
+                        canvas(surface_canvas).width(Length::Fill)
+                            .height(height),
+                    ].into()
+                }else{
+                    canvas(surface_canvas).width(Length::Fill)
+                        .height(height).into()
+                };
+                stage
+}
+fn welcome_view(app:&App)->Element<'_,Message>{
+    let t=app.language;
+    let intro=column![
+        row![
+            text("MCEdit2").size(34),
+            button(t.pick("English","简体中文")).on_press(Message::ToggleLanguage)
+        ].spacing(24),
+        text(t.pick("选择一个 Java 版 Minecraft 世界，打开后将自动显示 3D 地形。",
+            "Choose a Minecraft Java Edition world. A 3D terrain view opens automatically.")).size(18),
+        text(t.pick("支持 Anvil / MCRegion 等格式。请选择包含 level.dat 的世界文件夹。",
+            "Supports Java Anvil / MCRegion saves. Choose a folder containing level.dat.")),
+        button(t.pick("选择存档文件夹…","Browse world folder…"))
+            .on_press(Message::PickWorld),
+        row![
+            text_input(t.pick("或者手动输入世界路径","Or enter a world path"),&app.path)
+                .on_input(Message::Path).on_submit(Message::Open)
+                .width(Length::Fill),
+            button(t.pick("打开","Open")).on_press(Message::Open),
+        ].spacing(10),
+        text(if app.open_busy{
+            t.pick("正在后台建立存档索引…","Indexing original world in the background…")
+        }else{
+            t.pick("首次打开请先备份世界，编辑保存需要单独确认。",
+                "Keep a backup of your original save; disk changes require confirmation.")
+        })
+    ].spacing(22).width(Length::Fill);
+    let mut page=column![intro].spacing(10).width(Length::Fill);
+    if let Some(problem)=app.messages.last(){page=page.push(text(problem));}
+    container(page).width(Length::Fill).height(Length::Fill).padding(48).into()
+}
+fn workspace_view(app:&App)->Element<'_,Message>{
+    let l=app.language;
+    let Some(world)=app.current.and_then(|i|app.worlds.get(i)) else{
+        return welcome_view(app);
+    };
+    let heading=row![
+        text("MCEdit2").size(23),
+        text(world.level_name.as_deref().unwrap_or("World")).size(19),
+        button(l.pick("打开其他存档…","Open another world…"))
+            .on_press(Message::PickWorld),
+        button(l.pick("高级工具","Advanced tools")).on_press(Message::ToggleAdvanced),
+        button(l.pick("English","简体中文")).on_press(Message::ToggleLanguage),
+    ].spacing(14).align_y(iced::Alignment::Center);
+    let mut panel=column![
+        text(l.pick("工作区","Workspace")).size(20),
+        text(format!("{} · {}",
+            world.version_name.as_deref().unwrap_or("Java"),
+            world.total_chunks())),
+        text(l.pick("维度","Dimension")).size(16),
+    ].spacing(10);
+    for (i,dim) in world.dimensions.iter().enumerate(){
+        let caption=if i==app.dimension_index{
+            format!("● {} ({} chunks)",dim.name,dim.chunks)
+        }else{format!("○ {} ({} chunks)",dim.name,dim.chunks)};
+        panel=panel.push(button(text(caption)).on_press(Message::Dimension(i)));
+    }
+    panel=panel.push(text(l.pick("地图显示","Map view")).size(16));
+    panel=panel.push(row![
+        button(if app.show_top_down{l.pick("切换 3D","Show 3D")}else{
+            l.pick("切换俯视 2D","Top-down 2D")
+        }).on_press(Message::ToggleTopDown),
+        button(l.pick("重新加载","Reload")).on_press(Message::InspectSurface)
+    ].spacing(6));
+    panel=panel.push(row![
+        button(l.pick("表面","Surface")).on_press(Message::InspectSurface),
+        button(l.pick("剖切","Cutaway")).on_press(Message::InspectVolume),
+    ].spacing(6));
+    panel=panel.push(row![
+        button("16×16").on_press(Message::ScenePreset(16)),
+        button("32×32").on_press(Message::ScenePreset(32)),
+        button("64×64").on_press(Message::ScenePreset(64))
+    ].spacing(6));
+    panel=panel.push(row![
+        button(l.pick("X−","X−")).on_press(Message::Shift3D(-16,0,0)),
+        button(l.pick("X+","X+")).on_press(Message::Shift3D(16,0,0)),
+        button(l.pick("Z−","Z−")).on_press(Message::Shift3D(0,0,-16)),
+        button(l.pick("Z+","Z+")).on_press(Message::Shift3D(0,0,16)),
+    ].spacing(4));
+    panel=panel.push(row![
+        button(l.pick("Y−","Y−")).on_press(Message::Shift3D(0,-16,0)),
+        button(l.pick("Y+","Y+")).on_press(Message::Shift3D(0,16,0)),
+        button(l.pick("定位方块","Center")).on_press(Message::Center3DOnPicked),
+    ].spacing(5));
+    panel=panel.push(row![
+        button("−").on_press(Message::ZoomSurface(-1)),
+        button("+").on_press(Message::ZoomSurface(1)),
+        button(l.pick("重置视角","Reset camera")).on_press(Message::ResetSurfaceCamera),
+    ].spacing(5));
+    panel=panel.push(row![
+        button(if app.use_gpu{l.pick("GPU 开","GPU on")}else{l.pick("GPU 关","GPU off")})
+            .on_press(Message::ToggleGpu),
+        button(if app.show_textures{l.pick("纹理开","Textures on")}else{
+            l.pick("纹理关","Textures off")}).on_press(Message::ToggleTextures),
+    ].spacing(5));
+    panel=panel.push(text(l.pick("资源包","Resource pack")).size(16));
+    panel=panel.push(row![
+        button(l.pick("打开 ZIP / JAR","Open ZIP / JAR")).on_press(Message::ChooseTextureFile),
+        button(l.pick("目录…","Folder…")).on_press(Message::ChooseTextureDirectory)
+    ].spacing(5));
+    panel=panel.push(text(l.pick("精确坐标","Exact coordinates")).size(16));
+    panel=panel.push(text_input("X, Y, Z",&app.query_coordinates)
+        .on_input(Message::Coordinates).on_submit(Message::InspectBlock));
+    panel=panel.push(row![
+        button(l.pick("查询方块","Inspect block")).on_press(Message::InspectBlock),
+        button(l.pick("居中","Center")).on_press(Message::Center3DOnPicked)
+    ].spacing(5));
+    panel=panel.push(text(l.pick("远景采样","Distant terrain")).size(16));
+    panel=panel.push(row![
+        button(l.pick("16 区块","16 chunks")).on_press(Message::StartFarView(16)),
+        button(l.pick("64 区块","64 chunks")).on_press(Message::StartFarView(64)),
+    ].spacing(4));
+    panel=panel.push(row![
+        button(l.pick("256 区块","256 chunks")).on_press(Message::StartFarView(256)),
+        button(l.pick("1024 区块","1024 chunks")).on_press(Message::StartFarView(1024)),
+    ].spacing(4));
+    panel=panel.push(text(l.pick(
+        "左键选块 · 右键拖动旋转 · 中键平移 · 滚轮缩放",
+        "Left click: pick · Right drag: orbit · Middle drag: pan · Wheel: zoom"
+    )));
+    let sidebar=scrollable(panel).width(Length::Fixed(292.0)).height(Length::Fill);
+    let viewport:Element<'_,Message>=match &app.surface{
+        Some((wi,di,scene)) if app.current_key()==Some((*wi,*di))=>
+            render_surface(app,scene,Length::Fill),
+        _=>container(text(if app.surface_report.is_empty(){
+            l.pick("正在读取存档并创建 3D 地形…","Reading original chunks and preparing 3D terrain…")
+        }else{&app.surface_report}))
+            .width(Length::Fill).height(Length::Fill)
+            .center_x(Length::Fill).center_y(Length::Fill).into(),
+    };
+    let mut messages=column![
+        text(if app.show_top_down{
+            l.pick("地图俯视图","Top-down map")
+        }else{l.pick("3D 地形视图","3D terrain viewport")}).size(18)
+    ].spacing(7);
+    if !app.surface_report.is_empty(){
+        messages=messages.push(text(&app.surface_report).size(12));
+    }
+    if !app.block_result.is_empty(){
+        messages=messages.push(text(&app.block_result).size(12));
+    }
+    let content=column![
+        container(viewport).width(Length::Fill).height(Length::Fill),
+        messages
+    ].width(Length::Fill).height(Length::Fill).spacing(10);
+    container(column![
+        heading,
+        row![sidebar,content].spacing(14).height(Length::Fill)
+    ].spacing(12))
+        .width(Length::Fill).height(Length::Fill).padding(12).into()
+}
 fn view(app:&App)->Element<'_,Message>{
+    if app.current_key().is_none(){return welcome_view(app);}
+    if !app.show_advanced{return workspace_view(app);}
     let controls=row![
         text_input("Java world folder, level.dat, or level.dat_old",&app.path)
             .on_input(Message::Path).on_submit(Message::Open)
@@ -2126,7 +2383,13 @@ fn view(app:&App)->Element<'_,Message>{
         button("Close all (discard staged)").on_press(Message::Clear)
     ].spacing(10);
     let mut body=column![
-        text("MCEdit2 — Rust + iced").size(26),
+        row![
+            text("MCEdit2 — Rust + iced").size(26),
+            button(app.language.pick("返回地图","Back to map"))
+                .on_press(Message::ToggleAdvanced),
+            button(app.language.pick("English","简体中文"))
+                .on_press(Message::ToggleLanguage),
+        ].spacing(12),
         text("Original Java, Anvil, MCRegion, modern and snapshot world inspection"),
         controls,
         text("Edits are staged IN MEMORY. Experimental, manually confirmed single-Region saves require immutable backups and unresolved transactions must be finalized or rolled back.")
@@ -2334,41 +2597,7 @@ fn view(app:&App)->Element<'_,Message>{
                         (app.surface_camera as i32*90+app.surface_yaw).rem_euclid(360),
                         app.surface_pitch,app.surface_zoom)),
                 ].spacing(5));
-                let surface_canvas=IsometricSurface{
-                    surface:std::sync::Arc::clone(view),camera_quarters:app.surface_camera,
-                    texture_bank:app.texture_bank.clone(),show_textures:app.show_textures,
-                    yaw_degrees:app.surface_yaw,pitch_degrees:app.surface_pitch,
-                    zoom:app.surface_zoom,pan_x:app.surface_pan_x,
-                    pan_y:app.surface_pan_y,selected:app.selected_surface,
-                    hovered:app.surface_hover,
-                    selection_box:app.selection_box(),
-                    show_frame:app.surface_frame,show_axes:app.surface_axes,
-                    show_chunk_grid:app.surface_chunk_grid,
-                    show_section_guides:app.surface_section_guides,
-                    gpu_faces:app.use_gpu,
-                    gpu_quality:app.gpu_quality,
-                    frame_cache:std::sync::Arc::clone(&app.render_face_cache),
-                    gpu_frame_cache:std::sync::Arc::clone(&app.render_gpu_cache),
-                    gpu_pending:std::sync::Arc::clone(&app.render_gpu_pending),
-                };
-                let stage:Element<'_,Message>=if app.show_top_down{
-                    canvas(TopDown{
-                        source:std::sync::Arc::clone(view),
-                        zoom:app.surface_zoom,pan_x:app.surface_pan_x,
-                        pan_y:app.surface_pan_y,selected:app.selected_surface,
-                    }).width(Length::Fill).height(Length::Fixed(440.0)).into()
-                }else if app.use_gpu{
-                    iced::widget::stack![
-                        iced::widget::shader(GpuScene(surface_canvas.clone()))
-                            .width(Length::Fill).height(Length::Fixed(440.0)),
-                        canvas(surface_canvas).width(Length::Fill)
-                            .height(Length::Fixed(440.0)),
-                    ].into()
-                }else{
-                    canvas(surface_canvas).width(Length::Fill)
-                        .height(Length::Fixed(440.0)).into()
-                };
-                body=body.push(stage);
+                body=body.push(render_surface(app,view,Length::Fixed(440.0)));
             }
         }
         if !app.surface_report.is_empty(){
@@ -2682,6 +2911,33 @@ mod tests{
         assert!(app.slice_grid.is_none());
     }
     #[test]
+    fn opened_world_immediately_schedules_source_3d_and_hides_advanced_panel(){
+        let mut app=super::App::default();
+        app.show_advanced=true;
+        app.worlds.push(mcedit2_world::WorldSummary{
+            root:std::path::PathBuf::from("."),
+            level_name:Some("Original world".into()),
+            data_version:Some(3955),storage_format:Some(19133),
+            version_name:Some("1.21.1".into()),
+            dimensions:vec![mcedit2_world::DimensionSummary{
+                name:"minecraft:overworld".into(),
+                region_dir:std::path::PathBuf::from("./region"),
+                regions:0,chunks:0,extension:"mca".into(),
+            }],warnings:vec![],
+        });
+        app.current=Some(0);
+        app.open_default_scene(85);
+        assert!(!app.show_advanced);
+        assert!(!app.show_top_down);
+        assert!(app.surface.is_none());
+        assert!(app.near_job.is_some());
+        assert_eq!(app.surface_area,"-16,61,-16;15,108,15");
+        assert!(app.surface_report.contains("Loading"));
+        let before=app.render_signature();
+        super::update_impl(&mut app,super::Message::ToggleLanguage);
+        assert!(app.render_signature()==before);
+    }
+    #[test]
     fn rapid_open_requests_keep_only_latest_source_path(){
         let mut app=super::App::default();
         app.path="original-A".into();
@@ -2697,7 +2953,7 @@ mod tests{
     }
     #[test]
     fn far_tile_cache_is_bounded_and_lod_sensitive(){
-        use super::{FarProgress,far_cache_key,FAR_CACHE_PATCHES,FAR_CACHE_VOXELS};
+        use super::{far_cache_key,FAR_CACHE_PATCHES,FAR_CACHE_VOXELS};
         use mcedit2_world::far_view::{FarChunkPatch,FarChunkRequest};
         use mcedit2_world::surface::SourceChunkTile;
         let sample=FarChunkRequest{cx:12,cz:-8,span:8};

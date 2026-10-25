@@ -13,7 +13,9 @@
 //!  6. caller finalizes ONLY after confirming new region, or rolls back
 //! A crash while the marker remains is recoverable through rollback_pending.
 //! Backup is never deleted by this module, including after rollback.
-use std::fs::{self,File,OpenOptions};
+use std::fs::{self,OpenOptions};
+#[cfg(unix)]
+use std::fs::File; // parent directory fsync is implemented only on Unix
 use std::io::Write;
 use std::path::{Path,PathBuf};
 use serde::{Deserialize,Serialize};
