@@ -4,6 +4,7 @@
 //! geometry use the ordinary named-texture fallback rather than guessing.
 use crate::{isometric::Face, resource_ids};
 use crate::models::{Box3, ElementRotation, Part};
+use crate::special_obj;
 use mcedit2_world::sections::State;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -21,9 +22,16 @@ pub(crate) struct FaceSpec {
     /// Handles quarter-turns and mirrors without corrupting geometry.
     pub uvlock: [u8; 4],
 }
+#[derive(Clone, Debug)]
+pub(crate) struct ObjSelection {
+    pub xyz: [[f32; 3]; 3],
+    pub uv: [[f32; 2]; 3],
+    pub texture: String,
+}
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ModelBank {
     files: BTreeMap<String, Value>,
+    obj_meshes: BTreeMap<String, Vec<special_obj::Triangle>>,
     json_sizes: BTreeMap<String, usize>,
     total_json_bytes: usize,
 }
@@ -685,6 +693,59 @@ impl ModelBank {
         self.total_json_bytes = new_total;
         self.files.insert(key, json);
         Ok(true)
+    }
+    /// Guarded static Wavefront OBJ; model key uses original Java resource ID.
+    pub fn insert_obj(&mut self, path: &str, bytes: &[u8]) -> Result<bool, String> {
+        let parts: Vec<_> = path.split('/').collect();
+        if parts.len() < 5 || parts[0] != "assets" || parts[2] != "models"
+            || !resource_ids::namespace(parts[1]) {
+            return Ok(false);
+        }
+        let name = parts[3..].join("/");
+        let Some(name) = name.strip_suffix(".obj") else { return Ok(false); };
+        if !resource_ids::path(name, 160) { return Ok(false); }
+        let key = format!("model:{}:{}",
+            parts[1], name.strip_prefix("block/").unwrap_or(name));
+        self.obj_meshes.insert(key, special_obj::parse(bytes)?);
+        Ok(true)
+    }
+    /// Select the supported OBJ backend through the original JSON loader
+    /// declaration. No individual block name can trigger this path.
+    pub fn obj_at(&self, state: &State, pos:(i32,i32,i32)) -> Option<Vec<ObjSelection>> {
+        let selected = self.selections_at(state, pos)?;
+        let mut out = Vec::new();
+        for choice in selected {
+            let doc = self.files.get(&choice.key)?;
+            let loader = doc.get("loader")?.as_str()?;
+            if !matches!(loader, "forge:obj" | "neoforge:obj") { return None; }
+            let namespace = choice.key.strip_prefix("model:")?.split_once(':')?.0;
+            let reference = resource_ids::qualified(doc.get("model")?.as_str()?, namespace)?;
+            let (ns, path) = reference.split_once(':')?;
+            let path = path.strip_prefix("models/").unwrap_or(path);
+            let path = path.strip_suffix(".obj")?;
+            let path = path.strip_prefix("block/").unwrap_or(path);
+            let triangles = self.obj_meshes.get(&format!("model:{ns}:{path}"))?;
+            let rotation = Part {
+                bounds: Box3::FULL, rotation: None,
+                variant_x: choice.x, variant_y: choice.y,
+            };
+            let textures = doc.get("textures").and_then(Value::as_object)?;
+            for tri in triangles {
+                let raw = textures.get(&tri.material)
+                    .or_else(|| textures.get("particle"))?.as_str()?;
+                let texture = resource_ids::qualified(raw, namespace)?;
+                let (ns, path) = texture.split_once(':')?;
+                let path = path.strip_prefix("block/")
+                    .or_else(|| path.strip_prefix("blocks/")).unwrap_or(path);
+                out.push(ObjSelection {
+                    xyz: tri.xyz.map(|point| rotation.point(point)),
+                    uv: tri.uv,
+                    texture: format!("{ns}:{path}"),
+                });
+                if out.len() > 4096 { return None; }
+            }
+        }
+        (!out.is_empty()).then_some(out)
     }
     pub fn count(&self) -> usize {
         self.files.len()

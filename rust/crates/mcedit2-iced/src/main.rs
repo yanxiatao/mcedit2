@@ -12,6 +12,7 @@ mod models;
 mod palette;
 mod resource_models;
 mod repeating_uv;
+mod special_obj;
 mod resource_ids;
 mod slice_canvas;
 mod spectator;

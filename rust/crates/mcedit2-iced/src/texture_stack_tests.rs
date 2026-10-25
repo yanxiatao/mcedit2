@@ -333,3 +333,46 @@ fn original_json_repeating_uvs_emit_real_atlas_safe_spectator_faces() {
     assert!(mesh.iter().all(|v| v.uv[1] >= slot.start[1] && v.uv[1] <= slot.end[1]));
     assert!(mesh.iter().all(|v| v.atlas_page == slot.page));
 }
+
+#[test]
+fn declared_obj_loader_emits_generic_static_mesh_via_gpu_path() {
+    use mcedit2_world::sections::State;
+    use mcedit2_world::surface::{SurfaceView, SurfaceVoxel, VoxelMaterial, ALL_FACES};
+    use std::sync::{Arc, Mutex};
+    let fixture = Fixture::new();
+    let pack = fixture.path("obj_pack");
+    put(&pack, "assets/example/textures/item/casing.png", &png(&[3,127,241,255], 1));
+    put(&pack, "assets/example/blockstates/widget.json",
+        br#"{"variants":{"":{"model":"example:block/widget"}}}"#);
+    put(&pack, "assets/example/models/block/widget.json",
+        br#"{"loader":"neoforge:obj","model":"example:models/block/widget.obj",
+            "textures":{"casing":"example:item/casing"}}"#);
+    put(&pack, "assets/example/models/block/widget.obj",
+        b"v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nusemtl casing\nf 1/1 2/2 3/3 4/4\n");
+    let bank = Arc::new(TextureBank::open(&pack).unwrap());
+    let state = State { name:"example:widget".into(), properties:vec![] };
+    let mesh = bank.static_obj_at(&state, (0,70,0)).unwrap();
+    assert_eq!(mesh.len(), 2);
+    assert_eq!(mesh[0].xyz[0], [-0.5,-0.5,-0.5]);
+    assert_eq!(mesh[1].xyz[2], [-0.5,0.5,-0.5]);
+    let scene = crate::spectator::SpectatorScene {
+        surface: Arc::new(SurfaceView {
+            x:0,z:0,y_min:64,y_max:111,width:16,depth:16,
+            voxels:vec![SurfaceVoxel {
+                x:0,y:70,z:0,span:1,state,biome:None,
+                original_block_entity:false,staged:false,
+                faces:ALL_FACES,kind:VoxelMaterial::Solid,
+            }],
+            missing_columns:0,source_chunks:1,source_tiles:vec![],
+        }),
+        texture_bank:Some(bank),show_textures:true,
+        camera:crate::spectator::Camera::default(),
+        quality:crate::gpu_mesh::Quality::Balanced,
+        cache:Arc::new(Mutex::new(None)),pending:Arc::new(Mutex::new(false)),
+        chunk_cache:Arc::new(Mutex::new(crate::chunk_mesh_cache::ChunkMeshCache::default())),
+    };
+    let vertices = crate::spectator::build(&scene);
+    assert_eq!(vertices.len(),12);
+    assert!(vertices.iter().all(|v|v.atlas_page==mesh[0].page));
+    assert!(vertices.iter().all(|v|v.uv.iter().all(|x|x.is_finite())));
+}

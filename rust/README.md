@@ -197,3 +197,27 @@ to GPU-vertex integration test validate actual repeated quads and UV bounds.
 This is generic static model handling, not per-block renderer special cases.
 Dynamic NBT-dependent block entity shapes and non-JSON loaders still need a
 source-aware plugin/model contract; no Mod executable render code is loaded.
+
+## Static special-model loader, independent of block identity
+
+The universal resource-pack model path now includes a **guarded static OBJ
+backend** selected by `forge:obj` / `neoforge:obj` in the original block
+JSON. Source OBJ files under `assets/<namespace>/models/` are parsed
+read-only; their declared vertex/UV data, material names and blockstate
+X/Y rotations are mapped to the same texture atlas and wgpu spectator scene
+as ordinary Java cuboid models. No resource file is executed or extracted
+and no external `mtllib` or remote references are followed. Resource bytes,
+vertex/triangle counts, coordinate ranges and available material names
+remain bounded. Unknown custom model loader identifiers are not guessed.
+Existing GPU batch sorting expects six vertices per face; each static OBJ
+triangle uses one degenerate trailing triangle for coherent transparency
+grouping. Integration tests exercise real resource JSON -> OBJ -> atlas
+material -> 3D GPU vertex flow, without hardcoded block identifiers.
+
+This backend is **not** a complete Wavefront implementation: this first
+static subset supports indexed triangular and quad faces with UVs; complex
+polygons, nested MTL pipelines, vertex normals, runtime loaders, bones and
+dynamic block entity renderers still need independent, source-verified
+render backends. Current OBJ UV values outside the sprite's [0,1] domain
+are clamped; the general repeated-UV path presently applies to Java JSON
+faces, not arbitrary OBJ triangles.

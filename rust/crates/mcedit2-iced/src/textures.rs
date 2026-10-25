@@ -610,6 +610,12 @@ fn write_placement(page: &mut AtlasPage, slot: SlotPlacement, tile: &Tile) {
 }
 
 #[derive(Clone, Debug, Default)]
+pub(crate) struct StaticObjTriangle {
+    pub xyz: [[f32; 3]; 3],
+    pub uv: [[f32; 2]; 3],
+    pub page: u32,
+    pub alpha: AlphaMode,
+}
 pub(crate) struct TextureBank {
     // Original PNG/JSON source is immutable and shared across animation.
     // Only changed RGBA pages are cloned on a sprite frame transition.
@@ -819,6 +825,7 @@ fn biome_color(biome: Option<&str>, name: &str) -> [f32; 3] {
 enum PackAsset {
     Colormap(&'static str),
     Model,
+    Obj,
     Metadata(String),
     Texture(String),
 }
@@ -836,13 +843,16 @@ impl PackAsset {
         if let Some(id) = texture_id(name) {
             return Some(Self::Texture(id));
         }
+        if name.ends_with(".obj") && name.contains("/models/") {
+            return Some(Self::Obj);
+        }
         (name.ends_with(".json")
             && (name.contains("/models/") || name.contains("/blockstates/")))
         .then_some(Self::Model)
     }
     fn max_bytes(&self) -> u64 {
         match self {
-            Self::Model => 2 * 1024 * 1024,
+            Self::Model | Self::Obj => 2 * 1024 * 1024,
             Self::Metadata(_) => MAX_ANIMATION_META as u64,
             Self::Colormap(_) | Self::Texture(_) => MAX_TEXTURE_BYTES,
         }
@@ -860,6 +870,11 @@ impl TextureBank {
             PackAsset::Model => {
                 if let Err(e) = Arc::make_mut(&mut self.models).insert(name, &bytes) {
                     self.warnings.push(format!("Skipped model {name}: {e}"));
+                }
+            }
+            PackAsset::Obj => {
+                if let Err(e) = Arc::make_mut(&mut self.models).insert_obj(name, &bytes) {
+                    self.warnings.push(format!("Skipped OBJ {name}: {e}"));
                 }
             }
             PackAsset::Metadata(id) => {
@@ -1442,6 +1457,33 @@ impl TextureBank {
     pub fn atlas_uv(&self, state: &State, face: crate::isometric::Face) -> Option<AtlasUv> {
         let id = self.resolve_id(state, face)?;
         self.atlas.as_ref()?.entries.get(&id).cloned()
+    }
+    /// Every declared OBJ material maps through the same namespace-safe
+    /// atlas lookup as JSON faces, without any block ID special cases.
+    pub fn static_obj_at(
+        &self, state: &State, pos: (i32, i32, i32),
+    ) -> Option<Vec<StaticObjTriangle>> {
+        let chosen = self.models.obj_at(state, pos)?;
+        let atlas = self.atlas.as_ref()?;
+        let mut out = Vec::new();
+        for tri in chosen {
+            let id = if self.tiles.contains_key(&tri.texture) {
+                tri.texture.as_str()
+            } else {
+                MISSING_TEXTURE_ID
+            };
+            let slot = atlas.entries.get(id)?;
+            let alpha = self.tiles.get(id)?.alpha_mode();
+            out.push(StaticObjTriangle {
+                xyz: tri.xyz,
+                uv: tri.uv.map(|uv| {
+                    slot.sample(uv[0].clamp(0.0, 1.0), uv[1].clamp(0.0, 1.0))
+                }),
+                page: slot.page,
+                alpha,
+            });
+        }
+        Some(out)
     }
     /// Stable model/tile identity across animated RGBA atlas frame updates.
     pub fn geometry_id(&self) -> (usize, usize) {

@@ -332,6 +332,40 @@ pub(crate) fn build_cancellable(
             voxel.y,
             voxel.z.saturating_add(voxel.span as i32 / 2),
         );
+        // Generic special static geometry: original blockstate JSON selects
+        // a supported external mesh loader and real source asset. No per-block
+        // fallback table, game rendering code or dynamic entity simulation.
+        if voxel.span == 1 && view.show_textures {
+            if let Some(triangles) = bank.and_then(|b| b.static_obj_at(&voxel.state, pos)) {
+                for tri in triangles {
+                    if out.len() / 6 >= limit {
+                        break;
+                    }
+                    let xyz = tri.xyz.map(|point| {
+                        [
+                            (voxel.x as i64 - origin[0] as i64) as f32 + point[0],
+                            (voxel.y as i64 - origin[1] as i64) as f32 + point[1],
+                            (voxel.z as i64 - origin[2] as i64) as f32 + point[2],
+                        ]
+                    });
+                    // Existing GPU painter and transparent sort use six
+                    // vertices/quad. The second triangle is degenerate.
+                    for index in [0usize, 1, 2, 0, 2, 2] {
+                        out.push(Vertex {
+                            xy: [0.0, 0.0],
+                            depth: 0.0,
+                            rgba: [1.0; 4],
+                            uv: tri.uv[index],
+                            mode: tri.alpha as u32,
+                            xyz: xyz[index],
+                            world_mode: 1,
+                            atlas_page: tri.page,
+                        });
+                    }
+                }
+                continue;
+            }
+        }
         let variant = bank.map_or(0, |b| b.model_variant_key(&voxel.state, sample));
         // Borrow the original palette strings. Cloning the whole blockstate for
         // every face caused avoidable allocations during stream updates.
