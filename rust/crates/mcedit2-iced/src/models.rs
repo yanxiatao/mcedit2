@@ -657,6 +657,42 @@ pub(crate) fn boxes(state: &State) -> Vec<Box3> {
     if matches!(name, "farmland" | "dirt_path") {
         return vec![Box3::from_six(-0.5, -0.5, -0.5, 0.5, 0.4375, 0.5)];
     }
+    if name.ends_with("_door") && !name.ends_with("_trapdoor") {
+        // A double-height Java door occupies an edge plate in both source
+        // blocks. Handles and decoration are owned by original JSON models.
+        let facing = match property(state, "facing").unwrap_or("north") {
+            "north" => 0_u8,
+            "east" => 1,
+            "south" => 2,
+            "west" => 3,
+            _ => return vec![Box3::FULL],
+        };
+        let hinge_left = match property(state, "hinge").unwrap_or("left") {
+            "left" => true,
+            "right" => false,
+            _ => return vec![Box3::FULL],
+        };
+        let opened = match property(state, "open").unwrap_or("false") {
+            "true" => true,
+            "false" => false,
+            _ => return vec![Box3::FULL],
+        };
+        if !matches!(property(state, "half"), None | Some("upper" | "lower")) {
+            return vec![Box3::FULL];
+        }
+        let direction = if opened {
+            (facing + if hinge_left { 3 } else { 1 }) % 4
+        } else {
+            facing
+        };
+        let plane = match direction {
+            0 => Box3::from_six(-0.5, -0.5, -0.5, 0.5, 0.5, -0.3125),
+            1 => Box3::from_six(0.3125, -0.5, -0.5, 0.5, 0.5, 0.5),
+            2 => Box3::from_six(-0.5, -0.5, 0.3125, 0.5, 0.5, 0.5),
+            _ => Box3::from_six(-0.5, -0.5, -0.5, -0.3125, 0.5, 0.5),
+        };
+        return vec![plane];
+    }
     if name.ends_with("_trapdoor") {
         let top = property(state, "half") == Some("top");
         let open = property(state, "open") == Some("true");
@@ -1301,6 +1337,91 @@ mod tests {
         assert_eq!(upright.len(), 1);
         assert_eq!(upright[0].min, [-0.25, -0.5, -0.25]);
         assert_eq!(boxes(&state(wall, &[("up", "false")])).len(), 1);
+    }
+    #[test]
+    fn vanilla_double_height_doors_follow_facing_hinge_and_open_state() {
+        let state_for = |facing: &str, hinge: &str, open: &str, half: &str| {
+            state("minecraft:oak_door", &[
+                ("facing", facing), ("hinge", hinge),
+                ("open", open), ("half", half),
+            ])
+        };
+        let slab = |facing: &str, hinge: &str, open: &str, half: &str| {
+            let b = boxes(&state_for(facing, hinge, open, half));
+            assert_eq!(b.len(), 1);
+            assert_eq!(b[0].min[1], -0.5);
+            assert_eq!(b[0].max[1], 0.5);
+            b[0]
+        };
+        let closed = slab("north", "left", "false", "lower");
+        assert_eq!(closed.min, [-0.5, -0.5, -0.5]);
+        assert_eq!(closed.max, [0.5, 0.5, -0.3125]);
+        let opened_left = slab("north", "left", "true", "lower");
+        let opened_right = slab("north", "right", "true", "lower");
+        assert_eq!(opened_left.max[0], -0.3125);
+        assert_eq!(opened_right.min[0], 0.3125);
+        assert_ne!(opened_left, opened_right);
+        for facing in ["north", "east", "south", "west"] {
+            for hinge in ["left", "right"] {
+                for opened in ["true", "false"] {
+                    assert_eq!(
+                        slab(facing, hinge, opened, "lower"),
+                        slab(facing, hinge, opened, "upper"),
+                        "Door halves must share exactly the same geometry"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            slab("north", "right", "true", "lower"),
+            slab("east", "left", "false", "upper")
+        );
+        assert_eq!(
+            slab("north", "left", "true", "lower"),
+            slab("west", "right", "false", "upper")
+        );
+    }
+    #[test]
+    fn door_fallback_does_not_invent_foreign_or_invalid_geometry() {
+        assert_eq!(
+            boxes(&state("mod:oak_door", &[("open", "true")])),
+            vec![Box3::FULL]
+        );
+        for (key, value) in [
+            ("facing", "northeast"),
+            ("hinge", "center"),
+            ("open", "maybe"),
+            ("half", "middle"),
+        ] {
+            assert_eq!(
+                boxes(&state("minecraft:iron_door", &[(key, value)])),
+                vec![Box3::FULL]
+            );
+        }
+        assert_eq!(boxes(&state("minecraft:oak_trapdoor", &[])).len(), 1);
+        assert_eq!(boxes(&state("minecraft:iron_door", &[])).len(), 1);
+        assert!(boxes(&state("minecraft:iron_door", &[]))[0].max[2] < 0.0);
+    }
+    #[test]
+    fn custom_java_door_model_json_takes_priority_over_native_fallback() {
+        let mut bank = crate::resource_models::ModelBank::default();
+        bank.insert(
+            "assets/minecraft/blockstates/oak_door.json",
+            br#"{"variants":{"facing=north,half=lower,hinge=left,open=true":{"model":"minecraft:block/test_door"}}}"#,
+        ).unwrap();
+        bank.insert(
+            "assets/minecraft/models/block/test_door.json",
+            br##"{"textures":{"all":"minecraft:block/oak_planks"},"elements":[
+               {"from":[0,0,0],"to":[16,6,16],"faces":{"up":{"texture":"#all"}}}
+            ]}"##,
+        ).unwrap();
+        let source = state("minecraft:oak_door", &[
+            ("facing", "north"), ("half", "lower"),
+            ("hinge", "left"), ("open", "true"),
+        ]);
+        assert_ne!(boxes(&source)[0], bank.parts_at(&source, (0, 70, 0)).unwrap()[0].bounds);
+        assert_eq!(bank.parts_at(&source, (0, 70, 0)).unwrap().len(), 1);
+        assert_eq!(bank.parts_at(&source, (0, 70, 0)).unwrap()[0].bounds.max[1], -0.125);
     }
     #[test]
     fn vanilla_fence_connected_arms_have_distinct_upper_and_lower_rails() {

@@ -711,6 +711,68 @@ mod tests {
         );
     }
     #[test]
+    fn spectator_door_halves_render_source_accurate_open_hinge_thin_planes() {
+        use mcedit2_world::sections::State;
+        use mcedit2_world::surface::ALL_FACES;
+        let build_door = |hinge: &str, opened: bool, half: &str| {
+            let voxel = SurfaceVoxel {
+                x: 0,
+                y: if half == "upper" { 71 } else { 70 },
+                z: 0,
+                span: 1,
+                state: State {
+                    name: "minecraft:oak_door".into(),
+                    properties: vec![
+                        ("facing".into(), "north".into()),
+                        ("hinge".into(), hinge.into()),
+                        ("open".into(), opened.to_string()),
+                        ("half".into(), half.into()),
+                    ],
+                },
+                biome: None, staged: false, original_block_entity: false,
+                faces: ALL_FACES, kind: VoxelMaterial::Solid,
+            };
+            let scene = SpectatorScene {
+                surface: Arc::new(SurfaceView {
+                    x: 0, z: 0, y_min: 64, y_max: 111,
+                    width: 16, depth: 16, voxels: vec![voxel],
+                    source_tiles: vec![], source_chunks: 1, missing_columns: 0,
+                }),
+                texture_bank: None,
+                show_textures: false,
+                camera: Camera::default(),
+                quality: Quality::Balanced,
+                cache: Arc::new(Mutex::new(None)),
+                pending: Arc::new(Mutex::new(false)),
+                chunk_cache: Arc::new(Mutex::new(
+                    crate::chunk_mesh_cache::ChunkMeshCache::default(),
+                )),
+            };
+            let vertices = build(&scene);
+            assert!(!vertices.is_empty());
+            let extrema = |axis: usize| (
+                vertices.iter().map(|v| v.xyz[axis]).fold(f32::INFINITY, f32::min),
+                vertices.iter().map(|v| v.xyz[axis]).fold(f32::NEG_INFINITY, f32::max),
+            );
+            (extrema(0), extrema(1), extrema(2))
+        };
+        let closed = build_door("left", false, "lower");
+        let left_open = build_door("left", true, "lower");
+        let right_open = build_door("right", true, "lower");
+        assert_eq!(closed.0, (-0.5, 0.5));
+        assert_eq!(closed.2, (-0.5, -0.3125));
+        assert_eq!(left_open.0, (-0.5, -0.3125));
+        assert_eq!(right_open.0, (0.3125, 0.5));
+        assert_eq!(left_open.2, (-0.5, 0.5));
+        assert_eq!(right_open.2, (-0.5, 0.5));
+        // The two original source halves render one block apart in 3D.
+        let top = build_door("left", true, "upper");
+        assert_eq!(top.0, left_open.0);
+        assert_eq!(top.2, left_open.2);
+        assert_eq!(top.1.0 - left_open.1.0, 1.0);
+        assert_eq!(top.1.1 - left_open.1.1, 1.0);
+    }
+    #[test]
     fn internal_faces_of_adjacent_model_boxes_are_hidden() {
         let left = models::Part::cube(models::Box3 {
             min: [-0.5, -0.5, -0.5],

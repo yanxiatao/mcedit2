@@ -138,3 +138,16 @@ fail closed to a conservative selection cube, and custom Mod namespaces
 are never assigned vanilla stair geometry. Loaded resource-pack JSON model
 elements remain authoritative instead of using these fallback boxes.
 Tests include a world-space spectator mesh inspection of all five shapes.
+
+## Native Java double-height door shape fallback
+
+When the installed Java client or a texture-only resource pack does not
+provide a resolvable original blockstate/model JSON, native spectator mode
+renders vanilla wooden, metal and copper double-height doors as a thin
+3/16-block panel rather than a full opaque cube. The source `facing`, `open`,
+`hinge` and `half` properties control edge placement for both door blocks.
+Invalid or foreign-namespace states conservatively retain the previous
+fallback; existing blockstate/model JSON always takes precedence. Source
+world data, block entities and other editor state are never modified.
+Regression tests cover all 4 directions, both hinges, open/closed panels,
+upper/lower alignment and the real world-space GPU vertex extents.
