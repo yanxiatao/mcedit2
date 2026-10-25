@@ -342,3 +342,116 @@ The stage must still be synced and the original immutable backup retained.
 Both apply and rollback use the same platform-correct file replacement.
 Do NOT edit an active Minecraft world: Windows file sharing/locking errors
 are intentionally not bypassed. Cross-region atomicity is still not offered.
+
+## Next migration batch 2/5 — clickable 2D native iced viewport
+
+The iced frontend now renders a 16x16 (or smaller) clickable grid using
+original Java block slices, original Block Entity markers, and explicit
+missing-chunk/Section cells. Clicking a cell displays its full numeric or
+named/modded BlockState and safely selects exactly that coordinate for
+normal 3D preview/stage/Undo workflows. Arrow/height-layer controls pan
+by 16 X/Z blocks or one Y level. Larger original 2D slices retain the
+read-only 64x64 text-map inspection without creating thousands of widgets.
+Stale grids are invalidated when the world/dimension changes, or after
+any in-memory mutation/Undo/Redo, so selections cannot silently use a
+previously edited viewport. This is an interactive widget grid, not yet
+a textured chunk mesh or full 3D GPU renderer. No builds or CI triggered.
+
+## Next migration batch 3/5 — portable block-only clipboard
+
+The Rust Session now exports up to 4096 frozen effective block states in
+Y/Z/X order to a versioned `.mcedit2clip` file and previews a later paste
+into a selected destination, staging it as one Undo/Redo transaction.
+Original Block Entities at the source OR destination refuse the operation
+rather than silently removing machine NBT; source chunks and Sections must
+exist, and the file is limited to the SAME original world, dimension and
+DataVersion, retaining original numeric-vs-named block identity. Clipboard
+files are create-new, stored outside the Minecraft world and strictly
+validated on import. iced adds selection export and clipboard paste preview
+controls. The clipboard deliberately excludes Block Entities, entities and
+schematic conversion; standardized `.schematic`/`.schem` formats remain
+separate future adapters. No disk world writes occur during clipboard use.
+
+## Next migration batch 4/5 — classic MCEdit schematic importer
+
+Native Rust can now read original GZip-compressed numeric-ID `.schematic`
+Blocks, Data and AddBlocks, preserving metadata and old high-ID nibbles,
+with up to 4096 blocks per transaction. Nonempty TileEntities/Entities/
+TileTicks are refused rather than silently dropped. The iced editor can
+preview a classic structure paste at its clipboard destination and apply
+it using the existing guarded/undoable operation. Only original Alpha
+Materials numeric schematics and numeric destination chunks are supported;
+modern Sponge `.schem` and non-lossy BE structure transfer remain pending.
+
+## Next migration batch 5/5 — Sponge v2 structures
+
+Modern Java named-block Sponge schematic v2 `.schem` import/export is
+implemented with GZip NBT, exact DataVersion matching, required palette,
+PaletteMax, bounded varint BlockData and canonical Y/Z/X ordering. The
+exporter emits a new file outside the original world and never regenerates
+unrelated original NBT. Nonempty entities/BlockEntities and all biome
+information are rejected on import rather than silently discarded; nonzero
+Offset, unknown schematic Versions, malformed indices and structures over
+4096 cells are likewise refused. iced adds export and paste-preview buttons
+and the existing BE guard and Undo system handles destination edits. Sponge
+v3, full BE/entity schematic transfers, and version conversion still remain
+unimplemented. This completes the five new migration source rounds; perform
+combined Linux/Windows **check and test only** next, not application builds.
+
+## Migration batch 3, round 1/5 — read-only opaque Block Entity inspector
+
+The native core now reports an original modded Block Entity ID, SHA-256
+fingerprint, serialized compound byte length, original NBT tag types and
+bounded direct-field names/sizes. The iced editor exposes a read-only
+inspection button for a specific XYZ coordinate. This DOES NOT yet allow
+Block Entity editing, movement or copying: source and destination BE blocks
+remain protected during all existing editing operations. Malformed original
+NBT fails closed rather than yielding a misleading empty object. No build,
+packaging or GitHub Actions run occurs until five feature rounds complete.
+
+## Migration batch 3, round 2/5 — clipboard spatial transforms
+
+Block-only clipboard paste supports 90/180/270-degree X/Z rotation plus
+mirrors about X or Z. Known `facing`, `axis`, and 0..15 `rotation` fields
+rotate along with the placement; simple invariant `waterlogged`, `lit`,
+`powered` remain unchanged. Unrecognized modded state properties and all
+legacy numeric block metadata refuse spatial transforms rather than being
+incorrectly converted. The native Y/Z/X ordering, dimensions, original
+source provenance and existing BE collision/Undo checks remain intact.
+Iced provides immediate transform preview buttons, all still requiring
+explicit normal stage confirmation. No CI or application builds this round.
+
+## Migration batch 3, round 3/5 — interactive orthogonal vertical slices
+
+The native editor now supports strict original X/Y and Z/Y vertical planes
+up to 64x64 with explicit missing chunks/Sections and original BE markers.
+The top row corresponds to maximum Y; negative Y and custom Java heights
+are supported. iced shows clickable 16x16 vertical grids whose block cells
+select an exact 1x1x1 staging area; larger planes remain read-only text
+maps. Existing transaction/BE/Undo safety applies to all selections.
+This adds a second graphical projection, not textured 3D GPU rendering.
+
+## Migration batch 3, round 4/5 — overlap-safe original block MOVE
+
+The Rust Session now previews a true block-only Move: freezing source
+blocks, setting the vacated source to the correct original-layout air,
+and overlaying the frozen blocks at the destination. Source/destination
+overlap is deterministic and the full move is one Undo/Redo group. All
+original source and destination Sections, BE coordinates and numeric-vs-
+named identities must pass strict preflight; moves touching opaque BE NBT
+are refused. Combined source/destination changes remain bounded to 4096
+cells. iced exposes a Move preview button next to the existing Clone.
+Original Minecraft disk content is never changed by a Move preview.
+
+## Migration batch 3, round 5/5 — original classic schematic export
+
+Classic MCEdit GZip `.schematic` export is now symmetrical with the existing
+numeric-ID importer: exact 8-bit Blocks, four-bit metadata Data bytes and
+optional nibble-packed AddBlocks high IDs are preserved, with empty entity,
+Block Entity and scheduled tick lists. Source capture refuses all original
+BE coordinates, unknown Sections and modern named-only IDs, rather than
+exporting a lossy machine schematic. Files are create-new outside the world,
+up to 4096 cells; iced supports export alongside classic import and modern
+Sponge v2. The five feature milestones are complete; the planned next step
+is ONE consolidated Linux/Windows `cargo check` + `cargo test` run, with no
+application binary building or packaging.

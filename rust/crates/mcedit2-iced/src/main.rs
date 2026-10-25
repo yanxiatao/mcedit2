@@ -3,8 +3,9 @@ use iced::widget::{button,column,container,row,scrollable,text,text_input};
 use iced::{Element,Length,Theme};
 use mcedit2_world::{compatibility_label,inspect_input,launch,WorldSummary};
 use mcedit2_world::block_lookup::{parse_xyz,read_world_block};
-use mcedit2_world::editing::{parse_bounds,parse_state,Preview,Session};
+use mcedit2_world::editing::{parse_bounds,parse_state,Bounds,Preview,Session,Slice,SliceCell,VerticalSlice};
 use mcedit2_world::region_plan::NativeRegionCandidate;
+use mcedit2_world::clipboard::HorizontalTransform;
 use mcedit2_world::region_transaction::{apply_single_region,finalize_single_region,rollback_pending_region};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -30,9 +31,35 @@ fn parse_region_name(name:&str)->Result<(i32,i32,&str),String>{
     }
     Ok((rx,rz,ext))
 }
+fn slice_cell_label(cell:&SliceCell)->String{
+    match cell {
+        SliceCell::MissingChunk => "·".into(),
+        SliceCell::MissingSection => "?".into(),
+        SliceCell::Present { original_block_entity:true,.. } => "@".into(),
+        SliceCell::Present { state,.. } => state.name.rsplit(':')
+            .next().unwrap_or("?").chars().next()
+            .unwrap_or('?').to_ascii_uppercase().to_string(),
+    }
+}
+fn shifted_slice(bounds:Bounds,dx:i32,dy:i32,dz:i32)->Result<String,String>{
+    let add=|v:i32,delta:i32|v.checked_add(delta)
+        .ok_or_else(||"Slice pan coordinate overflow".to_owned());
+    let first=(add(bounds.minimum[0],dx)?,add(bounds.minimum[1],dy)?,
+        add(bounds.minimum[2],dz)?);
+    let last=(add(bounds.maximum[0],dx)?,add(bounds.maximum[1],dy)?,
+        add(bounds.maximum[2],dz)?);
+    Bounds::new(first,last).map_err(|e|e.to_string())?;
+    Ok(format!("{},{},{};{},{},{}",first.0,first.1,first.2,
+        last.0,last.1,last.2))
+}
+
 #[derive(Default)]
 struct App{
     path:String,
+    slice_grid:Option<(usize,usize,Slice)>,
+    vertical_grid:Option<(usize,usize,VerticalSlice)>,
+    vertical_area:String,
+    vertical_report:String,
     worlds:Vec<WorldSummary>,
     current:Option<usize>,
     dimension_index:usize,
@@ -46,6 +73,10 @@ struct App{
     clone_destination:String,
     fill_seed:String,
     patch_path:String,
+    clipboard_path:String,
+    clipboard_destination:String,
+    schematic_path:String,
+    sponge_path:String,
     save_phrase:String,
     recover_region:String,
     recovery_phrase:String,
@@ -59,16 +90,141 @@ struct App{
 #[derive(Debug,Clone)]
 enum Message{
     Path(String),Open,Select(usize),Coordinates(String),Dimension(usize),
-    InspectBlock,SliceText(String),InspectSlice,
+    InspectBlock,InspectOriginalBlockEntity,SliceText(String),InspectSlice,PickSlice(i32,i32,i32),MoveSlice(i32,i32,i32),
+    VerticalText(String),InspectVertical,PickVertical(usize,usize),
     SelectionText(String),TargetText(String),FilterText(String),
-    CloneDestination(String), PreviewClone,
+    CloneDestination(String), PreviewClone,PreviewMove,
     FillSeed(String), PreviewFill,
     PatchPath(String),ExportPatch,ImportPatch,AnalyzeNativePatch,AnalyzeRegionPlan,
+    ClipboardPath(String),ClipboardDestination(String),ExportClipboard,PreviewPasteClipboard,
+    PreviewTransformedClipboard(HorizontalTransform),
+    SchematicPath(String),PreviewLegacySchematic,ExportLegacySchematic,
+    SpongePath(String),PreviewSpongeV2,ExportSpongeV2,
     PrepareWorldSave,SavePhrase(String),ConfirmWorldSave,
     RecoverRegion(String),RecoveryPhrase(String),FinalizeRegion,RollbackRegion,
     PreviewEdit,ApplyEdit,UndoEdit,RedoEdit,DiscardEdits,Clear
 }
 impl App{
+    fn inspect_vertical_view(&mut self){
+        self.vertical_grid=None;
+        self.vertical_report=match self.current_key(){
+            None=>"Select a Java world first.".into(),
+            Some(key)=>match parse_bounds(&self.vertical_area){
+                Err(e)=>format!("Invalid vertical area: {e}"),
+                Ok(bounds)=>match self.current_session(key)
+                    .and_then(|editor|editor.inspect_vertical_slice(bounds)
+                        .map_err(|e|e.to_string())){
+                    Ok(slice)=>{
+                        let explanation=slice.text_map();
+                        let h=slice.rows.len();
+                        let width=slice.rows.first().map_or(0,Vec::len);
+                        if width<=16&&h<=16 {
+                            self.vertical_grid=Some((key.0,key.1,slice));
+                            format!("Clickable {width}x{h} original vertical plane. Select exact blocks below.\n{explanation}")
+                        }else{
+                            format!("Text-only {width}x{h} original plane; use <=16x16 for clickable cells.\n{explanation}")
+                        }
+                    },
+                    Err(e)=>format!("Vertical inspection refused: {e}"),
+                }
+            }
+        };
+    }
+    fn pick_vertical(&mut self,row:usize,col:usize){
+        let Some((wi,di,plane))=self.vertical_grid.as_ref() else{return};
+        if self.current_key()!=Some((*wi,*di)){
+            self.vertical_grid=None;
+            self.vertical_report="Vertical plane stale; re-inspect selected dimension.".into();
+            return;
+        }
+        let Some((x,y,z))=plane.coordinate(row,col) else{return};
+        self.edit_area=format!("{x},{y},{z};{x},{y},{z}");
+        self.query_coordinates=format!("{x}, {y}, {z}");
+        self.save_preview=None;
+        self.prepared=None;
+        self.block_result=format!("Selected vertical plane original block at ({x},{y},{z}); inspect the source Block Entity before editing.");
+    }
+    fn inspect_slice_view(&mut self){
+        self.slice_grid=None;
+        self.slice_result=match self.current_key() {
+            None=>"Select an indexed Java world first.".into(),
+            Some(key)=>match parse_bounds(&self.slice_area) {
+                Err(e)=>format!("Invalid 2D slice bounds: {e}"),
+                Ok(bounds)=>{
+                    let width=(bounds.maximum[0] as i64-bounds.minimum[0] as i64)+1;
+                    let depth=(bounds.maximum[2] as i64-bounds.minimum[2] as i64)+1;
+                    if bounds.minimum[1]!=bounds.maximum[1]{
+                        "2D slice view requires one Y layer.".into()
+                    }else {
+                        match self.current_session(key)
+                            .and_then(|session|session.inspect_slice(bounds)
+                                .map_err(|e|e.to_string())) {
+                            Ok(slice)=>{
+                                let legend=slice.text_map();
+                                if width<=16 && depth<=16 {
+                                    self.slice_grid=Some((key.0,key.1,slice));
+                                    format!("Interactive 2D grid ({width}x{depth}). Click a cell to inspect/select; @ = original Block Entity, ? = missing Section, · = missing chunk.\n{legend}")
+                                } else {
+                                    format!("Text-only slice ({width}x{depth}); use a 16x16 or smaller window for clickable cells.\n{legend}")
+                                }
+                            }
+                            Err(e)=>format!("2D slice read refused: {e}"),
+                        }
+                    }
+                }
+            }
+        };
+    }
+    fn pan_slice(&mut self,dx:i32,dy:i32,dz:i32){
+        match parse_bounds(&self.slice_area)
+            .map_err(|e|e.to_string())
+            .and_then(|area|shifted_slice(area,dx,dy,dz)) {
+            Ok(next)=>{
+                self.slice_area=next;
+                self.inspect_slice_view();
+            }
+            Err(e)=>self.slice_result=format!("Cannot move the slice: {e}"),
+        }
+    }
+    fn pick_slice(&mut self,x:i32,y:i32,z:i32){
+        let Some((world,dimension,slice))=self.slice_grid.as_ref() else {
+            self.slice_result="No current interactive slice to select.".into();
+            return;
+        };
+        if self.current_key()!=Some((*world,*dimension)) {
+            self.slice_grid=None;
+            self.slice_result="World or dimension switched; reload the slice.".into();
+            return;
+        }
+        if !(slice.bounds.minimum[0]..=slice.bounds.maximum[0]).contains(&x)
+            ||!(slice.bounds.minimum[2]..=slice.bounds.maximum[2]).contains(&z)
+            ||y!=slice.bounds.minimum[1]{
+            self.slice_result="Clicked coordinates outside original slice.".into();
+            return;
+        }
+        let row=(z-slice.bounds.minimum[2]) as usize;
+        let col=(x-slice.bounds.minimum[0]) as usize;
+        let Some(cell)=slice.rows.get(row).and_then(|cells|cells.get(col)) else {
+            self.slice_result="Slice contains no block at selected coordinate.".into();
+            return;
+        };
+        let detail=match cell {
+            SliceCell::MissingChunk=>"Missing original chunk; edits prohibited".into(),
+            SliceCell::MissingSection=>"Missing original Section; edits prohibited".into(),
+            SliceCell::Present {state,original_block_entity:true}=>format!(
+                "{} (ORIGINAL Block Entity: replacement prohibited)",
+                mcedit2_world::editing::render_state(state)
+            ),
+            SliceCell::Present {state,original_block_entity:false}=>
+                mcedit2_world::editing::render_state(state),
+        };
+        self.query_coordinates=format!("{x}, {y}, {z}");
+        self.edit_area=format!("{x},{y},{z};{x},{y},{z}");
+        self.prepared=None;
+        self.save_preview=None;
+        self.save_phrase.clear();
+        self.block_result=format!("Selected interactive 2D cell ({x},{y},{z}): {detail}");
+    }
     fn clear_cached_world(&mut self, root:&std::path::Path) {
         self.prepared=None;
         self.save_preview=None;
@@ -79,6 +235,8 @@ impl App{
         );
         self.block_result.clear();
         self.slice_result.clear();
+        self.slice_grid=None;
+        self.vertical_grid=None;
     }
     fn current_world_context(&self)->Result<(usize,usize,WorldSummary,String),String>{
         let (wi,di)=self.current_key().ok_or("Select an original world and dimension")?;
@@ -223,7 +381,9 @@ impl App{
             slice_area:"0, 64, 0; 15, 64, 15".into(),
             edit_target:"minecraft:stone".into(),
             clone_destination:"0, 64, 0".into(),
-            fill_seed:"0, 64, 0".into(),..Default::default()
+            fill_seed:"0, 64, 0".into(),
+            clipboard_destination:"0, 64, 0".into(),
+            vertical_area:"0,-64,0;15,-49,0".into(),..Default::default()
         };
         for path in &args.worlds {
             match inspect_input(path) {
@@ -277,6 +437,31 @@ impl App{
             Err(error)=>self.edit_report=format!("Edit preview REFUSED: {error}"),
         }
     }
+    fn prepare_move(&mut self){
+        self.prepared=None;
+        self.save_preview=None;
+        self.slice_grid=None;
+        self.vertical_grid=None;
+        let result=(||->Result<Preview,String>{
+            let area=parse_bounds(&self.edit_area).map_err(|e|e.to_string())?;
+            let dest=parse_xyz(&self.clone_destination).map_err(|e|e.to_string())?;
+            let key=self.current_key().ok_or("Select an original Java world")?;
+            self.current_session(key)?
+                .prepare_move(area,dest).map_err(|e|e.to_string())
+        })();
+        match result {
+            Ok(preview)=>{
+                self.edit_report=format!(
+                    "Move preview: {}. Source will be filled with air, overlapping destination wins. No original BE NBT is moved.",
+                    preview.summary()
+                );
+                if let Some((wi,di))=self.current_key(){
+                    self.prepared=Some((wi,di,preview));
+                }
+            },
+            Err(e)=>self.edit_report=format!("3D Move refused: {e}"),
+        }
+    }
     fn prepare_clone(&mut self){
         self.save_preview=None;
         self.prepared=None;
@@ -320,6 +505,8 @@ impl App{
     }
     fn apply_batch(&mut self){
         self.save_preview=None;
+        self.slice_grid=None;
+        self.vertical_grid=None;
         if self.readonly {
             self.edit_report="-view disallows editor changes, including the in-memory overlay.".into();
             return;
@@ -342,6 +529,8 @@ impl App{
     }
     fn history(&mut self, redo:bool){
         self.save_preview=None;
+        self.slice_grid=None;
+        self.vertical_grid=None;
         self.prepared=None;
         let Some(key)=self.current_key() else{return};
         let result=self.current_session(key).and_then(|editor|{
@@ -359,6 +548,145 @@ impl App{
 fn update(app:&mut App,message:Message){
     match message{
         Message::Path(x)=>app.path=x,
+        Message::ClipboardPath(value)=>app.clipboard_path=value,
+        Message::SchematicPath(value)=>app.schematic_path=value,
+        Message::SpongePath(value)=>app.sponge_path=value,
+        Message::ClipboardDestination(value)=>app.clipboard_destination=value,
+        Message::ExportClipboard=>{
+            app.save_preview=None;
+            app.prepared=None;
+            let path=PathBuf::from(app.clipboard_path.trim());
+            let result=(||->Result<usize,String>{
+                let bounds=parse_bounds(&app.edit_area).map_err(|e|e.to_string())?;
+                let key=app.current_key().ok_or("Select an original Java world")?;
+                app.current_session(key)?
+                    .export_clipboard(bounds,&path).map_err(|e|e.to_string())
+            })();
+            app.edit_report=match result{
+                Ok(n)=>format!("Exported {n} selected block states to a create-new .mcedit2clip file. Block Entities/entities excluded; Minecraft world unchanged."),
+                Err(e)=>format!("Block-only clipboard export refused: {e}"),
+            };
+        },
+        Message::ExportSpongeV2=>{
+            app.save_preview=None;
+            app.prepared=None;
+            let path=PathBuf::from(app.sponge_path.trim());
+            let result=(||->Result<usize,String>{
+                let area=parse_bounds(&app.edit_area).map_err(|e|e.to_string())?;
+                let key=app.current_key().ok_or("Select an original world")?;
+                app.current_session(key)?
+                    .export_sponge_v2(area,&path).map_err(|e|e.to_string())
+            })();
+            app.edit_report=match result{
+                Ok(n)=>format!("Exported {n} named block states to new Sponge v2 .schem (no BE/entity/biome NBT). World unchanged."),
+                Err(e)=>format!("Sponge v2 export refused: {e}"),
+            };
+        },
+        Message::PreviewSpongeV2=>{
+            app.save_preview=None;
+            app.prepared=None;
+            let path=PathBuf::from(app.sponge_path.trim());
+            let result=(||->Result<Preview,String>{
+                let target=parse_xyz(&app.clipboard_destination).map_err(|e|e.to_string())?;
+                let key=app.current_key().ok_or("Select an original world")?;
+                app.current_session(key)?
+                    .prepare_import_sponge_v2(&path,target).map_err(|e|e.to_string())
+            })();
+            match result {
+                Ok(preview)=>{
+                    app.edit_report=format!("Sponge v2 exact-DataVersion block-only preview: {}",preview.summary());
+                    if let Some((wi,di))=app.current_key(){
+                        app.prepared=Some((wi,di,preview));
+                    }
+                },
+                Err(e)=>app.edit_report=format!("Sponge v2 import refused: {e}"),
+            }
+        },
+        Message::ExportLegacySchematic=>{
+            app.save_preview=None;
+            app.prepared=None;
+            let path=PathBuf::from(app.schematic_path.trim());
+            let result=(||->Result<usize,String>{
+                let area=parse_bounds(&app.edit_area).map_err(|e|e.to_string())?;
+                let key=app.current_key().ok_or("Select an original Java world")?;
+                app.current_session(key)?
+                    .export_legacy_schematic(area,&path)
+                    .map_err(|e|e.to_string())
+            })();
+            app.edit_report=match result{
+                Ok(n)=>format!("Exported {n} ORIGINAL numeric block states to new old MCEdit .schematic. All BE/entity data deliberately excluded. Source world unchanged."),
+                Err(e)=>format!("Legacy schematic export refused: {e}"),
+            };
+        },
+        Message::PreviewLegacySchematic=>{
+            app.save_preview=None;
+            app.prepared=None;
+            let path=PathBuf::from(app.schematic_path.trim());
+            let result=(||->Result<Preview,String>{
+                let destination=parse_xyz(&app.clipboard_destination)
+                    .map_err(|e|e.to_string())?;
+                let key=app.current_key().ok_or("Select an original Java world")?;
+                app.current_session(key)?
+                    .prepare_import_legacy_schematic(&path,destination)
+                    .map_err(|e|e.to_string())
+            })();
+            match result{
+                Ok(preview)=>{
+                    app.edit_report=format!("Legacy schematic block-only preview: {}",preview.summary());
+                    if let Some((wi,di))=app.current_key(){
+                        app.prepared=Some((wi,di,preview));
+                    }
+                },
+                Err(e)=>app.edit_report=format!("Schematic import refused: {e}"),
+            }
+        },
+        Message::PreviewTransformedClipboard(operation)=>{
+            app.save_preview=None;
+            app.prepared=None;
+            let path=PathBuf::from(app.clipboard_path.trim());
+            let result=(||->Result<Preview,String>{
+                let target=parse_xyz(&app.clipboard_destination)
+                    .map_err(|e|e.to_string())?;
+                let key=app.current_key().ok_or("Select a world and dimension")?;
+                app.current_session(key)?
+                    .prepare_paste_clipboard_file_transformed(&path,target,operation)
+                    .map_err(|e|e.to_string())
+            })();
+            match result{
+                Ok(preview)=>{
+                    app.edit_report=format!("Safe {:?} clipboard paste preview: {}",
+                        operation,preview.summary());
+                    if let Some((wi,di))=app.current_key(){
+                        app.prepared=Some((wi,di,preview));
+                    }
+                },
+                Err(e)=>app.edit_report=format!("Clipboard transformation refused: {e}"),
+            }
+        },
+        Message::PreviewPasteClipboard=>{
+            app.save_preview=None;
+            app.prepared=None;
+            let path=PathBuf::from(app.clipboard_path.trim());
+            let result=(||->Result<Preview,String>{
+                let destination=parse_xyz(&app.clipboard_destination)
+                    .map_err(|e|e.to_string())?;
+                let key=app.current_key().ok_or("Select an original Java world")?;
+                app.current_session(key)?
+                    .prepare_paste_clipboard_file(&path,destination)
+                    .map_err(|e|e.to_string())
+            })();
+            match result{
+                Ok(preview)=>{
+                    app.edit_report=format!("Clipboard block-only paste PREVIEW: {}. Stage via existing Undo-able apply button.",preview.summary());
+                    if let Some((wi,di))=app.current_key(){
+                        app.prepared=Some((wi,di,preview));
+                    }
+                },
+                Err(e)=>app.edit_report=format!("Clipboard paste refused: {e}"),
+            }
+        },
+        Message::PickSlice(x,y,z)=>app.pick_slice(x,y,z),
+        Message::MoveSlice(dx,dy,dz)=>app.pan_slice(dx,dy,dz),
         Message::SavePhrase(value)=>app.save_phrase=value,
         Message::RecoverRegion(value)=>app.recover_region=value,
         Message::RecoveryPhrase(value)=>app.recovery_phrase=value,
@@ -368,6 +696,8 @@ fn update(app:&mut App,message:Message){
         Message::RollbackRegion=>app.recover_region(true),
         Message::Open=>{
             app.save_preview=None;
+            app.slice_grid=None;
+            app.vertical_grid=None;
             if app.path.trim().is_empty(){
                 app.messages.push("Enter a Java world folder or level.dat path".into());
             } else {
@@ -386,6 +716,8 @@ fn update(app:&mut App,message:Message){
         }
         Message::Select(index)=>{
             app.save_preview=None;
+            app.slice_grid=None;
+            app.vertical_grid=None;
             if index<app.worlds.len(){
                 app.current=Some(index);
                 app.dimension_index=0;
@@ -397,6 +729,8 @@ fn update(app:&mut App,message:Message){
         Message::Coordinates(value)=>app.query_coordinates=value,
         Message::Dimension(index)=>{
             app.save_preview=None;
+            app.slice_grid=None;
+            app.vertical_grid=None;
             if app.current.and_then(|i|app.worlds.get(i))
                 .is_some_and(|w|index<w.dimensions.len()){
                 app.dimension_index=index;
@@ -428,22 +762,30 @@ fn update(app:&mut App,message:Message){
                 }
             };
         },
-        Message::SliceText(value)=>app.slice_area=value,
-        Message::InspectSlice=>{
-            app.slice_result=match app.current_key(){
-                None=>"Select an indexed Java world first.".into(),
-                Some(key)=>{
-                    match parse_bounds(&app.slice_area) {
-                        Err(e)=>format!("Invalid slice bounds: {e}"),
-                        Ok(bounds)=>match app.current_session(key).and_then(|session|
-                            session.inspect_slice(bounds).map_err(|e|e.to_string())) {
-                            Ok(slice)=>slice.text_map(),
-                            Err(e)=>format!("2D slice read refused: {e}"),
-                        }
-                    }
-                }
-            };
+        Message::InspectOriginalBlockEntity=>{
+            let result=(||->Result<String,String>{
+                let point=parse_xyz(&app.query_coordinates).map_err(|e|e.to_string())?;
+                let key=app.current_key().ok_or("Select an original Java world")?;
+                let be=app.current_session(key)?
+                    .inspect_original_block_entity(point)
+                    .map_err(|e|e.to_string())?;
+                Ok(match be{
+                    Some(data)=>data.report(),
+                    None=>format!("No ORIGINAL Block Entity is recorded at ({},{},{}).",point.0,point.1,point.2),
+                })
+            })();
+            app.block_result=result.unwrap_or_else(|e|format!("Block Entity inspection refused: {e}"));
         },
+        Message::VerticalText(value)=>{
+            app.vertical_area=value;app.vertical_grid=None;
+        },
+        Message::InspectVertical=>app.inspect_vertical_view(),
+        Message::PickVertical(row,col)=>app.pick_vertical(row,col),
+        Message::SliceText(value)=>{
+            app.slice_area=value;
+            app.slice_grid=None;
+        },
+        Message::InspectSlice=>app.inspect_slice_view(),
         Message::SelectionText(value)=>{
             app.edit_area=value;app.prepared=None;app.save_preview=None;app.save_phrase.clear();
         }
@@ -496,6 +838,8 @@ fn update(app:&mut App,message:Message){
         },
         Message::ImportPatch=>{
             app.save_preview=None;
+            app.slice_grid=None;
+            app.vertical_grid=None;
             app.prepared=None;
             if app.readonly {
                 app.edit_report="-view prohibits importing staged edits.".into();
@@ -519,12 +863,15 @@ fn update(app:&mut App,message:Message){
             app.clone_destination=value;app.prepared=None;app.save_preview=None;app.save_phrase.clear();
         }
         Message::PreviewClone=>app.prepare_clone(),
+        Message::PreviewMove=>app.prepare_move(),
         Message::PreviewEdit=>app.prepare_batch(),
         Message::ApplyEdit=>app.apply_batch(),
         Message::UndoEdit=>app.history(false),
         Message::RedoEdit=>app.history(true),
         Message::DiscardEdits=>{
             app.save_preview=None;
+            app.slice_grid=None;
+            app.vertical_grid=None;
             app.prepared=None;
             if let Some(key)=app.current_key(){
                 if let Some(editor)=app.sessions.get_mut(&key){
@@ -535,6 +882,8 @@ fn update(app:&mut App,message:Message){
         }
         Message::Clear=>{
             app.save_preview=None;
+            app.slice_grid=None;
+            app.vertical_grid=None;
             app.recovery_phrase.clear();
             app.save_phrase.clear();
             app.path.clear();app.worlds.clear();
@@ -594,7 +943,8 @@ fn view(app:&App)->Element<'_,Message>{
                 .on_input(Message::Coordinates)
                 .on_submit(Message::InspectBlock)
                 .width(Length::Fill),
-            button("Inspect exact block (read-only)").on_press(Message::InspectBlock)
+            button("Inspect exact block (read-only)").on_press(Message::InspectBlock),
+            button("Inspect original BE NBT (read-only)").on_press(Message::InspectOriginalBlockEntity)
         ].spacing(12);
         body=body.push(lookup);
         if !app.block_result.is_empty(){
@@ -605,8 +955,66 @@ fn view(app:&App)->Element<'_,Message>{
                 .on_input(Message::SliceText).width(Length::Fill),
             button("Inspect 2D slice").on_press(Message::InspectSlice)
         ].spacing(8));
+        body=body.push(row![
+            button("← 16").on_press(Message::MoveSlice(-16,0,0)),
+            button("16 →").on_press(Message::MoveSlice(16,0,0)),
+            button("↑ Z").on_press(Message::MoveSlice(0,0,-16)),
+            button("↓ Z").on_press(Message::MoveSlice(0,0,16)),
+            button("Y + 1").on_press(Message::MoveSlice(0,1,0)),
+            button("Y - 1").on_press(Message::MoveSlice(0,-1,0)),
+        ].spacing(5));
+        if let Some((world_index,dimension_index,slice))=app.slice_grid.as_ref() {
+            if app.current_key()==Some((*world_index,*dimension_index)) {
+                let mut visual=column![].spacing(1);
+                for (iz,cells) in slice.rows.iter().enumerate() {
+                    let mut row_buttons=row![].spacing(1);
+                    for (ix,cell) in cells.iter().enumerate() {
+                        let x=slice.bounds.minimum[0]+ix as i32;
+                        let y=slice.bounds.minimum[1];
+                        let z=slice.bounds.minimum[2]+iz as i32;
+                        row_buttons=row_buttons.push(
+                            button(text(slice_cell_label(cell)).size(12))
+                                .width(Length::Fixed(28.0))
+                                .height(Length::Fixed(24.0))
+                                .on_press(Message::PickSlice(x,y,z))
+                        );
+                    }
+                    visual=visual.push(row_buttons);
+                }
+                body=body.push(text("Interactive 2D blocks (click to inspect and select a 1x1 edit area)"));
+                body=body.push(scrollable(visual).height(Length::Fixed(420.0)));
+            }
+        }
         if !app.slice_result.is_empty(){
             body=body.push(text(&app.slice_result).font(iced::Font::MONOSPACE));
+        }
+        body=body.push(row![
+            text_input("Vertical X/Y or Z/Y plane: X1,Y1,Z1; X2,Y2,Z2",
+                &app.vertical_area)
+                .on_input(Message::VerticalText).width(Length::Fill),
+            button("Inspect vertical plane").on_press(Message::InspectVertical)
+        ].spacing(8));
+        if let Some((wi,di,plane))=app.vertical_grid.as_ref(){
+            if app.current_key()==Some((*wi,*di)){
+                let mut rows=column![].spacing(1);
+                for (y_index,line) in plane.rows.iter().enumerate(){
+                    let mut cells=row![].spacing(1);
+                    for (x_index,cell) in line.iter().enumerate(){
+                        cells=cells.push(
+                            button(text(slice_cell_label(cell)).size(12))
+                                .width(Length::Fixed(28.0))
+                                .height(Length::Fixed(24.0))
+                                .on_press(Message::PickVertical(y_index,x_index))
+                        );
+                    }
+                    rows=rows.push(cells);
+                }
+                body=body.push(text("Vertical slice: top row is highest Y, @ indicates original BE."));
+                body=body.push(scrollable(rows).height(Length::Fixed(420.0)));
+            }
+        }
+        if !app.vertical_report.is_empty(){
+            body=body.push(text(&app.vertical_report).font(iced::Font::MONOSPACE));
         }
         let editing_inputs=column![
             text("3D block edit overlay — preview, stage and Undo/Redo (NOT SAVED)").size(19),
@@ -623,7 +1031,8 @@ fn view(app:&App)->Element<'_,Message>{
         body=body.push(row![
             text_input("Clone target minimum X,Y,Z", &app.clone_destination)
                 .on_input(Message::CloneDestination).width(Length::Fill),
-            button("Preview block-only clone").on_press(Message::PreviewClone)
+            button("Preview block-only clone").on_press(Message::PreviewClone),
+            button("Preview block-only MOVE").on_press(Message::PreviewMove)
         ].spacing(8));
         body=body.push(row![
             text_input("Flood-fill seed X,Y,Z inside selection", &app.fill_seed)
@@ -643,6 +1052,36 @@ fn view(app:&App)->Element<'_,Message>{
         body=body.push(row![
             button("Analyze lossless native NBT preview").on_press(Message::AnalyzeNativePatch),
             button("Analyze append-only Region save plan").on_press(Message::AnalyzeRegionPlan)
+        ].spacing(8));
+        body=body.push(text("Block-only clipboard (same original world/dimension; will not copy machines, BE NBT or entities)"));
+        body=body.push(row![
+            text_input("External .mcedit2clip file",&app.clipboard_path)
+                .on_input(Message::ClipboardPath).width(Length::Fill),
+            button("Copy selection to clipboard file").on_press(Message::ExportClipboard)
+        ].spacing(8));
+        body=body.push(row![
+            text_input("Paste destination X,Y,Z",&app.clipboard_destination)
+                .on_input(Message::ClipboardDestination).width(Length::Fill),
+            button("Preview clipboard paste").on_press(Message::PreviewPasteClipboard)
+        ].spacing(8));
+        body=body.push(row![
+            button("Rotate 90°").on_press(Message::PreviewTransformedClipboard(HorizontalTransform::Rotate90)),
+            button("Rotate 180°").on_press(Message::PreviewTransformedClipboard(HorizontalTransform::Rotate180)),
+            button("Rotate 270°").on_press(Message::PreviewTransformedClipboard(HorizontalTransform::Rotate270)),
+            button("Mirror X").on_press(Message::PreviewTransformedClipboard(HorizontalTransform::MirrorX)),
+            button("Mirror Z").on_press(Message::PreviewTransformedClipboard(HorizontalTransform::MirrorZ)),
+        ].spacing(6));
+        body=body.push(row![
+            text_input("Original MCEdit .schematic path",&app.schematic_path)
+                .on_input(Message::SchematicPath).width(Length::Fill),
+            button("Preview numeric schematic import").on_press(Message::PreviewLegacySchematic),
+            button("Export numeric schematic").on_press(Message::ExportLegacySchematic)
+        ].spacing(8));
+        body=body.push(row![
+            text_input("Modern Sponge v2 .schem file",&app.sponge_path)
+                .on_input(Message::SpongePath).width(Length::Fill),
+            button("Export selection to Sponge v2").on_press(Message::ExportSpongeV2),
+            button("Preview Sponge v2 paste").on_press(Message::PreviewSpongeV2),
         ].spacing(8));
         body=body.push(row![
             text_input("External .mcedit2patch path (outside the world)",&app.patch_path)
@@ -728,7 +1167,29 @@ fn main()->iced::Result{
 
 #[cfg(test)]
 mod tests{
-    use super::parse_region_name;
+    use super::{parse_region_name,shifted_slice,slice_cell_label};
+    use mcedit2_world::editing::{Bounds,SliceCell};
+    use mcedit2_world::sections::State;
+    #[test]
+    fn interactive_slice_shift_and_cell_symbols_reject_overflow(){
+        let bounds=Bounds::new((-16,-64,0),(-1,-64,15)).unwrap();
+        assert_eq!(
+            shifted_slice(bounds,16,1,-16).unwrap(),
+            "0,-63,-16;15,-63,-1"
+        );
+        let edge=Bounds::new((29_999_999,320,0),(29_999_999,320,0)).unwrap();
+        assert!(shifted_slice(edge,16,0,0).is_err());
+        assert_eq!(slice_cell_label(&SliceCell::MissingChunk),"·");
+        assert_eq!(slice_cell_label(&SliceCell::MissingSection),"?");
+        assert_eq!(slice_cell_label(&SliceCell::Present {
+            state:State{name:"minecraft:oak_log".into(),properties:vec![]},
+            original_block_entity:false,
+        }),"O");
+        assert_eq!(slice_cell_label(&SliceCell::Present {
+            state:State{name:"mod:machine".into(),properties:vec![]},
+            original_block_entity:true,
+        }),"@");
+    }
     #[test]
     fn original_region_name_parser_accepts_signed_coords_and_refuses_extra_paths(){
         assert_eq!(parse_region_name("r.-1.2.mca").unwrap(),(-1,2,"mca"));

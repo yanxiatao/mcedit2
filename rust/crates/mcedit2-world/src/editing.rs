@@ -7,7 +7,8 @@
 //! atomic backups, schema safety and all-version coverage before exposure.
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
-use crate::{patch,region_plan};
+use crate::{patch,region_plan,clipboard,schematic};
+use crate::clipboard::{BlockClipboard,HorizontalTransform};
 use crate::region_transaction::{self,RegionWriteReceipt};
 use crate::region_plan::NativeRegionCandidate;
 
@@ -164,6 +165,7 @@ pub struct Preview {
     changes: Vec<Change>,
     source_checks: Vec<SourceCheck>,
     pub is_copy: bool,
+    pub is_move: bool,
     pub is_fill: bool,
     pub examined: usize,
     pub matched: usize,
@@ -177,7 +179,8 @@ impl Preview {
             "{}: {} original cells checked; {} matching filter; \
              {} staged block changes; {} unaffected; {} original chunks. \
              This is an IN-MEMORY transaction; the world is not saved.",
-            if self.is_copy { "3D block-only clone" }
+            if self.is_move { "3D block-only move" }
+                else if self.is_copy { "3D block-only clone" }
                 else if self.is_fill { "Connected 3D fill" } else { "3D selection" },
             self.examined, self.matched, self.changed(), self.skipped, self.source_chunks
         )
@@ -258,6 +261,62 @@ impl Slice {
 /// Verified, UNSAVED original-byte chunk patch candidate. A future writer
 /// MUST recheck the original NBT digest, region sector layout, backups,
 /// heightmaps, lighting and transaction integrity before any disk write.
+
+/// Orthogonal vertical inspection plane, Y always runs from highest row
+/// to lowest, with exactly one horizontal axis varying. Missing original
+/// source cells are NOT generated as air.
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+pub enum VerticalAxis { AlongX, AlongZ }
+#[derive(Debug,Clone)]
+pub struct VerticalSlice {
+    pub bounds:Bounds,
+    pub axis:VerticalAxis,
+    pub source_chunks:usize,
+    pub block_entities:usize,
+    pub missing_chunks:usize,
+    pub missing_sections:usize,
+    pub rows:Vec<Vec<SliceCell>>,
+}
+impl VerticalSlice {
+    pub fn coordinate(&self,row:usize,column:usize)->Option<(i32,i32,i32)>{
+        let height=(self.bounds.maximum[1]-self.bounds.minimum[1]+1) as usize;
+        let width=match self.axis{
+            VerticalAxis::AlongX=>(self.bounds.maximum[0]-self.bounds.minimum[0]+1) as usize,
+            VerticalAxis::AlongZ=>(self.bounds.maximum[2]-self.bounds.minimum[2]+1) as usize,
+        };
+        if row>=height||column>=width{return None;}
+        let y=self.bounds.maximum[1]-row as i32;
+        match self.axis{
+            VerticalAxis::AlongX=>Some((
+                self.bounds.minimum[0]+column as i32,y,self.bounds.minimum[2],
+            )),
+            VerticalAxis::AlongZ=>Some((
+                self.bounds.minimum[0],y,self.bounds.minimum[2]+column as i32,
+            )),
+        }
+    }
+    pub fn text_map(&self)->String{
+        let mut out=format!(
+            "Vertical {:?} original plane; BE={}, missing chunks={}, missing Sections={}\n",
+            self.axis,self.block_entities,self.missing_chunks,self.missing_sections
+        );
+        for (line,row) in self.rows.iter().enumerate(){
+            out.push_str(&format!("Y={:>5} |",self.bounds.maximum[1]-line as i32));
+            for cell in row{
+                let glyph=match cell{
+                    SliceCell::MissingChunk=>' ',
+                    SliceCell::MissingSection=>'?',
+                    SliceCell::Present {original_block_entity:true,..}=>'@',
+                    SliceCell::Present {state,..}=>state.name.chars().last().unwrap_or('*'),
+                };
+                out.push(glyph);
+            }
+            out.push_str("|\n");
+        }
+        out
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct NativeChunkCandidate {
     pub chunk_x: i32,
@@ -309,6 +368,23 @@ impl Session {
             }));
         }
         read_world_block(&self.world, &self.dimension, position.0, position.1, position.2)
+    }
+    /// Inspect an ORIGINAL modded Block Entity, reporting exact field kinds
+    /// and a source NBT digest without rewriting any of its contents.
+    pub fn inspect_original_block_entity(
+        &self,position:Position,
+    )->Result<Option<crate::sections::OriginalBlockEntity>,WorldError>{
+        let (cx,cz)=(position.0.div_euclid(16),position.2.div_euclid(16));
+        let Some(raw)=read_world_chunk_bytes(&self.world,&self.dimension,cx,cz)? else {
+            return Ok(None);
+        };
+        let decoded=decode_sections(&raw)
+            .map_err(|e|refuse(format!("Original BE chunk invalid: {e}")))?;
+        if decoded.x.is_some_and(|x|x!=cx)||decoded.z.is_some_and(|z|z!=cz){
+            return Err(refuse("Original Block Entity chunk position mismatch"));
+        }
+        crate::sections::inspect_original_block_entity(&raw,position)
+            .map_err(|e|refuse(format!("Original Block Entity NBT invalid: {e}")))
     }
     /// Group by original chunk; inspect each native NBT at most once.
     /// Entire preview is read-only. Missing original chunks/Sections are
@@ -379,7 +455,7 @@ impl Session {
         Ok(Preview {
             root: self.world.root.clone(), dimension: self.dimension.clone(),
             data_version: self.world.data_version, changes,
-            source_checks: Vec::new(), is_copy: false, is_fill: false, examined, matched,
+            source_checks: Vec::new(), is_copy: false, is_move:false, is_fill: false, examined, matched,
             skipped: examined - matched, source_chunks: chunks.len(),
         })
     }
@@ -426,6 +502,64 @@ impl Session {
         }
         Ok(Slice {bounds,source_chunks:chunks.len(),present,missing_chunks,
             missing_sections,block_entities,rows})
+    }
+    /// Inspect an X/Y or Z/Y vertical plane (up to 64x64). Only existing
+    /// original chunks/Sections are read. No edits and no world writes.
+    pub fn inspect_vertical_slice(&self,bounds:Bounds)->Result<VerticalSlice,WorldError>{
+        let x_static=bounds.minimum[0]==bounds.maximum[0];
+        let z_static=bounds.minimum[2]==bounds.maximum[2];
+        if !x_static && !z_static {
+            return Err(refuse("Vertical slice must keep X or Z fixed"));
+        }
+        let axis=if z_static{VerticalAxis::AlongX}else{VerticalAxis::AlongZ};
+        let width=match axis{
+            VerticalAxis::AlongX=>(bounds.maximum[0]-bounds.minimum[0]+1) as usize,
+            VerticalAxis::AlongZ=>(bounds.maximum[2]-bounds.minimum[2]+1) as usize,
+        };
+        let height=(bounds.maximum[1]-bounds.minimum[1]+1) as usize;
+        if width>64||height>64||bounds.volume()?>MAX_CELLS{
+            return Err(refuse("Vertical original plane exceeds 64x64 cells"));
+        }
+        let mut cache:BTreeMap<ChunkPos,Option<Chunk>>=BTreeMap::new();
+        let (mut be,mut missing_chunks,mut missing_sections)=(0,0,0);
+        let mut rows=Vec::with_capacity(height);
+        for y in (bounds.minimum[1]..=bounds.maximum[1]).rev(){
+            let mut line=Vec::with_capacity(width);
+            for offset in 0..width{
+                let (x,z)=match axis{
+                    VerticalAxis::AlongX=>(bounds.minimum[0]+offset as i32,bounds.minimum[2]),
+                    VerticalAxis::AlongZ=>(bounds.minimum[0],bounds.minimum[2]+offset as i32),
+                };
+                let key=(x.div_euclid(16),z.div_euclid(16));
+                if !cache.contains_key(&key){
+                    cache.insert(key,read_world_chunk(
+                        &self.world,&self.dimension,key.0,key.1
+                    )?);
+                }
+                let cell=match cache.get(&key).and_then(Option::as_ref){
+                    None=>{missing_chunks+=1;SliceCell::MissingChunk},
+                    Some(chunk)=>match chunk.block(
+                        x.rem_euclid(16) as u8,y,z.rem_euclid(16) as u8
+                    ){
+                        None=>{missing_sections+=1;SliceCell::MissingSection},
+                        Some(original)=>{
+                            let is_be=chunk.has_block_entity(x,y,z);
+                            if is_be{be+=1;}
+                            SliceCell::Present{
+                                state:self.overlay.get(&(x,y,z)).unwrap_or(original).clone(),
+                                original_block_entity:is_be,
+                            }
+                        }
+                    },
+                };
+                line.push(cell);
+            }
+            rows.push(line);
+        }
+        Ok(VerticalSlice {
+            bounds,axis,source_chunks:cache.len(),
+            block_entities:be,missing_chunks,missing_sections,rows,
+        })
     }
     /// Bounded 6-neighbor flood fill over the *effective* unsaved block
     /// states. All cells are read before preview; no BEs are mutated.
@@ -493,7 +627,7 @@ impl Session {
         Ok(Preview {
             root:self.world.root.clone(),dimension:self.dimension.clone(),
             data_version:self.world.data_version,changes,
-            source_checks:Vec::new(),is_copy:false,is_fill:true,
+            source_checks:Vec::new(),is_copy:false,is_move:false,is_fill:true,
             examined:volume,matched,skipped:volume-matched,
             source_chunks:chunks.len(),
         })
@@ -580,9 +714,108 @@ impl Session {
             root: self.world.root.clone(),
             dimension: self.dimension.clone(),
             data_version: self.world.data_version,
-            changes, source_checks, is_copy: true, is_fill: false,
+            changes, source_checks, is_copy: true, is_move:false, is_fill: false,
             examined: volume, matched: volume,
             skipped: 0, source_chunks: chunks.len(),
+        })
+    }
+    /// Atomic block-only MOVE, including overlapping source and destination.
+    /// Read the whole original and EFFECTIVE source first, then construct
+    /// a frozen final map: source -> actual air, destination -> source state.
+    /// Every original Block Entity in either area refuses the entire move.
+    pub fn prepare_move(
+        &self,source:Bounds,destination_min:Position,
+    )->Result<Preview,WorldError>{
+        let volume=source.volume()?;
+        let offsets=[
+            source.maximum[0]-source.minimum[0],
+            source.maximum[1]-source.minimum[1],
+            source.maximum[2]-source.minimum[2],
+        ];
+        let max=(
+            destination_min.0.checked_add(offsets[0])
+                .ok_or_else(||refuse("Move X coordinate overflow"))?,
+            destination_min.1.checked_add(offsets[1])
+                .ok_or_else(||refuse("Move Y coordinate overflow"))?,
+            destination_min.2.checked_add(offsets[2])
+                .ok_or_else(||refuse("Move Z coordinate overflow"))?,
+        );
+        let destination=Bounds::new(destination_min,max)?;
+        if destination.minimum!=[destination_min.0,destination_min.1,destination_min.2]{
+            return Err(refuse("Move destination bounds were reversed"));
+        }
+        let mut chunks:BTreeMap<ChunkPos,Option<Chunk>>=BTreeMap::new();
+        let mut source_checks=Vec::with_capacity(volume);
+        let mut snapshots=Vec::with_capacity(volume);
+        let mut final_states:BTreeMap<Position,State>=BTreeMap::new();
+        for y in source.minimum[1]..=source.maximum[1]{
+            for z in source.minimum[2]..=source.maximum[2]{
+                for x in source.minimum[0]..=source.maximum[0]{
+                    let pos=(x,y,z);
+                    let chunk=original_chunk(&mut chunks,&self.world,&self.dimension,pos)?;
+                    if chunk.has_block_entity(x,y,z){
+                        return Err(refuse("Cannot move original Block Entity without preserving full opaque NBT"));
+                    }
+                    let original=chunk.block(x.rem_euclid(16) as u8,
+                        y,z.rem_euclid(16) as u8)
+                        .ok_or_else(||refuse("Move source missing original Section"))?;
+                    let effective=self.overlay.get(&pos).unwrap_or(original).clone();
+                    let air=if matches!(chunk.layout,Layout::McRegion128|Layout::NumericAnvil112){
+                        parse_state("numeric:0[data=0]")?
+                    }else{
+                        parse_state("minecraft:air")?
+                    };
+                    source_checks.push(SourceCheck{
+                        position:pos,original:original.clone(),effective:effective.clone(),
+                    });
+                    snapshots.push((pos,effective));
+                    final_states.insert(pos,air);
+                }
+            }
+        }
+        for (position,state) in snapshots{
+            let target=(
+                destination_min.0+(position.0-source.minimum[0]),
+                destination_min.1+(position.1-source.minimum[1]),
+                destination_min.2+(position.2-source.minimum[2]),
+            );
+            let target_chunk=original_chunk(&mut chunks,&self.world,&self.dimension,target)?;
+            if target_chunk.has_block_entity(target.0,target.1,target.2){
+                return Err(refuse("Cannot overwrite original Block Entity with moved blocks"));
+            }
+            let source_numeric=state.name.starts_with("numeric:");
+            let dest_numeric=matches!(target_chunk.layout,Layout::McRegion128|Layout::NumericAnvil112);
+            if source_numeric!=dest_numeric{
+                return Err(refuse("Move crosses incompatible numeric/named original chunk layouts"));
+            }
+            if target_chunk.block(target.0.rem_euclid(16) as u8,target.1,
+                target.2.rem_euclid(16) as u8).is_none(){
+                return Err(refuse("Move destination original Section does not exist"));
+            }
+            final_states.insert(target,state);
+        }
+        if final_states.len()>MAX_CELLS {
+            return Err(refuse("Combined Move source/destination exceeds 4096 changed candidate cells"));
+        }
+        let mut changes=Vec::new();
+        for (position,after) in final_states{
+            let chunk=original_chunk(&mut chunks,&self.world,&self.dimension,position)?;
+            let original=chunk.block(position.0.rem_euclid(16) as u8,
+                position.1,position.2.rem_euclid(16) as u8)
+                .ok_or_else(||refuse("Move affected original Section disappeared"))?;
+            let before=self.overlay.get(&position).unwrap_or(original);
+            if before!=&after{
+                changes.push(Change{
+                    position,original:original.clone(),
+                    before:before.clone(),after,
+                });
+            }
+        }
+        Ok(Preview {
+            root:self.world.root.clone(),
+            dimension:self.dimension.clone(),data_version:self.world.data_version,
+            changes,source_checks,is_copy:false,is_move:true,is_fill:false,
+            examined:volume,matched:volume,skipped:0,source_chunks:chunks.len(),
         })
     }
     fn set_effective(&mut self, change: &Change, state: &State) {
@@ -728,6 +961,151 @@ impl Session {
             &self.world,&self.dimension,&candidate)?;
         self.discard();
         Ok(receipt)
+    }
+    /// Capture a block-only snapshot of a source selection. Original BE
+    /// coordinates always refuse capture, rather than silently copying a
+    /// machine block while losing its inventory or modded NBT.
+    pub fn capture_clipboard(&self,bounds:Bounds)->Result<BlockClipboard,WorldError>{
+        let volume=bounds.volume()?;
+        let width=u16::try_from(bounds.maximum[0]-bounds.minimum[0]+1)
+            .map_err(|_|refuse("Clipboard X size overflow"))?;
+        let height=u16::try_from(bounds.maximum[1]-bounds.minimum[1]+1)
+            .map_err(|_|refuse("Clipboard Y size overflow"))?;
+        let depth=u16::try_from(bounds.maximum[2]-bounds.minimum[2]+1)
+            .map_err(|_|refuse("Clipboard Z size overflow"))?;
+        let mut chunks=BTreeMap::new();
+        let mut blocks=Vec::with_capacity(volume);
+        let mut numeric:Option<bool>=None;
+        for y in bounds.minimum[1]..=bounds.maximum[1]{
+            for z in bounds.minimum[2]..=bounds.maximum[2]{
+                for x in bounds.minimum[0]..=bounds.maximum[0]{
+                    let pos=(x,y,z);
+                    let chunk=original_chunk(&mut chunks,&self.world,&self.dimension,pos)?;
+                    if chunk.has_block_entity(x,y,z){
+                        return Err(refuse("Clipboard selection contains original Block Entity; block-only copy refused"));
+                    }
+                    let id_numeric=matches!(chunk.layout,Layout::McRegion128|Layout::NumericAnvil112);
+                    if numeric.is_some_and(|found|found!=id_numeric) {
+                        return Err(refuse("Clipboard selection mixes numeric and named chunk schemas"));
+                    }
+                    numeric=Some(id_numeric);
+                    let original=chunk.block(x.rem_euclid(16) as u8,y,z.rem_euclid(16) as u8)
+                        .ok_or_else(||refuse("Clipboard source Section absent"))?;
+                    blocks.push(self.overlay.get(&pos).unwrap_or(original).clone());
+                }
+            }
+        }
+        clipboard::new(&self.world,&self.dimension,numeric.unwrap_or(false),
+            bounds.minimum,[width,height,depth],blocks)
+    }
+    /// Export a portable same-world snapshot without changing the source
+    /// Minecraft world. Existing clipboard files are never overwritten.
+    pub fn export_clipboard(&self,bounds:Bounds,path:&Path)->Result<usize,WorldError>{
+        let copied=self.capture_clipboard(bounds)?;
+        clipboard::save(&self.world,path,&copied)?;
+        Ok(copied.blocks.len())
+    }
+    /// Create one fully-preflighted, reversible paste Preview.
+    /// Pasting never carries Block Entity/entity data and never creates
+    /// absent chunks/Sections. Source is a frozen copied block snapshot.
+    pub fn prepare_paste_clipboard(
+        &self,clip:&BlockClipboard,destination_min:Position,
+    )->Result<Preview,WorldError>{
+        clip.validate(&self.world,&self.dimension)?;
+        let max=(
+            destination_min.0.checked_add(clip.size[0] as i32-1)
+                .ok_or_else(||refuse("Clipboard X paste overflow"))?,
+            destination_min.1.checked_add(clip.size[1] as i32-1)
+                .ok_or_else(||refuse("Clipboard Y paste overflow"))?,
+            destination_min.2.checked_add(clip.size[2] as i32-1)
+                .ok_or_else(||refuse("Clipboard Z paste overflow"))?,
+        );
+        let box_=Bounds::new(destination_min,max)?;
+        if box_.minimum!=[destination_min.0,destination_min.1,destination_min.2] {
+            return Err(refuse("Clipboard destination bounds reversed"));
+        }
+        let mut chunks=BTreeMap::new();
+        let mut changes=Vec::new();
+        let mut index=0usize;
+        for y in destination_min.1..=max.1{
+            for z in destination_min.2..=max.2{
+                for x in destination_min.0..=max.0{
+                    let pos=(x,y,z);
+                    let chunk=original_chunk(&mut chunks,&self.world,&self.dimension,pos)?;
+                    if chunk.has_block_entity(x,y,z){
+                        return Err(refuse("Clipboard paste target contains original Block Entity"));
+                    }
+                    let numeric=matches!(chunk.layout,Layout::McRegion128|Layout::NumericAnvil112);
+                    if numeric!=clip.numeric {
+                        return Err(refuse("Clipboard block identity is incompatible with target layout"));
+                    }
+                    let original=chunk.block(x.rem_euclid(16) as u8,y,z.rem_euclid(16) as u8)
+                        .ok_or_else(||refuse("Clipboard paste target Section absent"))?;
+                    let after=clip.blocks[index].clone();
+                    index+=1;
+                    let before=self.overlay.get(&pos).unwrap_or(original);
+                    if before!=&after{
+                        changes.push(Change{
+                            position:pos,original:original.clone(),
+                            before:before.clone(),after,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(Preview{
+            root:self.world.root.clone(),dimension:self.dimension.clone(),
+            data_version:self.world.data_version,
+            changes,source_checks:Vec::new(),is_copy:true,is_move:false,is_fill:false,
+            examined:index,matched:index,skipped:0,source_chunks:chunks.len(),
+        })
+    }
+    /// Rotation and mirrors are applied BEFORE normal destination checks,
+    /// so modified BE targets and missing Sections still fail atomically.
+    pub fn prepare_paste_clipboard_file_transformed(
+        &self,path:&Path,destination_min:Position,orientation:HorizontalTransform,
+    )->Result<Preview,WorldError>{
+        let source=clipboard::load(&self.world,&self.dimension,path)?;
+        let rotated=source.transformed(orientation)?;
+        self.prepare_paste_clipboard(&rotated,destination_min)
+    }
+    pub fn prepare_paste_clipboard_file(
+        &self,path:&Path,destination_min:Position,
+    )->Result<Preview,WorldError>{
+        let clip=clipboard::load(&self.world,&self.dimension,path)?;
+        self.prepare_paste_clipboard(&clip,destination_min)
+    }
+    /// Export exact 1.12.2/MCRegion numeric-ID source blocks to classic
+    /// GZip .schematic; source/destination original BE safety still enforced.
+    pub fn export_legacy_schematic(
+        &self,bounds:Bounds,path:&Path,
+    )->Result<usize,WorldError>{
+        let clip=self.capture_clipboard(bounds)?;
+        schematic::export_legacy(&self.world,&clip,path)?;
+        Ok(clip.blocks.len())
+    }
+    /// Import old numeric MCEdit schematic as a block-only paste preview.
+    /// Nonempty entities, TileEntities and ticks are rejected, not lost.
+    pub fn prepare_import_legacy_schematic(
+        &self,path:&Path,destination_min:Position,
+    )->Result<Preview,WorldError>{
+        let source=schematic::import_legacy(&self.world,&self.dimension,path)?;
+        self.prepare_paste_clipboard(&source,destination_min)
+    }
+    /// Import Sponge v2 palette-based named blocks; DataVersion must match.
+    pub fn prepare_import_sponge_v2(
+        &self,path:&Path,destination_min:Position,
+    )->Result<Preview,WorldError>{
+        let block_clip=schematic::import_sponge_v2(&self.world,&self.dimension,path)?;
+        self.prepare_paste_clipboard(&block_clip,destination_min)
+    }
+    /// Export only BE-free named blocks to Sponge v2; no entity/biome data.
+    pub fn export_sponge_v2(
+        &self,bounds:Bounds,path:&Path,
+    )->Result<usize,WorldError>{
+        let block_clip=self.capture_clipboard(bounds)?;
+        schematic::export_sponge_v2(&self.world,&block_clip,path)?;
+        Ok(block_clip.blocks.len())
     }
     /// Write an external original-NBT-verified edit journal, never a world file.
     pub fn export_patch(&self, path: &Path) -> Result<usize, WorldError> {
