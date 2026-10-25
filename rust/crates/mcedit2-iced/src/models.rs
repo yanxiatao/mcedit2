@@ -3,6 +3,7 @@
 //! Unsupported/modded blocks remain full cubes for selection safety.
 use crate::isometric::Face;
 use mcedit2_world::sections::State;
+use mcedit2_world::surface::{SurfaceView, SurfaceVoxel, VoxelMaterial};
 use std::collections::HashMap;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Box3 {
@@ -290,6 +291,173 @@ pub(crate) fn fluid_part(state: &State, same_fluid_above: bool) -> Option<Part> 
         0.5,
     )))
 }
+/// Source-backed horizon skirts for sampled LOD terrain. A side is drawn
+/// only where BOTH neighboring column heights were actually read. It is an
+/// approximate visual interpolation, never an editor- or picking-quality mesh.
+/// Adjacent tiles can have different 4/8/16-block sampling spans; split each
+/// shared edge into four-block strips before querying verified neighbors.
+pub(crate) struct DistantElevation<'a> {
+    samples: HashMap<(i32, i32, u8), &'a SurfaceVoxel>,
+    /// Verified original solid ground tops within the exact vertical slice.
+    exact_ground: HashMap<(i32, i32), &'a SurfaceVoxel>,
+}
+impl<'a> DistantElevation<'a> {
+    pub fn new(surface: &'a SurfaceView) -> Self {
+        let samples = surface
+            .voxels
+            .iter()
+            .filter(|v| matches!(v.span, 4 | 8 | 16))
+            .fold(HashMap::new(), |mut result, v| {
+                // Transparent tree crowns and glass are not solid cliffs.
+                // Prefer a verified solid underlay, but keep the observed
+                // upper fluid as the water surface where present.
+                let rank = |v: &SurfaceVoxel| match v.kind {
+                    VoxelMaterial::Liquid => 3,
+                    VoxelMaterial::Solid => 2,
+                    VoxelMaterial::Foliage | VoxelMaterial::Transparent => 1,
+                };
+                result
+                    .entry((v.x, v.z, v.span))
+                    .and_modify(|top: &mut &'a SurfaceVoxel| {
+                        if rank(v) > rank(top) || (rank(v) == rank(top) && v.y > top.y) {
+                            *top = v;
+                        }
+                    })
+                    .or_insert(v);
+                result
+            });
+        let exact_ground = surface.voxels.iter()
+            .filter(|v|v.span==1 && v.kind==VoxelMaterial::Solid
+                && v.faces & mcedit2_world::surface::FACE_TOP != 0
+                && v.y < surface.y_max)
+            .fold(HashMap::new(),|mut index,voxel|{
+                index.entry((voxel.x,voxel.z))
+                    .and_modify(|old:&mut &'a SurfaceVoxel|{
+                        if voxel.y>old.y{*old=voxel;}
+                    }).or_insert(voxel);
+                index
+            });
+        Self{samples,exact_ground}
+    }
+    /// A four-block LOD boundary can connect to exact geometry only when
+    /// every original column in that strip has an equal visible solid top.
+    fn exact_edge_top(&self,face:crate::isometric::Face,x:i32,z:i32)->Option<f32>{
+        use crate::isometric::Face;
+        let mut top:Option<i32>=None;
+        for step in 0..4_i32{
+            let (sx,sz)=match face{
+                Face::PosX|Face::NegX=>(x,z.checked_add(step)?),
+                Face::PosZ|Face::NegZ=>(x.checked_add(step)?,z),
+                _=>return None,
+            };
+            let voxel=self.exact_ground.get(&(sx,sz))?;
+            if top.is_some_and(|height|height!=voxel.y){return None;}
+            top=Some(voxel.y);
+        }
+        Some(top? as f32+0.5)
+    }
+    fn covering(&self, x: i32, z: i32) -> Option<&'a SurfaceVoxel> {
+        [4_u8, 8, 16].into_iter().find_map(|span| {
+            let s = span as i32;
+            let x0 = x.div_euclid(s).checked_mul(s)?;
+            let z0 = z.div_euclid(s).checked_mul(s)?;
+            self.samples.get(&(x0, z0, span)).copied()
+        })
+    }
+    /// One vertical rectangle per four-block contact segment. Unknown
+    /// neighbors, exact source cells and equal/higher surfaces omit the wall.
+    /// All coordinates are relative to the current sampled block center;
+    /// Y is deliberately NOT multiplied by horizontal tile span.
+    pub fn walls(&self, voxel: &SurfaceVoxel) -> Vec<(crate::isometric::Face, Part)> {
+        use crate::isometric::Face;
+        if !matches!(voxel.span, 4 | 8 | 16)
+            || matches!(
+                voxel.kind,
+                VoxelMaterial::Transparent | VoxelMaterial::Foliage
+            )
+            || self
+                .samples
+                .get(&(voxel.x, voxel.z, voxel.span))
+                .is_none_or(|top| top.y != voxel.y || top.kind != voxel.kind)
+        {
+            // A lower transparent underlay may draw its top quad through
+            // foliage/glass/water, but must not invent a second cliff.
+            return Vec::new();
+        }
+        let span = voxel.span as i32;
+        let top = sampled_top(voxel);
+        let mut result = Vec::new();
+        for (face,dx,dz) in [
+            (Face::PosX,1_i64,0_i64),(Face::NegX,-1,0),
+            (Face::PosZ,0,1),(Face::NegZ,0,-1)
+        ]{
+            let mut strips=Vec::with_capacity((span/4) as usize);
+            for step in (0..span).step_by(4){
+                let (px,pz)=match face{
+                    Face::PosX=>(voxel.x as i64+span as i64,voxel.z as i64+step as i64+2),
+                    Face::NegX=>(voxel.x as i64-1,voxel.z as i64+step as i64+2),
+                    Face::PosZ=>(voxel.x as i64+step as i64+2,voxel.z as i64+span as i64),
+                    Face::NegZ=>(voxel.x as i64+step as i64+2,voxel.z as i64-1),
+                    _=>unreachable!()
+                };
+                let edge_height=match(i32::try_from(px),i32::try_from(pz)){
+                    (Ok(px),Ok(pz))=>{
+                        let lod=self.covering(px,pz).and_then(|neighbor|{
+                            let touch=match face{
+                                Face::PosX=>neighbor.x as i64==voxel.x as i64+span as i64,
+                                Face::NegX=>neighbor.x as i64+neighbor.span as i64==voxel.x as i64,
+                                Face::PosZ=>neighbor.z as i64==voxel.z as i64+span as i64,
+                                Face::NegZ=>neighbor.z as i64+neighbor.span as i64==voxel.z as i64,
+                                _=>false,
+                            };
+                            touch.then(||neighbor.y as f32+sampled_top(neighbor))
+                        });
+                        lod.or_else(||{
+                            let edge_x=match face{
+                                Face::PosX|Face::NegX=>px,
+                                _=>voxel.x.checked_add(step)?,
+                            };
+                            let edge_z=match face{
+                                Face::PosZ|Face::NegZ=>pz,
+                                _=>voxel.z.checked_add(step)?,
+                            };
+                            self.exact_edge_top(face,edge_x,edge_z)
+                        })
+                    }
+                    _=>None,
+                };
+                let bottom=edge_height.map(|height|height-voxel.y as f32);
+                strips.push(bottom.filter(|bottom|top-*bottom>0.001));
+            }
+            // Greedy equal-height wall strip merges reduce large LOD meshes.
+            // Unknown strips and changing elevations always break the merge.
+            let mut index=0;
+            while index<strips.len(){
+                let Some(bottom)=strips[index]else{index+=1;continue;};
+                let begin=index*4;
+                index+=1;
+                while index<strips.len()&&strips[index].is_some_and(|other|
+                    (other-bottom).abs()<0.00001){index+=1;}
+                let end=index*4;
+                let mut min=[-0.5,bottom,-0.5];
+                let mut max=[0.5,top,0.5];
+                if dx!=0{
+                    min[2]=-0.5+begin as f32/span as f32;
+                    max[2]=-0.5+end as f32/span as f32;
+                }
+                if dz!=0{
+                    min[0]=-0.5+begin as f32/span as f32;
+                    max[0]=-0.5+end as f32/span as f32;
+                }
+                result.push((face,Part::cube(Box3{min,max})));
+            }
+        }
+        result
+    }
+}
+fn sampled_top(voxel: &SurfaceVoxel) -> f32 {
+    fluid_part(&voxel.state, false).map_or(0.5, |p| p.bounds.max[1])
+}
 /// Fluid surfaces use four corner heights shared with adjacent source cells.
 /// The input is a *display-only* map of verified exact block states. A missing
 /// source neighbor never implies water or an empty block: retain this cell's
@@ -528,6 +696,232 @@ mod tests {
             0.5
         );
         assert!(fluid_part(&state("other:fluid", &[]), false).is_none());
+    }
+    #[test]
+    fn lod_walls_join_verified_tiles_without_inventing_missing_cliffs() {
+        use mcedit2_world::surface::{SurfaceVoxel, VoxelMaterial, ALL_FACES};
+        let tile = |x: i32, z: i32, y: i32, span: u8| SurfaceVoxel {
+            x,
+            y,
+            z,
+            span,
+            state: state("minecraft:stone", &[]),
+            biome: None,
+            original_block_entity: false,
+            staged: false,
+            faces: ALL_FACES,
+            kind: VoxelMaterial::Solid,
+        };
+        let view = mcedit2_world::surface::SurfaceView {
+            x: 0,
+            z: 0,
+            y_min: 0,
+            y_max: 255,
+            width: 48,
+            depth: 16,
+            voxels: vec![
+                tile(0, 0, 80, 16),
+                tile(16, 0, 72, 8),
+                tile(16, 8, 68, 8),
+                tile(32, 0, 72, 16),
+            ],
+            source_tiles: vec![],
+            source_chunks: 4,
+            missing_columns: 0,
+        };
+        let sampled = DistantElevation::new(&view);
+        let walls = sampled.walls(&view.voxels[0]);
+        assert_eq!(walls.len(), 2); // merged contiguous 8-block regions
+        assert!(walls.iter().all(|(dir, _)| *dir == Face::PosX));
+        assert_eq!(walls[0].1.bounds.min[1], -7.5);
+        assert_eq!(walls[1].1.bounds.min[1], -11.5);
+        assert_eq!(walls[0].1.bounds.min[2], -0.5);
+        assert_eq!(walls[1].1.bounds.max[2], 0.5);
+        assert!(sampled.walls(&view.voxels[3]).is_empty());
+        // An unread span-8 sample cannot be extrapolated into the gap.
+        let mut incomplete = view.clone();
+        incomplete.voxels.remove(2);
+        let only_known = DistantElevation::new(&incomplete).walls(&incomplete.voxels[0]);
+        assert_eq!(only_known.len(), 1);
+    }
+    #[test]
+    fn duplicate_lod_column_keeps_topmost_verified_elevation() {
+        use mcedit2_world::surface::{SurfaceVoxel, VoxelMaterial, ALL_FACES};
+        let make = |x, y, kind| SurfaceVoxel {
+            x,
+            y,
+            z: 0,
+            span: 8,
+            state: state("minecraft:stone", &[]),
+            biome: None,
+            original_block_entity: false,
+            staged: false,
+            faces: ALL_FACES,
+            kind,
+        };
+        // Deliberately present ground before canopy: order of imported
+        // source patches cannot determine the horizon altitude.
+        let view = SurfaceView {
+            x: 0,
+            z: 0,
+            y_min: 0,
+            y_max: 255,
+            width: 16,
+            depth: 8,
+            voxels: vec![
+                make(0, 65, VoxelMaterial::Solid),
+                make(0, 80, VoxelMaterial::Foliage),
+                make(8, 64, VoxelMaterial::Solid),
+            ],
+            source_chunks: 1,
+            source_tiles: vec![],
+            missing_columns: 0,
+        };
+        let elevation = DistantElevation::new(&view);
+        let walls = elevation.walls(&view.voxels[0]);
+        assert_eq!(walls.len(), 1);
+        assert!(walls
+            .iter()
+            .all(|(face, part)| *face == Face::PosX && (part.bounds.min[1] + 0.5).abs() < 0.0001));
+        assert!(elevation.walls(&view.voxels[1]).is_empty());
+        let canopy_only = SurfaceView {
+            voxels: vec![view.voxels[1].clone(), view.voxels[2].clone()],
+            ..view
+        };
+        let top_only = DistantElevation::new(&canopy_only);
+        assert!(top_only.walls(&canopy_only.voxels[0]).is_empty());
+    }
+    #[test]
+    fn lod_edges_handle_negative_chunks_and_lower_fluid_surfaces() {
+        use mcedit2_world::surface::{SurfaceView, SurfaceVoxel, VoxelMaterial, ALL_FACES};
+        let water = SurfaceVoxel {
+            x: -16,
+            y: 64,
+            z: -16,
+            span: 16,
+            state: state("minecraft:water", &[("level", "4")]),
+            biome: None,
+            original_block_entity: false,
+            staged: false,
+            faces: ALL_FACES,
+            kind: VoxelMaterial::Liquid,
+        };
+        let low = SurfaceVoxel {
+            x: -16,
+            y: 63,
+            z: 0,
+            span: 16,
+            state: state("minecraft:stone", &[]),
+            biome: None,
+            original_block_entity: false,
+            staged: false,
+            faces: ALL_FACES,
+            kind: VoxelMaterial::Solid,
+        };
+        let view = SurfaceView {
+            x: -16,
+            z: -16,
+            y_min: 0,
+            y_max: 100,
+            width: 16,
+            depth: 32,
+            voxels: vec![water, low],
+            source_tiles: vec![],
+            source_chunks: 2,
+            missing_columns: 0,
+        };
+        let walls = DistantElevation::new(&view).walls(&view.voxels[0]);
+        assert_eq!(walls.len(), 1);
+        assert!(walls.iter().all(|(f, part)| {
+            *f == Face::PosZ && (part.bounds.max[1] - (-0.5 + 4.0 / 9.0)).abs() < 0.001
+        }));
+    }
+    #[test]
+    fn water_lod_horizon_stays_above_seabed_solid_layer() {
+        use mcedit2_world::surface::{SurfaceVoxel, VoxelMaterial, ALL_FACES};
+        let make = |x, y, kind| SurfaceVoxel {
+            x,
+            y,
+            z: 0,
+            span: 8,
+            state: state("minecraft:stone", &[]),
+            biome: None,
+            original_block_entity: false,
+            staged: false,
+            faces: ALL_FACES,
+            kind,
+        };
+        let view = SurfaceView {
+            x: 0,
+            z: 0,
+            y_min: 0,
+            y_max: 255,
+            width: 16,
+            depth: 8,
+            voxels: vec![
+                make(0, 54, VoxelMaterial::Solid),
+                make(0, 68, VoxelMaterial::Liquid),
+                make(8, 65, VoxelMaterial::Solid),
+            ],
+            source_chunks: 1,
+            source_tiles: vec![],
+            missing_columns: 0,
+        };
+        let height = DistantElevation::new(&view);
+        assert!(height.walls(&view.voxels[0]).is_empty());
+        assert_eq!(height.walls(&view.voxels[1]).len(), 1);
+    }
+    #[test]
+    fn exact_lod_perimeter_requires_four_equal_ground_tops() {
+        use mcedit2_world::surface::{SurfaceVoxel,VoxelMaterial,ALL_FACES};
+        let tile=|x,z,y,span|SurfaceVoxel{
+            x,y,z,span,state:state("minecraft:stone",&[]),biome:None,
+            original_block_entity:false,staged:false,faces:ALL_FACES,
+            kind:VoxelMaterial::Solid,
+        };
+        let mut view=SurfaceView{
+            x:0,z:0,y_min:40,y_max:99,width:8,depth:4,
+            voxels:vec![tile(0,0,80,4)],source_tiles:vec![],
+            source_chunks:2,missing_columns:0,
+        };
+        for z in 0..4{view.voxels.push(tile(4,z,74,1));}
+        let walls=DistantElevation::new(&view).walls(&view.voxels[0]);
+        assert_eq!(walls.len(),1);
+        assert_eq!(walls[0].0,Face::PosX);
+        assert_eq!(walls[0].1.bounds.min[1],-5.5);
+        assert_eq!(walls[0].1.bounds.min[2],-0.5);
+        assert_eq!(walls[0].1.bounds.max[2],0.5);
+        let mut absent=view.clone();
+        absent.voxels.pop();
+        assert!(DistantElevation::new(&absent).walls(&absent.voxels[0]).is_empty());
+        let mut varied=view.clone();
+        varied.voxels[4].y=73;
+        assert!(DistantElevation::new(&varied).walls(&varied.voxels[0]).is_empty());
+        let mut clipped=view.clone();
+        clipped.y_max=74;
+        assert!(DistantElevation::new(&clipped).walls(&clipped.voxels[0]).is_empty());
+        let mut glass=view;
+        glass.voxels[1].kind=VoxelMaterial::Transparent;
+        assert!(DistantElevation::new(&glass).walls(&glass.voxels[0]).is_empty());
+    }
+    #[test]
+    fn exact_lod_perimeter_handles_negative_coordinates() {
+        use mcedit2_world::surface::{SurfaceVoxel,VoxelMaterial,ALL_FACES};
+        let tile=|x,z,y,span|SurfaceVoxel{
+            x,y,z,span,state:state("minecraft:stone",&[]),biome:None,
+            original_block_entity:false,staged:false,faces:ALL_FACES,
+            kind:VoxelMaterial::Solid,
+        };
+        let mut view=SurfaceView{
+            x:-8,z:-4,y_min:-64,y_max:100,width:8,depth:8,
+            voxels:vec![tile(-4,-4,40,4)],source_tiles:vec![],
+            source_chunks:2,missing_columns:0,
+        };
+        for z in -4..0{view.voxels.push(tile(-5,z,32,1));}
+        let walls=DistantElevation::new(&view).walls(&view.voxels[0]);
+        assert_eq!(walls.len(),1);
+        assert_eq!(walls[0].0,Face::NegX);
+        assert_eq!(walls[0].1.bounds.min[1],-7.5);
     }
     #[test]
     fn adjacent_static_fluid_levels_share_sloped_corners_and_side_tops() {

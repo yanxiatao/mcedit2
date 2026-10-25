@@ -3,6 +3,7 @@
 mod auto_assets;
 mod dialogs;
 mod gpu_mesh;
+mod chunk_mesh_cache;
 mod gpu_scene;
 mod isometric;
 mod language;
@@ -372,6 +373,7 @@ struct App {
     spectator_cache:
         std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<Vec<gpu_mesh::Vertex>>>>>,
     spectator_pending: std::sync::Arc<std::sync::Mutex<bool>>,
+    spectator_chunk_cache: std::sync::Arc<std::sync::Mutex<chunk_mesh_cache::ChunkMeshCache>>,
     spectator_stream: Option<SpectatorStream>,
     spectator_stream_view: Option<std::sync::Arc<SurfaceView>>,
     spectator_stream_near: Option<usize>,
@@ -1738,6 +1740,7 @@ impl App {
         self.spectator_stream = None;
         self.spectator_stream_view = None;
         self.spectator_stream_near = None;
+        self.spectator_chunk_cache = Default::default();
         if self.spectator_radius == 0 {
             self.spectator_radius = spectator_stream::DEFAULT_RADIUS;
         }
@@ -1981,6 +1984,7 @@ fn update(app: &mut App, message: Message) -> iced::Task<Message> {
             | Message::RollbackRegion
     );
     if invalidate_stream {
+        app.spectator_chunk_cache = Default::default();
         app.spectator_stream = None;
         app.spectator_stream_view = None;
         app.spectator_stream_near = None;
@@ -3305,6 +3309,7 @@ fn render_surface<'a>(
             quality: app.gpu_quality,
             cache: std::sync::Arc::clone(&app.spectator_cache),
             pending: std::sync::Arc::clone(&app.spectator_pending),
+            chunk_cache: std::sync::Arc::clone(&app.spectator_chunk_cache),
         };
         iced::widget::stack![
             iced::widget::shader(GpuScene(SceneSource::Spectator(spectator)))

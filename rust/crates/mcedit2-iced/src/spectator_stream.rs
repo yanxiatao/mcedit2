@@ -14,7 +14,10 @@ use mcedit2_world::{
 };
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 pub(crate) const DEFAULT_RADIUS: u16 = 32;
@@ -23,6 +26,9 @@ const CACHE_LIMIT: usize = 18_000;
 const CACHE_VOXELS: usize = 96_000;
 const VISIBLE_VOXELS: usize = 96_000;
 const MAX_READ_BATCH: usize = 32;
+// Start by sampling one cheap distant ring before the costly nearby full
+// voxel scans. The next batches return to the exact ring, preserving detail.
+const HORIZON_WARMUP: usize = 32;
 type Key = (i32, i32, u8);
 fn key(request: FarChunkRequest) -> Key {
     (request.cx, request.cz, request.span)
@@ -85,6 +91,75 @@ pub(crate) fn plan(location: [f64; 3], radius: u16) -> Result<Vec<FarChunkReques
         }
     }
     Ok(result)
+}
+/// Keep the planned visible tile order stable, but issue the first inexpensive
+/// LOD batch before expensive complete near-chunk reads.
+fn prioritized_pending(
+    requests: &[FarChunkRequest],
+    cached: &BTreeMap<Key, Arc<FarChunkPatch>>,
+) -> VecDeque<FarChunkRequest> {
+    let mut exact = VecDeque::new();
+    let mut distant = VecDeque::new();
+    for request in requests.iter().copied() {
+        if cached.contains_key(&key(request)) {
+            continue;
+        }
+        if request.span == 1 {
+            exact.push_back(request);
+        } else {
+            distant.push_back(request);
+        }
+    }
+    let mut pending = VecDeque::with_capacity(exact.len() + distant.len());
+    // Include only the nearest LOD samples in the initial warmup. We never
+    // skip or synthesize a source chunk: all remaining requests follow.
+    for _ in 0..HORIZON_WARMUP {
+        let Some(request) = distant.pop_front() else {
+            break;
+        };
+        pending.push_back(request);
+    }
+    pending.append(&mut exact);
+    pending.append(&mut distant);
+    pending
+}
+/// A single background read may still be in the OS when the spectator flies
+/// elsewhere. Inspect cancellation between *original* chunk reads so stale
+/// jobs cannot keep scanning hundreds of now-irrelevant source chunks.
+fn not_cancelled(flag: &AtomicBool) -> bool {
+    !flag.load(Ordering::Acquire)
+}
+/// Cache trim performs one distance ordering per completed batch rather than
+/// rescanning every retained chunk for each individual eviction.
+fn evict_farthest(
+    cache: &mut BTreeMap<Key, Arc<FarChunkPatch>>,
+    cached_voxels: &mut usize,
+    center: (i32, i32),
+    max_entries: usize,
+    max_voxels: usize,
+) {
+    if cache.len() <= max_entries && *cached_voxels <= max_voxels {
+        return;
+    }
+    let mut candidates = cache.keys().copied().collect::<Vec<_>>();
+    candidates.sort_unstable_by_key(|&(cx, cz, span)| {
+        (
+            (i64::from(cx) - i64::from(center.0))
+                .abs()
+                .max((i64::from(cz) - i64::from(center.1)).abs()),
+            span,
+            cx,
+            cz,
+        )
+    });
+    for id in candidates.into_iter().rev() {
+        if cache.len() <= max_entries && *cached_voxels <= max_voxels {
+            break;
+        }
+        if let Some(patch) = cache.remove(&id) {
+            *cached_voxels = cached_voxels.saturating_sub(patch.voxels.len());
+        }
+    }
 }
 /// Only faces between verified full vanilla opaque cubes can be removed
 /// after independently-read chunks are merged. Keep all other boundaries:
@@ -210,6 +285,7 @@ pub(crate) struct Stream {
     pub exact_y_min: i32,
     pub nonce: u64,
     pub running: bool,
+    cancellation: Arc<AtomicBool>,
     pub complete: usize,
     published: usize,
     pub errors: usize,
@@ -252,6 +328,7 @@ impl Stream {
             exact_y_min,
             nonce,
             running: false,
+            cancellation: Arc::new(AtomicBool::new(false)),
             complete: 0,
             published: 0,
             errors: 0,
@@ -284,16 +361,15 @@ impl Stream {
             .count();
         self.total = requests.len();
         self.published = self.complete;
-        self.pending = requests
-            .iter()
-            .copied()
-            .filter(|r| !self.cache.contains_key(&key(*r)))
-            .collect();
+        self.pending = prioritized_pending(&requests, &self.cache);
         self.center = center_chunk(location);
         self.radius = radius;
         self.nonce = nonce;
-        // The previous generation's worker may still return, but its
-        // nonce is ignored. Allow a new generation to start immediately.
+        // Invalidate old queued batches before a fresh one starts. The
+        // in-progress source chunk can finish, but stale jobs stop before
+        // their next expensive chunk read; nonce checks remain authoritative.
+        self.cancellation.store(true, Ordering::Release);
+        self.cancellation = Arc::new(AtomicBool::new(false));
         self.running = false;
         self.wanted = requests;
         self.errors = 0;
@@ -311,14 +387,21 @@ impl Stream {
         if self.running || self.pending.is_empty() {
             return Task::none();
         }
+        // Do not mix full voxel reads with cheap LOD samples in one worker
+        // batch. The first distant warmup can publish without waiting for a
+        // slower exact chunk in the same batch.
+        let span = self.pending.front().unwrap().span;
         let count = self
             .pending
-            .len()
-            .min(far_view::batch_size_for(self.pending.front().unwrap().span).min(MAX_READ_BATCH));
+            .iter()
+            .take_while(|request| request.span == span)
+            .count()
+            .min(far_view::batch_size_for(span).min(MAX_READ_BATCH));
         let requests: Vec<_> = self.pending.drain(..count).collect();
         let fallback = requests.clone();
         let (nonce, source) = (self.nonce, Arc::clone(&self.source));
         let exact_y_min = self.exact_y_min;
+        let cancellation = Arc::clone(&self.cancellation);
         self.running = true;
         // Each request has a validated original Region/chunk coordinate,
         // shared reader index per OS worker and bounded batch result.
@@ -326,6 +409,10 @@ impl Stream {
             async move {
                 let (send, recv) = iced::futures::channel::oneshot::channel();
                 std::thread::spawn(move || {
+                    if !not_cancelled(&cancellation) {
+                        let _ = send.send(Vec::new());
+                        return;
+                    }
                     let mut region = mcedit2_world::block_lookup::ReadOnlyRegionCache::new(
                         source.original_world(),
                         source.dimension(),
@@ -339,50 +426,51 @@ impl Stream {
                     } else {
                         (0, 255)
                     };
-                    let patches = requests
-                        .into_iter()
-                        .map(|req| {
-                            let result = if req.span == 1 {
-                                // Nearby full source voxel geometry: caves, cliffs,
-                                // glass, stairs and resource JSON models. The editor
-                                // source path never receives an approximate LOD.
-                                let x = req.cx.checked_mul(16);
-                                let z = req.cz.checked_mul(16);
-                                match (x, z) {
-                                    (Some(x), Some(z)) => {
-                                        mcedit2_world::surface::inspect_exposed_volume(
-                                            &source,
-                                            x,
-                                            z,
-                                            exact_y_min,
-                                            exact_y_min + 47,
-                                            16,
-                                            16,
-                                        )
-                                        .map(|surface| FarChunkPatch {
-                                            tile: surface
-                                                .source_tiles
-                                                .into_iter()
-                                                .next()
-                                                .expect("Exact source chunk has one tile"),
-                                            voxels: surface.voxels,
-                                        })
-                                        .map_err(|e| e.to_string())
-                                    }
-                                    _ => Err("Exact source chunk coordinate overflow".into()),
-                                }
-                            } else {
-                                match &mut region {
-                                    Ok(reader) => far_view::inspect_far_chunk_cached(
-                                        &source, reader, req, ymin, ymax,
+                    let mut patches = Vec::with_capacity(requests.len());
+                    for req in requests {
+                        if !not_cancelled(&cancellation) {
+                            break;
+                        }
+                        let result = if req.span == 1 {
+                            // Nearby full source voxel geometry: caves, cliffs,
+                            // glass, stairs and resource JSON models. The editor
+                            // source path never receives an approximate LOD.
+                            let x = req.cx.checked_mul(16);
+                            let z = req.cz.checked_mul(16);
+                            match (x, z) {
+                                (Some(x), Some(z)) => {
+                                    mcedit2_world::surface::inspect_exposed_volume(
+                                        &source,
+                                        x,
+                                        z,
+                                        exact_y_min,
+                                        exact_y_min + 47,
+                                        16,
+                                        16,
                                     )
-                                    .map_err(|e: WorldError| e.to_string()),
-                                    Err(e) => Err(e.to_string()),
+                                    .map(|surface| FarChunkPatch {
+                                        tile: surface
+                                            .source_tiles
+                                            .into_iter()
+                                            .next()
+                                            .expect("Exact source chunk has one tile"),
+                                        voxels: surface.voxels,
+                                    })
+                                    .map_err(|e| e.to_string())
                                 }
-                            };
-                            (req, result)
-                        })
-                        .collect::<Vec<_>>();
+                                _ => Err("Exact source chunk coordinate overflow".into()),
+                            }
+                        } else {
+                            match &mut region {
+                                Ok(reader) => far_view::inspect_far_chunk_cached(
+                                    &source, reader, req, ymin, ymax,
+                                )
+                                .map_err(|e: WorldError| e.to_string()),
+                                Err(e) => Err(e.to_string()),
+                            }
+                        };
+                        patches.push((req, result));
+                    }
                     let _ = send.send(patches);
                 });
                 let results = recv.await.unwrap_or_else(|_| {
@@ -419,21 +507,15 @@ impl Stream {
                 Err(_) => self.errors += 1,
             }
         }
-        // Drop most distant entries first, never let source snapshots
-        // grow without bound even when visiting many different origins.
-        while self.cache.len() > CACHE_LIMIT || self.cached_voxels > CACHE_VOXELS {
-            let farthest = self
-                .cache
-                .keys()
-                .copied()
-                .max_by_key(|k| (k.0 - self.center.0).abs().max((k.1 - self.center.1).abs()));
-            let Some(id) = farthest else {
-                break;
-            };
-            if let Some(p) = self.cache.remove(&id) {
-                self.cached_voxels = self.cached_voxels.saturating_sub(p.voxels.len());
-            }
-        }
+        // Prune farthest source snapshots in one ordered pass. The cache
+        // is display-only and must never exceed its bounded voxel budget.
+        evict_farthest(
+            &mut self.cache,
+            &mut self.cached_voxels,
+            self.center,
+            CACHE_LIMIT,
+            CACHE_VOXELS,
+        );
         // Publish near-field updates promptly, but do not wait for 128
         // chunks before exposing the first distant tiles. A large batch
         // commonly contains the first visible horizon after an empty ring.
@@ -497,9 +579,65 @@ impl Stream {
             self.complete,self.total,self.errors,self.cache.len(),self.radius)
     }
 }
+impl Drop for Stream {
+    fn drop(&mut self) {
+        // A world switch should also stop old detached reader threads.
+        self.cancellation.store(true, Ordering::Release);
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn first_batch_previews_horizon_then_restores_nearby_detail() {
+        let requests = plan([0.0, 80.0, 0.0], 16).unwrap();
+        let pending = prioritized_pending(&requests, &BTreeMap::new());
+        assert_eq!(pending.len(), requests.len());
+        let first: Vec<_> = pending.iter().take(HORIZON_WARMUP).copied().collect();
+        assert!(first.iter().all(|r| r.span == 4));
+        assert!(pending
+            .iter()
+            .skip(HORIZON_WARMUP)
+            .take(25)
+            .all(|r| r.span == 1));
+        let original: BTreeSet<_> = requests.iter().copied().map(key).collect();
+        let scheduled: BTreeSet<_> = pending.iter().copied().map(key).collect();
+        assert_eq!(scheduled, original);
+    }
+    #[test]
+    fn cancelled_stale_batch_stops_at_next_chunk_boundary() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker = Arc::clone(&cancelled);
+        assert!(not_cancelled(&worker));
+        cancelled.store(true, Ordering::Release);
+        assert!(!not_cancelled(&worker));
+    }
+    #[test]
+    fn cache_eviction_is_bounded_and_keeps_nearer_chunk() {
+        use mcedit2_world::surface::SourceChunkTile;
+        let mut cache = BTreeMap::new();
+        let empty = |cx| {
+            Arc::new(FarChunkPatch {
+                tile: SourceChunkTile {
+                    chunk_x: cx,
+                    chunk_z: 0,
+                    source_present: true,
+                    known_columns: 0,
+                    unknown_columns: 0,
+                    exposed_voxels: 0,
+                },
+                voxels: Vec::new(),
+            })
+        };
+        cache.insert((0, 0, 4), empty(0));
+        cache.insert((10, 0, 4), empty(10));
+        cache.insert((30, 0, 4), empty(30));
+        let mut count = 0;
+        evict_farthest(&mut cache, &mut count, (0, 0), 2, 10);
+        assert_eq!(cache.len(), 2);
+        assert!(cache.contains_key(&(0, 0, 4)));
+        assert!(!cache.contains_key(&(30, 0, 4)));
+    }
     #[test]
     fn exact_seams_cull_only_proven_full_opaque_neighbors() {
         use mcedit2_world::sections::State;

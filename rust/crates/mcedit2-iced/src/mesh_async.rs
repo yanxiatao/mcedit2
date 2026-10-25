@@ -1,52 +1,126 @@
 //! Single worker for original-state 3D projection and GPU mesh assembly.
-//! Never build faces in a GPU shader/Canvas draw callback.
+//! A later view cancels both queued and in-flight mesh work. Only finished,
+//! non-cancelled meshes can enter the per-view GPU cache.
 use crate::isometric::IsometricSurface;
 use iced::Size;
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Condvar, Mutex, OnceLock,
+};
 
 enum MeshRequest {
-    Isometric { view: IsometricSurface, size: Size },
-    Spectator(crate::spectator::SpectatorScene),
+    Isometric {
+        view: IsometricSurface,
+        size: Size,
+        cancelled: Arc<AtomicBool>,
+    },
+    Spectator {
+        view: crate::spectator::SpectatorScene,
+        cancelled: Arc<AtomicBool>,
+    },
 }
-type Queue = Arc<(Mutex<Option<MeshRequest>>, Condvar)>;
+impl MeshRequest {
+    fn cancellation(&self) -> &Arc<AtomicBool> {
+        match self {
+            Self::Isometric { cancelled, .. } | Self::Spectator { cancelled, .. } => cancelled,
+        }
+    }
+    fn clear_pending(&self) {
+        match self {
+            Self::Spectator { view, .. } => {
+                *view.pending.lock().unwrap_or_else(|e| e.into_inner()) = false;
+            }
+            Self::Isometric { view, size, .. } => {
+                let mut pending = view.gpu_pending.lock().unwrap_or_else(|e| e.into_inner());
+                if *pending == Some(*size) {
+                    *pending = None;
+                }
+            }
+        }
+    }
+}
+#[derive(Default)]
+struct WorkerState {
+    next: Option<MeshRequest>,
+    active: Option<Arc<AtomicBool>>,
+}
+impl WorkerState {
+    fn replace(&mut self, request: MeshRequest) -> Option<MeshRequest> {
+        // Do not wait for the previous mesh to finish traversing thousands
+        // of original blocks before the newest camera can be rendered.
+        if let Some(active) = &self.active {
+            active.store(true, Ordering::Release);
+        }
+        let previous = self.next.replace(request);
+        if let Some(old) = &previous {
+            old.cancellation().store(true, Ordering::Release);
+        }
+        previous
+    }
+}
+type Queue = Arc<(Mutex<WorkerState>, Condvar)>;
 static QUEUE: OnceLock<Queue> = OnceLock::new();
 fn queue() -> &'static Queue {
     QUEUE.get_or_init(|| {
-        let shared: Queue = Arc::new((Mutex::new(None), Condvar::new()));
+        let shared: Queue = Arc::new((Mutex::new(WorkerState::default()), Condvar::new()));
         let work = Arc::clone(&shared);
         std::thread::Builder::new()
             .name("mcedit2-gpu-mesh".into())
             .spawn(move || loop {
                 let request = {
                     let (lock, ready) = &*work;
-                    let mut pending = lock.lock().unwrap_or_else(|e| e.into_inner());
-                    while pending.is_none() {
-                        pending = ready.wait(pending).unwrap_or_else(|e| e.into_inner());
+                    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    while state.next.is_none() {
+                        state = ready.wait(state).unwrap_or_else(|e| e.into_inner());
                     }
-                    pending.take().unwrap()
+                    let request = state.next.take().unwrap();
+                    state.active = Some(Arc::clone(request.cancellation()));
+                    request
                 };
-                // Projects faces, resolves source JSON models and UVs,
-                // assembles all bounded GPU vertices and normalized depth.
-                // Both Arc result caches belong to this one view snapshot.
-                match request {
-                    MeshRequest::Isometric { view, size } => {
-                        let _ = view.gpu_vertices_cached(size);
-                        let mut pending =
-                            view.gpu_pending.lock().unwrap_or_else(|e| e.into_inner());
-                        if *pending == Some(size) {
-                            *pending = None;
+                let cancellation = Arc::clone(request.cancellation());
+                let cancelled = || cancellation.load(Ordering::Acquire);
+                match &request {
+                    MeshRequest::Isometric { view, size, .. } => {
+                        let _ = view.gpu_vertices_cancellable(*size, &cancelled);
+                    }
+                    MeshRequest::Spectator { view, .. } => {
+                        if let Some(vertices) =
+                            crate::spectator::build_cancellable(view, &cancelled)
+                        {
+                            let mut cache = view.cache.lock().unwrap_or_else(|e| e.into_inner());
+                            if !cancelled() {
+                                *cache = Some(Arc::new(vertices));
+                            }
                         }
                     }
-                    MeshRequest::Spectator(view) => {
-                        let vertices = Arc::new(crate::spectator::build(&view));
-                        *view.cache.lock().unwrap_or_else(|e| e.into_inner()) = Some(vertices);
-                        *view.pending.lock().unwrap_or_else(|e| e.into_inner()) = false;
-                    }
+                }
+                request.clear_pending();
+                let (lock, _) = &*work;
+                let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+                if state
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| Arc::ptr_eq(active, &cancellation))
+                {
+                    state.active = None;
                 }
             })
             .expect("Cannot start bounded GPU mesh worker");
         shared
     })
+}
+fn submit(request: MeshRequest) {
+    let (lock, ready) = &**queue();
+    let replaced = lock
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .replace(request);
+    // Drop any older scene's pending bit only after releasing the queue
+    // mutex. This avoids acquiring its view mutex under the global lock.
+    if let Some(old) = replaced {
+        old.clear_pending();
+    }
+    ready.notify_one();
 }
 pub(crate) fn enqueue(view: &IsometricSurface, size: Size) {
     if !size.width.is_finite()
@@ -65,39 +139,21 @@ pub(crate) fn enqueue(view: &IsometricSurface, size: Size) {
     {
         return;
     }
-    let mut pending = view.gpu_pending.lock().unwrap_or_else(|e| e.into_inner());
-    if *pending == Some(size) {
-        return;
-    }
-    *pending = Some(size);
-    // A rapid camera move supersedes unstarted work. Exactly one thread
-    // can process one scene, with at most one latest pending request.
-    let (lock, ready) = &**queue();
-    let mut current = lock.lock().unwrap_or_else(|e| e.into_inner());
-    match current.take() {
-        Some(MeshRequest::Spectator(old)) => {
-            *old.pending.lock().unwrap_or_else(|e| e.into_inner()) = false;
+    {
+        let mut pending = view.gpu_pending.lock().unwrap_or_else(|e| e.into_inner());
+        if *pending == Some(size) {
+            return;
         }
-        Some(MeshRequest::Isometric {
-            view: old,
-            size: old_size,
-        }) => {
-            let mut previous = old.gpu_pending.lock().unwrap_or_else(|e| e.into_inner());
-            if *previous == Some(old_size) {
-                *previous = None;
-            }
-        }
-        None => {}
+        *pending = Some(size);
     }
-    *current = Some(MeshRequest::Isometric {
+    submit(MeshRequest::Isometric {
         view: view.clone(),
         size,
+        cancelled: Arc::new(AtomicBool::new(false)),
     });
-    drop(current);
-    ready.notify_one();
 }
 /// World-space vertices stay identical when the observer moves.
-//// Only the tiny GPU uniform changes per frame, with no new face mesh.
+/// Only the tiny GPU uniform changes per frame, with no new face mesh.
 pub(crate) fn enqueue_spectator(view: &crate::spectator::SpectatorScene) {
     if view
         .cache
@@ -107,29 +163,17 @@ pub(crate) fn enqueue_spectator(view: &crate::spectator::SpectatorScene) {
     {
         return;
     }
-    let mut pending = view.pending.lock().unwrap_or_else(|e| e.into_inner());
-    if *pending {
-        return;
-    }
-    *pending = true;
-    let (lock, ready) = &**queue();
-    // This shares the global one-worker + newest-pending scene queue.
-    let mut current = lock.lock().unwrap_or_else(|e| e.into_inner());
-    match current.take() {
-        Some(MeshRequest::Spectator(old)) => {
-            *old.pending.lock().unwrap_or_else(|e| e.into_inner()) = false;
+    {
+        let mut pending = view.pending.lock().unwrap_or_else(|e| e.into_inner());
+        if *pending {
+            return;
         }
-        Some(MeshRequest::Isometric { view: old, size }) => {
-            let mut previous = old.gpu_pending.lock().unwrap_or_else(|e| e.into_inner());
-            if *previous == Some(size) {
-                *previous = None;
-            }
-        }
-        None => {}
+        *pending = true;
     }
-    *current = Some(MeshRequest::Spectator(view.clone()));
-    drop(current);
-    ready.notify_one();
+    submit(MeshRequest::Spectator {
+        view: view.clone(),
+        cancelled: Arc::new(AtomicBool::new(false)),
+    });
 }
 #[cfg(test)]
 mod tests {
@@ -142,5 +186,50 @@ mod tests {
         let a = queue();
         let b = queue();
         assert!(Arc::ptr_eq(a, b));
+    }
+    #[test]
+    fn superseding_active_work_cancels_its_token() {
+        let active = Arc::new(AtomicBool::new(false));
+        let mut state = WorkerState {
+            next: None,
+            active: Some(Arc::clone(&active)),
+        };
+        let scene = crate::spectator::SpectatorScene {
+            surface: Arc::new(mcedit2_world::surface::SurfaceView {
+                x: 0,
+                z: 0,
+                y_min: 0,
+                y_max: 0,
+                width: 16,
+                depth: 16,
+                voxels: Vec::new(),
+                missing_columns: 0,
+                source_chunks: 0,
+                source_tiles: Vec::new(),
+            }),
+            texture_bank: None,
+            show_textures: false,
+            camera: crate::spectator::Camera::default(),
+            quality: crate::gpu_mesh::Quality::Fast,
+            cache: Arc::new(Mutex::new(None)),
+            pending: Arc::new(Mutex::new(false)),
+            chunk_cache: Arc::new(Mutex::new(crate::chunk_mesh_cache::ChunkMeshCache::default())),
+        };
+        let old_token = Arc::new(AtomicBool::new(false));
+        let newest_token = Arc::new(AtomicBool::new(false));
+        let old = MeshRequest::Spectator {
+            view: scene.clone(),
+            cancelled: Arc::clone(&old_token),
+        };
+        assert!(state.replace(old).is_none());
+        assert!(active.load(Ordering::Acquire));
+        let newest = MeshRequest::Spectator {
+            view: scene,
+            cancelled: Arc::clone(&newest_token),
+        };
+        assert!(state.replace(newest).is_some());
+        assert!(old_token.load(Ordering::Acquire));
+        assert!(!newest_token.load(Ordering::Acquire));
+        assert!(state.next.is_some());
     }
 }

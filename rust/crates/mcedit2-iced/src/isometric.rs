@@ -797,11 +797,22 @@ impl IsometricSurface {
         }
     }
     pub(crate) fn faces_cached(&self, size: Size) -> Arc<Vec<RenderFace>> {
+        self.faces_cached_cancellable(size, &|| false)
+            .expect("uninterruptible isometric face cache")
+    }
+    pub(crate) fn faces_cached_cancellable(
+        &self,
+        size: Size,
+        cancelled: &impl Fn() -> bool,
+    ) -> Option<Arc<Vec<RenderFace>>> {
+        if cancelled() {
+            return None;
+        }
         {
             let cache = self.frame_cache.lock().unwrap_or_else(|e| e.into_inner());
             if let Some((cached_size, faces)) = &*cache {
                 if *cached_size == size {
-                    return Arc::clone(faces);
+                    return Some(Arc::clone(faces));
                 }
             }
         }
@@ -810,12 +821,26 @@ impl IsometricSurface {
         let mut static_view = self.clone();
         static_view.selected = None;
         static_view.hovered = None;
-        let faces = Arc::new(static_view.faces(size));
+        let faces = Arc::new(static_view.faces_cancellable(size, cancelled)?);
         let mut cache = self.frame_cache.lock().unwrap_or_else(|e| e.into_inner());
+        if cancelled() {
+            return None;
+        }
         *cache = Some((size, Arc::clone(&faces)));
-        faces
+        Some(faces)
     }
     pub(crate) fn faces(&self, size: Size) -> Vec<RenderFace> {
+        self.faces_cancellable(size, &|| false)
+            .expect("uninterruptible isometric face projection")
+    }
+    fn faces_cancellable(
+        &self,
+        size: Size,
+        cancelled: &impl Fn() -> bool,
+    ) -> Option<Vec<RenderFace>> {
+        if cancelled() {
+            return None;
+        }
         let (yaw, pitch) = self.angles();
         let mut out = Vec::new();
         let scale = self.scale(size);
@@ -828,7 +853,7 @@ impl IsometricSurface {
         let projected_z_factor = projected_x_factor * pitch.sin().abs();
         // Thousands of voxels typically share a few exact palette states.
         // Cache only within one frame; no stale model after pack replacement.
-        let mut shape_cache: HashMap<(String, Vec<(String, String)>, u64), Vec<models::Part>> =
+        let mut shape_cache: HashMap<crate::gpu_mesh::ModelCacheKey<'_>, Vec<models::Part>> =
             HashMap::new();
         let liquid_cells: HashMap<(i32, i32, i32), &mcedit2_world::sections::State> = self
             .surface
@@ -837,16 +862,33 @@ impl IsometricSurface {
             .filter(|v| v.span == 1 && v.kind == VoxelMaterial::Liquid)
             .map(|v| ((v.x, v.y, v.z), &v.state))
             .collect();
+        let distant = models::DistantElevation::new(&self.surface);
+        let mut rendered_walls = 0usize;
+        const MAX_LOD_WALL_FACES: usize = MAX_RENDER_FACES / 8;
         let mut json_face_cache: HashMap<
-            ((String, Vec<(String, String)>, u64), usize, u8),
+            (crate::gpu_mesh::ModelCacheKey<'_>, usize, u8),
             (Option<bool>, Option<Option<Face>>, bool),
         > = HashMap::new();
         for (voxel_index, voxel) in self.surface.voxels.iter().enumerate() {
+            if cancelled() {
+                return None;
+            }
             // Cull whole voxel envelopes BEFORE JSON model resolution or
             // face projection. Padding 4 blocks covers allowed model-element
             // rotations/rescale and extends beyond zero-thickness quads.
             // Far LOD tiles get a real span-based conservative envelope.
+            let wall_parts = if voxel.span > 1 && rendered_walls < MAX_LOD_WALL_FACES {
+                distant.walls(voxel)
+            } else {
+                Vec::new()
+            };
+            // A verified sampled cliff can reach far below its source top.
+            // Include its lower end in the conservative projected envelope
+            // so panning doesn't clip a visible vertical wall prematurely.
             let radius = voxel.span as f32 * 0.5 + 8.0;
+            let radius_y = wall_parts
+                .iter()
+                .fold(radius, |max, (_, part)| max.max(part.bounds.min[1].abs()));
             let center = self
                 .project(
                     [
@@ -860,7 +902,7 @@ impl IsometricSurface {
             if outside_projected_envelope(
                 center,
                 radius * projected_x_factor * scale,
-                (radius * projected_z_factor + radius * pitch.cos().abs()) * scale,
+                (radius * projected_z_factor + radius_y * pitch.cos().abs()) * scale,
                 size,
             ) {
                 continue;
@@ -874,11 +916,9 @@ impl IsometricSurface {
                     .as_ref()
                     .map_or(0, |bank| bank.model_variant_key(&voxel.state, pos))
             };
-            let key = (
-                voxel.state.name.clone(),
-                voxel.state.properties.clone(),
-                variant,
-            );
+            // Key the projection cache by borrowed original source state, not
+            // freshly allocated name/properties clones on every voxel.
+            let key = crate::gpu_mesh::model_cache_key(&voxel.state, variant);
             // Distant spans are sampled terrain tiles, not exact JSON
             // model instances: use one covering plane rather than inventing
             // detailed model geometry for unsampled neighboring positions.
@@ -900,7 +940,7 @@ impl IsometricSurface {
                 std::slice::from_ref(fluid)
             } else {
                 shape_cache
-                    .entry(key.clone())
+                    .entry(key)
                     .or_insert_with(|| {
                         self.texture_bank
                             .as_ref()
@@ -915,18 +955,20 @@ impl IsometricSurface {
                     .as_slice()
             };
             for (index, element) in boxes.iter().enumerate() {
-                for face in [
+                let face_parts = [
                     Face::Top,
                     Face::Bottom,
                     Face::PosX,
                     Face::NegX,
                     Face::PosZ,
                     Face::NegZ,
-                ] {
-                    // Distant LOD columns encode one sampled terrain height, not
-                    // a full 3D solid column. Their invented vertical walls
-                    // create false cliffs and unnecessary triangles at horizons.
-                    if voxel.span > 1 && face != Face::Top {
+                ]
+                .into_iter()
+                .filter(|f| voxel.span == 1 || *f == Face::Top)
+                .map(|f| (f, element, false))
+                .chain(wall_parts.iter().map(|(f, part)| (*f, part, true)));
+                for (face, element, is_wall) in face_parts {
+                    if is_wall && rendered_walls >= MAX_LOD_WALL_FACES {
                         continue;
                     }
                     // A lowered liquid surface is not on the block boundary.
@@ -955,7 +997,7 @@ impl IsometricSurface {
                         (None, None, false)
                     } else {
                         *json_face_cache
-                            .entry((key.clone(), index, face.flag()))
+                            .entry((key, index, face.flag()))
                             .or_insert_with(|| {
                                 let defined = self.texture_bank.as_ref().and_then(|bank| {
                                     bank.face_defined_at(&voxel.state, face, index, pos)
@@ -1073,6 +1115,9 @@ impl IsometricSurface {
                         block_entity: voxel.original_block_entity,
                         staged: voxel.staged,
                     });
+                    if is_wall {
+                        rendered_walls += 1;
+                    }
                     if out.len() >= MAX_RENDER_FACES + 4096 {
                         prune_scene_faces(&mut out, &self.surface, MAX_RENDER_FACES);
                     }
@@ -1081,6 +1126,9 @@ impl IsometricSurface {
         }
         prune_scene_faces(&mut out, &self.surface, MAX_RENDER_FACES);
         // Painter's algorithm: far to near. Same ordering is used for picking.
+        if cancelled() {
+            return None;
+        }
         out.sort_by(|a, b| {
             a.depth
                 .total_cmp(&b.depth)
@@ -1090,7 +1138,7 @@ impl IsometricSurface {
                 .then_with(|| a.pos.cmp(&b.pos))
                 .then_with(|| a.face.flag().cmp(&b.face.flag()))
         });
-        out
+        (!cancelled()).then_some(out)
     }
     fn pick_face(&self, p: Point, size: Size) -> Option<((i32, i32, i32), Face)> {
         // Per-pixel projected depth is more accurate than polygon-center
@@ -1464,6 +1512,17 @@ mod tests {
         assert!(!Arc::ptr_eq(&first, &changed));
     }
     #[test]
+    fn cancelled_projection_never_populates_shared_gpu_or_face_cache() {
+        let view = example();
+        let size = Size::new(800.0, 440.0);
+        assert!(view.faces_cached_cancellable(size, &|| true).is_none());
+        assert!(view.gpu_vertices_cancellable(size, &|| true).is_none());
+        assert!(view.frame_cache.lock().unwrap().is_none());
+        assert!(view.gpu_frame_cache.lock().unwrap().is_none());
+        let faces = view.faces_cached_cancellable(size, &|| false).unwrap();
+        assert!(!faces.is_empty());
+    }
+    #[test]
     fn selection_and_hover_do_not_invalidate_static_projected_faces() {
         let mut view = example();
         let size = Size::new(800.0, 440.0);
@@ -1502,6 +1561,62 @@ mod tests {
         let different = cloned_for_canvas.faces_cached(Size::new(801.0, 440.0));
         assert!(!Arc::ptr_eq(&a, &different));
         assert_eq!(different.len(), view.faces(Size::new(801.0, 440.0)).len());
+    }
+    #[test]
+    fn projected_lod_cliff_has_witnessed_side_and_never_is_pickable() {
+        use mcedit2_world::surface::{VoxelMaterial, ALL_FACES};
+        let mut view = example();
+        let tile = |x: i32, y: i32| SurfaceVoxel {
+            x,
+            y,
+            z: 0,
+            span: 4,
+            state: State {
+                name: "minecraft:stone".into(),
+                properties: vec![],
+            },
+            biome: None,
+            original_block_entity: false,
+            staged: false,
+            faces: ALL_FACES,
+            kind: VoxelMaterial::Solid,
+        };
+        Arc::make_mut(&mut view.surface).voxels = vec![tile(0, -50), tile(4, -53)];
+        let faces = view.faces(Size::new(900.0, 600.0));
+        assert!(
+            faces
+                .iter()
+                .any(|f| f.face == Face::PosX && f.pos == (0, -50, 0)),
+            "Sampled heights must generate an exposed positive-X cliff"
+        );
+        assert!(faces.iter().any(|f| f.face == Face::Top));
+        let side = faces.iter().find(|f| f.face == Face::PosX).unwrap();
+        assert!((side.vertex_depths[0] - side.vertex_depths[1]).abs() > 0.001);
+        // Projected approximate samples never enter the true editable selection.
+        let center = view.project([1.5, -49.5, 1.5], Size::new(900.0, 600.0)).0;
+        assert_eq!(view.pick_face(center, Size::new(900.0, 600.0)), None);
+    }
+    #[test]
+    fn projected_exact_border_retains_verified_lod_wall() {
+        use mcedit2_world::surface::{VoxelMaterial,ALL_FACES};
+        let tile=|x,z,y,span,faces|SurfaceVoxel{
+            x,y,z,span,
+            state:State{name:"minecraft:stone".into(),properties:vec![]},
+            biome:None,original_block_entity:false,staged:false,faces,
+            kind:VoxelMaterial::Solid,
+        };
+        let mut view=example();
+        let surface=Arc::make_mut(&mut view.surface);
+        surface.x=0;surface.z=0;surface.width=8;surface.depth=4;surface.y_max=-40;
+        surface.voxels=vec![tile(0,0,-50,4,ALL_FACES)];
+        for z in 0..4{surface.voxels.push(tile(4,z,-54,1,FACE_TOP));}
+        let faces=view.faces(Size::new(900.0,600.0));
+        let wall=faces.iter().find(|f|f.pos==(0,-50,0)&&f.face==Face::PosX)
+            .expect("Verified border must produce a projected LOD wall");
+        assert!((wall.vertex_depths[0]-wall.vertex_depths[1]).abs()>0.001);
+        Arc::make_mut(&mut view.surface).voxels.pop();
+        assert!(!view.faces(Size::new(900.0,600.0)).iter()
+            .any(|f|f.pos==(0,-50,0)&&f.face==Face::PosX));
     }
     #[test]
     fn distant_scene_fits_horizon_without_3px_minimum_scale() {

@@ -2,6 +2,16 @@
 //! prepacked resource atlas. Pixel sampling is performed on the GPU, not by
 //! subdividing faces on the CPU. Original source/pick ordering is unchanged.
 use crate::isometric::IsometricSurface;
+use mcedit2_world::sections::State;
+/// Read-only model identity borrowed directly from a loaded source voxel.
+/// The weighted model variant belongs in the key: identical blockstate
+/// properties can legitimately resolve to different original JSON geometry.
+/// Entries never outlive the corresponding immutable surface snapshot.
+pub(crate) type ModelCacheKey<'a> = (&'a str, &'a [(String, String)], u64);
+pub(crate) fn model_cache_key(state: &State, variant: u64) -> ModelCacheKey<'_> {
+    (state.name.as_str(), state.properties.as_slice(), variant)
+}
+
 use crate::textures::{AlphaMode, AtlasUv};
 use iced::{Color, Point, Size};
 use std::collections::HashMap;
@@ -85,7 +95,22 @@ fn quad_uv(region: &AtlasUv) -> [[f32; 2]; 4] {
 /// Conservative face and vertex limit; GPU path does not tessellate one
 /// Minecraft block into dozens of CPU-subdivided tiles anymore.
 pub(crate) fn build(view: &IsometricSurface, size: Size) -> Vec<Vertex> {
-    let faces = view.faces_cached(size);
+    build_cancellable(view, size, &|| false).expect("uninterruptible isometric mesh")
+}
+/// The mesh worker can abandon obsolete camera views between individual
+/// source faces. Never return an incomplete mesh for caching or uploading.
+pub(crate) fn build_cancellable(
+    view: &IsometricSurface,
+    size: Size,
+    cancelled: &impl Fn() -> bool,
+) -> Option<Vec<Vertex>> {
+    if cancelled() {
+        return None;
+    }
+    let faces = view.faces_cached_cancellable(size, cancelled)?;
+    if cancelled() {
+        return None;
+    }
     let mut out = Vec::with_capacity(faces.len().min(MAX_TRIANGLES / 2) * 6);
     let atlas = view.texture_bank.as_ref().and_then(|bank| bank.atlas());
     let mut style_cache: HashMap<
@@ -93,6 +118,9 @@ pub(crate) fn build(view: &IsometricSurface, size: Size) -> Vec<Vertex> {
         Option<([[f32; 2]; 4], AlphaMode, u32)>,
     > = HashMap::new();
     for face in faces.iter().take(MAX_TRIANGLES / 2) {
+        if cancelled() {
+            return None;
+        }
         let voxel = &view.surface.voxels[face.voxel_index];
         let variant = if voxel.span > 1 {
             0
@@ -173,7 +201,7 @@ pub(crate) fn build(view: &IsometricSurface, size: Size) -> Vec<Vertex> {
             page,
         );
     }
-    out
+    (!cancelled()).then_some(out)
 }
 #[cfg(test)]
 mod tests {
@@ -212,6 +240,29 @@ mod tests {
         assert_eq!(vertices[0].mode, AlphaMode::Blend as u32);
         assert_eq!(std::mem::size_of::<Vertex>(), 60);
         assert_eq!(vertices[0].world_mode, 0);
+    }
+    #[test]
+    fn borrowed_model_cache_keys_share_state_content_but_not_weighted_variants() {
+        use std::collections::HashMap;
+        let source = State {
+            name: "minecraft:oak_stairs".into(),
+            properties: vec![("facing".into(), "north".into())],
+        };
+        let equivalent = source.clone();
+        let other_orientation = State {
+            name: source.name.clone(),
+            properties: vec![("facing".into(), "south".into())],
+        };
+        let key = model_cache_key(&source, 2);
+        // A borrowed key must reference the source snapshot, not an allocated copy.
+        assert!(std::ptr::eq(key.0.as_ptr(), source.name.as_ptr()));
+        assert!(std::ptr::eq(key.1.as_ptr(), source.properties.as_ptr()));
+        let mut cache: HashMap<ModelCacheKey<'_>, u8> = HashMap::new();
+        cache.insert(key, 7);
+        assert_eq!(cache.get(&model_cache_key(&equivalent, 2)), Some(&7));
+        assert_eq!(cache.get(&model_cache_key(&source, 3)), None);
+        assert_eq!(cache.get(&model_cache_key(&other_orientation, 2)), None);
+        assert_eq!(cache.len(), 1);
     }
     #[test]
     fn gpu_style_cache_distinguishes_model_element_and_face() {

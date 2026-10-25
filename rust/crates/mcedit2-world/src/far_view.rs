@@ -3,7 +3,9 @@
 //! never used as edit targets or NBT provenance. No entity renderer is called.
 use crate::block_lookup::ReadOnlyRegionCache;
 use crate::editing::{Bounds, Session};
-use crate::surface::{material, SourceChunkTile, SurfaceView, SurfaceVoxel, ALL_FACES};
+use crate::surface::{
+    material, SourceChunkTile, SurfaceView, SurfaceVoxel, VoxelMaterial, ALL_FACES,
+};
 use crate::WorldError;
 use std::collections::BTreeSet;
 
@@ -176,6 +178,37 @@ pub fn empty_far_view(
         source_tiles: Vec::new(),
     })
 }
+/// At distant LOD, a single upper water/glass/leaves quad would conceal the
+/// real ground beneath a transparent or cutout texture. Retain at most one
+/// additional verified solid block from the *same* sampled source column.
+/// Air and non-solid blocks never become invented terrain. Exact voxel
+/// inspection (span 1) keeps its original single-column semantics.
+#[derive(Default)]
+struct FarLayers {
+    top: Option<(i32, crate::sections::State)>,
+    ground: Option<(i32, crate::sections::State)>,
+}
+impl FarLayers {
+    /// Return true when no more source blocks need to be examined.
+    fn observe(&mut self, y: i32, state: crate::sections::State, span: u8) -> bool {
+        if self.top.is_none() {
+            let transparent_top = matches!(
+                material(&state),
+                VoxelMaterial::Foliage | VoxelMaterial::Transparent | VoxelMaterial::Liquid
+            );
+            self.top = Some((y, state));
+            return span == 1 || !transparent_top;
+        }
+        if material(&state) == VoxelMaterial::Solid {
+            self.ground = Some((y, state));
+            return true;
+        }
+        false
+    }
+    fn layers(self) -> impl Iterator<Item = (i32, crate::sections::State)> {
+        self.top.into_iter().chain(self.ground)
+    }
+}
 /// Read a SINGLE verified source chunk. LOD spans cover a visual tile,
 /// sampling exactly one original column at its center. They are never
 /// passed to editing APIs, nor allowed to masquerade as exact picks.
@@ -240,7 +273,7 @@ pub fn inspect_far_chunk_cached(
             let sx = (dx + stride / 2).min(15);
             let sz = (dz + stride / 2).min(15);
             let mut known = false;
-            let mut chosen = None;
+            let mut layers = FarLayers::default();
             'height: for section in &sections {
                 let y0 = y_min.max(section.y as i32 * 16);
                 let y1 = y_max.min(section.y as i32 * 16 + 15);
@@ -259,8 +292,9 @@ pub fn inspect_far_chunk_cached(
                     ) {
                         continue;
                     }
-                    chosen = Some((y, state));
-                    break 'height;
+                    if layers.observe(y, state, request.span) {
+                        break 'height;
+                    }
                 }
             }
             if known {
@@ -268,7 +302,7 @@ pub fn inspect_far_chunk_cached(
             } else {
                 tile.unknown_columns += 1;
             }
-            if let Some((y, state)) = chosen {
+            for (y, state) in layers.layers() {
                 let wx = x + dx;
                 let wz = z + dz;
                 let kind = material(&state);
@@ -300,6 +334,40 @@ pub fn append_chunk(view: &mut SurfaceView, patch: FarChunkPatch) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn state(name: &str) -> crate::sections::State {
+        crate::sections::State {
+            name: name.into(),
+            properties: vec![],
+        }
+    }
+    #[test]
+    fn distant_canopy_preserves_verified_ground_without_inventing_more_layers() {
+        let mut selection = FarLayers::default();
+        assert!(!selection.observe(82, state("minecraft:oak_leaves"), 8));
+        assert!(!selection.observe(81, state("minecraft:oak_leaves"), 8));
+        assert!(selection.observe(72, state("minecraft:grass_block"), 8));
+        let layers: Vec<_> = selection.layers().collect();
+        assert_eq!(layers.len(), 2);
+        assert_eq!((layers[0].0, layers[1].0), (82, 72));
+        assert_eq!(layers[1].1.name, "minecraft:grass_block");
+    }
+    #[test]
+    fn exact_and_opaque_lod_columns_never_acquire_extra_ground() {
+        for (top, span) in [
+            ("minecraft:water", 1),
+            ("minecraft:stone", 4),
+            ("minecraft:glass", 1),
+        ] {
+            let mut selection = FarLayers::default();
+            assert!(selection.observe(90, state(top), span));
+            assert_eq!(selection.layers().count(), 1);
+        }
+        let mut water = FarLayers::default();
+        assert!(!water.observe(66, state("minecraft:water"), 16));
+        assert!(!water.observe(65, state("minecraft:water"), 16));
+        assert!(water.observe(61, state("minecraft:sand"), 16));
+        assert_eq!(water.layers().count(), 2);
+    }
     #[test]
     fn asynchronous_batch_budget_grows_only_as_source_sample_density_falls() {
         assert_eq!(batch_size_for(1), 12);

@@ -2,7 +2,7 @@
 //! model triangles and GPU perspective correction. No entity simulation and
 //! no implicit mutations to Java Region / Block Entity source NBT.
 use crate::{
-    gpu_mesh::{Quality, Vertex},
+    gpu_mesh::{model_cache_key, ModelCacheKey, Quality, Vertex},
     isometric::Face,
     models, palette,
     textures::{AlphaMode, TextureBank},
@@ -118,6 +118,8 @@ pub(crate) struct SpectatorScene {
     /// Pan/look only changes the small GPU camera uniform.
     pub cache: Arc<Mutex<Option<Arc<Vec<Vertex>>>>>,
     pub pending: Arc<Mutex<bool>>,
+    /// Source-exact chunk fragment cache shared across streamed scenes.
+    pub chunk_cache: Arc<Mutex<crate::chunk_mesh_cache::ChunkMeshCache>>,
 }
 fn rgba(voxel: &SurfaceVoxel, face: Face) -> Color {
     let base = palette::tint(&voxel.state, voxel.kind, face == Face::Top)
@@ -214,9 +216,19 @@ fn internally_occluded(parts: &[models::Part], index: usize, face: Face) -> bool
     })
 }
 pub(crate) fn build(view: &SpectatorScene) -> Vec<Vertex> {
+    build_cancellable(view, &|| false).expect("uninterruptible spectator mesh")
+}
+/// Abandon stale meshes between source voxels. An interrupted build returns
+/// no vertices at all: incomplete geometry must never be cached or uploaded.
+pub(crate) fn build_cancellable(
+    view: &SpectatorScene,
+    cancelled: &impl Fn() -> bool,
+) -> Option<Vec<Vertex>> {
+    if cancelled() {
+        return None;
+    }
     let mut out = Vec::new();
-    let mut cache: HashMap<(String, Vec<(String, String)>, u64), Vec<models::Part>> =
-        HashMap::new();
+    let mut cache: HashMap<ModelCacheKey<'_>, Vec<models::Part>> = HashMap::new();
     let atlas = view.texture_bank.as_ref().and_then(|b| b.atlas());
     let default_uv = atlas
         .map(|a| {
@@ -229,6 +241,9 @@ pub(crate) fn build(view: &SpectatorScene) -> Vec<Vertex> {
         })
         .unwrap_or([[0.5, 0.5]; 4]);
     let bank = view.texture_bank.as_deref();
+    let distant = models::DistantElevation::new(&view.surface);
+    let mut rendered_walls = 0usize;
+    const MAX_LOD_WALL_FACES: usize = MAX_SPECTATOR_FACES / 8;
     let liquid_cells: HashMap<(i32, i32, i32), &mcedit2_world::sections::State> = view
         .surface
         .voxels
@@ -240,7 +255,7 @@ pub(crate) fn build(view: &SpectatorScene) -> Vec<Vertex> {
     // repeated states. Cache sampled LOD face textures by exact palette
     // properties and the deterministic weighted model variant.
     let mut styles: HashMap<
-        (String, Vec<(String, String)>, u64, u8, usize),
+        (ModelCacheKey<'_>, u8, usize),
         Option<([[f32; 2]; 4], AlphaMode, u32)>,
     > = HashMap::new();
     // A dense near-field must not exhaust the mesh before distant LOD.
@@ -250,7 +265,46 @@ pub(crate) fn build(view: &SpectatorScene) -> Vec<Vertex> {
     } else {
         MAX_SPECTATOR_FACES
     };
+    let origin = [view.surface.x, view.surface.y_min, view.surface.z];
+    let style = crate::chunk_mesh_cache::ChunkMeshCache::style(
+        view.texture_bank.as_ref(), view.show_textures, view.quality,
+    );
+    // Preserve source draw order and layered LOD visibility. Contiguous exact
+    // samples of an original chunk can reuse their own complete vertex block.
+    let mut runs: Vec<(Option<(i32, i32)>, Vec<&SurfaceVoxel>)> = Vec::new();
     for voxel in &view.surface.voxels {
+        let chunk = (voxel.span == 1).then(|| (
+            voxel.x.div_euclid(16), voxel.z.div_euclid(16),
+        ));
+        if let Some(last) = runs.last_mut() {
+            if last.0 == chunk {
+                last.1.push(voxel);
+                continue;
+            }
+        }
+        runs.push((chunk, vec![voxel]));
+    }
+    for (chunk, run) in runs {
+        if cancelled() { return None; }
+        let id = chunk.map(|(cx, cz)| {
+            let first = run[0];
+            (cx, cz, first.x, first.y, first.z)
+        });
+        let before = out.len();
+        if let Some(id) = id {
+            let cached = view.chunk_cache.lock().unwrap_or_else(|e| e.into_inner())
+                .get(style, id, &run);
+            if let Some((vertices, from_origin)) = cached {
+                if out.len().saturating_add(vertices.len()) <= exact_limit * 6 {
+                    crate::chunk_mesh_cache::ChunkMeshCache::append_rebased(
+                        &mut out, &vertices, from_origin, origin,
+                    );
+                    continue;
+                }
+            }
+        }
+        for voxel in &run {
+            if cancelled() { return None; }
         let limit = if voxel.span == 1 {
             exact_limit
         } else {
@@ -262,6 +316,13 @@ pub(crate) fn build(view: &SpectatorScene) -> Vec<Vertex> {
             }
             break;
         }
+        // Build only witnessed neighboring height transitions. Reserve
+        // most of the mesh budget for original sampled horizon top faces.
+        let wall_parts = if voxel.span > 1 && rendered_walls < MAX_LOD_WALL_FACES {
+            distant.walls(voxel)
+        } else {
+            Vec::new()
+        };
         let pos = (voxel.x, voxel.y, voxel.z);
         // Distant samples came from the CENTER of their source tile,
         // not the lower corner. Resolve variant/texture using that same
@@ -272,11 +333,9 @@ pub(crate) fn build(view: &SpectatorScene) -> Vec<Vertex> {
             voxel.z.saturating_add(voxel.span as i32 / 2),
         );
         let variant = bank.map_or(0, |b| b.model_variant_key(&voxel.state, sample));
-        let key = (
-            voxel.state.name.clone(),
-            voxel.state.properties.clone(),
-            variant,
-        );
+        // Borrow the original palette strings. Cloning the whole blockstate for
+        // every face caused avoidable allocations during stream updates.
+        let key = model_cache_key(&voxel.state, variant);
         let far = [models::fluid_part(&voxel.state, false)
             .unwrap_or_else(|| models::Part::cube(models::Box3::FULL))];
         let same_above = voxel
@@ -308,11 +367,16 @@ pub(crate) fn build(view: &SpectatorScene) -> Vec<Vertex> {
                 .as_slice()
         };
         for (index, element) in elements.iter().enumerate() {
-            for face in FACES {
+            let face_parts = FACES
+                .into_iter()
+                .filter(|f| voxel.span == 1 || *f == Face::Top)
+                .map(|f| (f, element, false))
+                .chain(wall_parts.iter().map(|(f, part)| (*f, part, true)));
+            for (face, element, is_wall) in face_parts {
                 if out.len() / 6 >= limit {
                     break;
                 }
-                if voxel.span > 1 && face != Face::Top {
+                if is_wall && rendered_walls >= MAX_LOD_WALL_FACES {
                     continue;
                 }
                 if voxel.kind == VoxelMaterial::Liquid
@@ -321,7 +385,10 @@ pub(crate) fn build(view: &SpectatorScene) -> Vec<Vertex> {
                 {
                     continue;
                 }
-                if !should_emit(voxel, element, face, bank, index, pos) {
+                // Sampled LOD geometry has no exact original JSON faces;
+                // never let one source model's cullface erase a verified
+                // height-transition wall or a horizon sample.
+                if voxel.span == 1 && !should_emit(voxel, element, face, bank, index, pos) {
                     continue;
                 }
                 // Explicit JSON faces without cullface are still subject to
@@ -352,13 +419,7 @@ pub(crate) fn build(view: &SpectatorScene) -> Vec<Vertex> {
                 // the corresponding PNG atlas UV rather than flat color.
                 let style = if view.show_textures {
                     *styles
-                        .entry((
-                            voxel.state.name.clone(),
-                            voxel.state.properties.clone(),
-                            variant,
-                            face as u8,
-                            index,
-                        ))
+                        .entry((key, face as u8, index))
                         .or_insert_with(|| {
                             bank.and_then(|b| {
                                 b.atlas_face_style_at(&voxel.state, face, index, sample)
@@ -404,10 +465,21 @@ pub(crate) fn build(view: &SpectatorScene) -> Vec<Vertex> {
                     mode = AlphaMode::Blend;
                 }
                 quad_vertices(&mut out, corners, uv, shade, mode, page);
+                if is_wall {
+                    rendered_walls += 1;
+                }
             }
         }
     }
-    out
+        if let Some(id) = id {
+            // Never retain fragments truncated at the global face budget.
+            if out.len() / 6 < exact_limit && !cancelled() {
+                view.chunk_cache.lock().unwrap_or_else(|e| e.into_inner())
+                    .insert(style, id, &run, origin, out[before..].to_vec());
+            }
+        }
+    }
+    (!cancelled()).then_some(out)
 }
 pub(crate) struct Controls;
 #[derive(Default)]
@@ -515,6 +587,160 @@ mod tests {
         assert!(!internally_occluded(&parts, 0, Face::NegX));
     }
     #[test]
+    fn source_verified_lod_cliff_emits_real_side_triangles_without_guessing() {
+        use mcedit2_world::sections::State;
+        use mcedit2_world::surface::ALL_FACES;
+        let tile = |x: i32, y: i32| SurfaceVoxel {
+            x,
+            y,
+            z: 0,
+            span: 4,
+            state: State {
+                name: "minecraft:stone".into(),
+                properties: vec![],
+            },
+            biome: None,
+            staged: false,
+            original_block_entity: false,
+            faces: ALL_FACES,
+            kind: VoxelMaterial::Solid,
+        };
+        let source = SurfaceView {
+            x: 0,
+            z: 0,
+            y_min: 0,
+            y_max: 95,
+            width: 16,
+            depth: 16,
+            voxels: vec![tile(0, 70), tile(4, 65)],
+            source_tiles: vec![],
+            source_chunks: 2,
+            missing_columns: 0,
+        };
+        let scene = SpectatorScene {
+            surface: Arc::new(source.clone()),
+            texture_bank: None,
+            show_textures: false,
+            camera: Camera::default(),
+            quality: Quality::Balanced,
+            cache: Arc::new(Mutex::new(None)),
+            pending: Arc::new(Mutex::new(false)),
+            chunk_cache: Arc::new(Mutex::new(crate::chunk_mesh_cache::ChunkMeshCache::default())),
+        };
+        let vertices = build(&scene);
+        assert_eq!(vertices.len(), 18); // Two original top tiles and one verified side
+        let cliff_x = 3.5_f32;
+        assert!(vertices
+            .iter()
+            .any(|v| (v.xyz[0] - cliff_x).abs() < 0.001 && (v.xyz[1] - 65.5).abs() < 0.001));
+        assert!(vertices
+            .iter()
+            .any(|v| (v.xyz[0] - cliff_x).abs() < 0.001 && (v.xyz[1] - 70.5).abs() < 0.001));
+        // Unread neighbor: one top plane only, never an invented cliff.
+        let mut without_neighbor = source;
+        without_neighbor.voxels.pop();
+        let unknown = SpectatorScene {
+            surface: Arc::new(without_neighbor),
+            ..scene
+        };
+        assert_eq!(build(&unknown).len(), 6);
+    }
+    #[test]
+    fn verified_exact_border_generates_actual_gpu_wall() {
+        use mcedit2_world::sections::State;
+        use mcedit2_world::surface::{ALL_FACES,FACE_TOP};
+        let tile=|x,z,y,span,faces|SurfaceVoxel{
+            x,y,z,span,
+            state:State{name:"minecraft:stone".into(),properties:vec![]},
+            biome:None,staged:false,original_block_entity:false,faces,
+            kind:VoxelMaterial::Solid,
+        };
+        let mut source=SurfaceView{
+            x:0,z:0,y_min:40,y_max:111,width:8,depth:4,
+            voxels:vec![tile(0,0,80,4,ALL_FACES)],
+            source_tiles:vec![],source_chunks:2,missing_columns:0,
+        };
+        for z in 0..4{source.voxels.push(tile(4,z,74,1,FACE_TOP));}
+        let scene=SpectatorScene{
+            surface:Arc::new(source.clone()),texture_bank:None,
+            show_textures:false,camera:Camera::default(),
+            quality:Quality::Balanced,cache:Arc::new(Mutex::new(None)),
+            pending:Arc::new(Mutex::new(false)),
+            chunk_cache:Arc::new(Mutex::new(crate::chunk_mesh_cache::ChunkMeshCache::default())),
+        };
+        let mesh=build(&scene);
+        assert_eq!(mesh.len(),36);
+        // GPU coordinates are relative to surface.y_min.
+        assert!(mesh.iter().any(|v|(v.xyz[0]-3.5).abs()<0.001
+            &&(v.xyz[1]-40.5).abs()<0.001));
+        assert!(mesh.iter().any(|v|(v.xyz[0]-3.5).abs()<0.001
+            &&(v.xyz[1]-34.5).abs()<0.001));
+        source.voxels.pop();
+        let incomplete=SpectatorScene{surface:Arc::new(source),..scene};
+        assert_eq!(build(&incomplete).len(),24);
+    }
+    #[test]
+    fn layered_far_tiles_show_ground_beneath_canopy_without_leaf_cliff() {
+        use mcedit2_world::sections::State;
+        use mcedit2_world::surface::ALL_FACES;
+        let tile = |x, y, name: &str, kind| SurfaceVoxel {
+            x,
+            y,
+            z: 0,
+            span: 4,
+            state: State {
+                name: name.into(),
+                properties: vec![],
+            },
+            biome: None,
+            staged: false,
+            original_block_entity: false,
+            faces: ALL_FACES,
+            kind,
+        };
+        let source = SurfaceView {
+            x: 0,
+            z: 0,
+            y_min: 0,
+            y_max: 120,
+            width: 8,
+            depth: 4,
+            voxels: vec![
+                tile(0, 90, "minecraft:oak_leaves", VoxelMaterial::Foliage),
+                tile(0, 68, "minecraft:grass_block", VoxelMaterial::Solid),
+                tile(4, 65, "minecraft:stone", VoxelMaterial::Solid),
+            ],
+            source_tiles: vec![],
+            source_chunks: 2,
+            missing_columns: 0,
+        };
+        let scene = SpectatorScene {
+            surface: Arc::new(source),
+            texture_bank: None,
+            show_textures: false,
+            camera: Camera::default(),
+            quality: Quality::Balanced,
+            cache: Arc::new(Mutex::new(None)),
+            pending: Arc::new(Mutex::new(false)),
+            chunk_cache: Arc::new(Mutex::new(crate::chunk_mesh_cache::ChunkMeshCache::default())),
+        };
+        let vertices = build(&scene);
+        // 3 true sampled surfaces and one ground-height side, not a giant
+        // cliff extending from leaf canopy Y=90 to the adjacent Y=65 stone.
+        assert_eq!(vertices.len(), 24);
+        assert!(vertices.iter().any(|v| (v.xyz[1] - 90.5).abs() < 0.001));
+        assert!(vertices.iter().any(|v| (v.xyz[1] - 68.5).abs() < 0.001));
+        assert!(vertices.iter().any(|v| (v.xyz[1] - 65.5).abs() < 0.001));
+        let wall_x = 3.5;
+        assert!(vertices
+            .iter()
+            .any(|v| (v.xyz[0] - wall_x).abs() < 0.001 && (v.xyz[1] - 68.5).abs() < 0.001));
+        // The canopy's own top quad legitimately touches X=3.5 at Y=90.5.
+        // Only the ground cliff's six vertices may be tested for a bogus
+        // vertical rise; here the single cliff is emitted after the ground.
+        assert!(vertices[12..18].iter().all(|v| v.xyz[1] <= 68.5 + 0.001));
+    }
+    #[test]
     fn minecraft_yaw_zero_faces_positive_z_and_pitch_points_down() {
         let mut c = Camera::default();
         let (right, up, front) = c.basis();
@@ -588,7 +814,9 @@ mod tests {
             quality: Quality::Balanced,
             cache: Arc::new(Mutex::new(None)),
             pending: Arc::new(Mutex::new(false)),
+            chunk_cache: Arc::new(Mutex::new(crate::chunk_mesh_cache::ChunkMeshCache::default())),
         };
+        assert!(build_cancellable(&renderer, &|| true).is_none());
         let vertices = build(&renderer);
         assert_eq!(vertices.len(), 36);
         assert!(vertices.iter().all(|v| v.world_mode == 1));
@@ -601,6 +829,68 @@ mod tests {
             ..renderer
         };
         assert!(build(&renderer).is_empty());
+    }
+    #[test]
+    fn exact_chunk_mesh_survives_recenter_and_rejects_changed_source() {
+        use mcedit2_world::{sections::State, surface::FACE_TOP};
+        let voxel = SurfaceVoxel {
+            x: 1,
+            y: 80,
+            z: 2,
+            span: 1,
+            state: State {
+                name: "minecraft:stone".into(),
+                properties: vec![],
+            },
+            biome: None,
+            staged: false,
+            original_block_entity: false,
+            faces: FACE_TOP,
+            kind: VoxelMaterial::Solid,
+        };
+        let scene = SpectatorScene {
+            surface: Arc::new(SurfaceView {
+                x: 0, z: 0, y_min: 64, y_max: 100,
+                width: 16, depth: 16,
+                voxels: vec![voxel],
+                missing_columns: 0, source_chunks: 1, source_tiles: vec![],
+            }),
+            texture_bank: None,
+            show_textures: false,
+            camera: Camera::default(),
+            quality: Quality::Balanced,
+            cache: Arc::new(Mutex::new(None)),
+            pending: Arc::new(Mutex::new(false)),
+            chunk_cache: Arc::new(Mutex::new(crate::chunk_mesh_cache::ChunkMeshCache::default())),
+        };
+        let first = build(&scene);
+        assert_eq!(first.len(), 6);
+        assert_eq!(scene.chunk_cache.lock().unwrap().entry_count(), 1);
+        let mut moved = (*scene.surface).clone();
+        moved.x = -16;
+        moved.z = 16;
+        moved.y_min = 56;
+        let shifted = SpectatorScene {
+            surface: Arc::new(moved),
+            ..scene.clone()
+        };
+        let second = build(&shifted);
+        assert_eq!(second.len(), 6);
+        assert_eq!(shifted.chunk_cache.lock().unwrap().entry_count(), 1);
+        for (a, b) in first.iter().zip(second.iter()) {
+            assert_eq!(a.xyz[0] + 16.0, b.xyz[0]);
+            assert_eq!(a.xyz[1] + 8.0, b.xyz[1]);
+            assert_eq!(a.xyz[2] - 16.0, b.xyz[2]);
+            assert_eq!(a.uv, b.uv);
+            assert_eq!(a.rgba, b.rgba);
+        }
+        let mut changed = (*shifted.surface).clone();
+        changed.voxels[0].faces = 0;
+        let changed_scene = SpectatorScene {
+            surface: Arc::new(changed),
+            ..shifted
+        };
+        assert!(build(&changed_scene).is_empty());
     }
     #[test]
     fn speed_is_normalized_and_flight_never_mutates_source() {

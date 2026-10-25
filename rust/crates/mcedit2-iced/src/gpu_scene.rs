@@ -9,7 +9,6 @@ use iced::wgpu;
 use iced::widget::shader::{self, Viewport};
 use iced::{mouse, Rectangle, Size};
 use std::borrow::Cow;
-use std::hash::Hasher;
 use std::sync::Arc;
 
 const WGSL: &str = r#"
@@ -130,6 +129,18 @@ fn to_clip(vertex: &mut Vertex, size: Size, min_depth: f32, max_depth: f32) {
 }
 impl IsometricSurface {
     pub(crate) fn gpu_vertices_cached(&self, size: Size) -> Arc<Vec<Vertex>> {
+        self.gpu_vertices_cancellable(size, &|| false)
+            .expect("uninterruptible isometric GPU mesh")
+    }
+    /// Only committed complete meshes enter the shared per-view cache.
+    pub(crate) fn gpu_vertices_cancellable(
+        &self,
+        size: Size,
+        cancelled: &impl Fn() -> bool,
+    ) -> Option<Arc<Vec<Vertex>>> {
+        if cancelled() {
+            return None;
+        }
         {
             let cache = self
                 .gpu_frame_cache
@@ -137,11 +148,11 @@ impl IsometricSurface {
                 .unwrap_or_else(|e| e.into_inner());
             if let Some((cached_size, vertices)) = &*cache {
                 if *cached_size == size {
-                    return Arc::clone(vertices);
+                    return Some(Arc::clone(vertices));
                 }
             }
         }
-        let mut vertices = gpu_mesh::build(self, size);
+        let mut vertices = gpu_mesh::build_cancellable(self, size, cancelled)?;
         let depth_min = vertices
             .iter()
             .map(|v| v.depth)
@@ -150,16 +161,25 @@ impl IsometricSurface {
             .iter()
             .map(|v| v.depth)
             .fold(f32::NEG_INFINITY, f32::max);
-        for vertex in &mut vertices {
+        for (index, vertex) in vertices.iter_mut().enumerate() {
+            if index % 1024 == 0 && cancelled() {
+                return None;
+            }
             to_clip(vertex, size, depth_min, depth_max);
+        }
+        if cancelled() {
+            return None;
         }
         let vertices = Arc::new(vertices);
         let mut cache = self
             .gpu_frame_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        if cancelled() {
+            return None;
+        }
         *cache = Some((size, Arc::clone(&vertices)));
-        vertices
+        Some(vertices)
     }
 }
 impl shader::Program<Message> for GpuScene {
@@ -211,8 +231,13 @@ pub(crate) struct Pipeline {
     buffer: wgpu::Buffer,
     capacity: u64,
     count: u32,
-    last_mesh: Option<(usize, u64)>,
-    last_mesh_identity: Option<(usize, usize)>,
+    /// Last *uploaded* vertex order, including transparency sorting. Retaining
+    /// the Arc is cheap for ordinary source meshes and permits suffix writes
+    /// instead of re-uploading unchanged exact chunks each stream update.
+    last_uploaded_vertices: Option<Arc<Vec<Vertex>>>,
+    /// Hold the original Arc to make mesh identity pointer comparisons safe:
+    /// dropping it would let a later allocator reuse the same address.
+    last_source_mesh: Option<Arc<Vec<Vertex>>>,
     atlas: Option<Arc<TextureAtlas>>,
     atlas_texture: wgpu::Texture,
     atlas_layout: wgpu::BindGroupLayout,
@@ -227,10 +252,31 @@ pub(crate) struct Pipeline {
     camera_buffer: wgpu::Buffer,
     last_camera: Option<crate::spectator::CameraUniform>,
 }
-fn mesh_fingerprint(bytes: &[u8]) -> (usize, u64) {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    hasher.write(bytes);
-    (bytes.len(), hasher.finish())
+/// Determine whether a redraw is needed and the first vertex whose bytes
+/// must be uploaded. Only a common prefix may safely stay on an existing
+/// wgpu buffer: insertions or removals shift all subsequent vertex offsets.
+/// The entire remainder is uploaded as one contiguous, aligned write.
+fn mesh_upload_suffix(
+    previous: Option<&[Vertex]>,
+    current: &[Vertex],
+    buffer_resized: bool,
+) -> (bool, Option<usize>) {
+    if buffer_resized || previous.is_none() {
+        return (true, (!current.is_empty()).then_some(0));
+    }
+    let previous = previous.expect("checked above");
+    let shared = previous.len().min(current.len());
+    let change = previous[..shared]
+        .iter()
+        .zip(&current[..shared])
+        .position(|(a, b)| bytemuck::bytes_of(a) != bytemuck::bytes_of(b));
+    let first_upload = change.or_else(|| (current.len() > previous.len()).then_some(shared));
+    // Removing a trailing chunk only changes draw count; the GPU prefix is
+    // already correct and writing an empty range would be invalid in wgpu.
+    (
+        first_upload.is_some() || previous.len() != current.len(),
+        first_upload,
+    )
 }
 /// Perspective transparency is emitted as exactly two adjacent triangles
 /// per model face. Sort whole six-vertex quads, never individual triangles:
@@ -269,13 +315,6 @@ fn ordered_transparent_vertices(
         sorted[destination..destination + 6].copy_from_slice(&vertices[source..source + 6]);
     }
     sorted
-}
-fn should_upload_mesh(
-    previous: Option<(usize, u64)>,
-    current: (usize, u64),
-    buffer_was_resized: bool,
-) -> bool {
-    buffer_was_resized || previous != Some(current)
 }
 fn make_texture(device: &wgpu::Device, width: u32, height: u32, layers: u32) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
@@ -589,8 +628,8 @@ impl shader::Pipeline for Pipeline {
             buffer,
             capacity,
             count: 0,
-            last_mesh: None,
-            last_mesh_identity: None,
+            last_uploaded_vertices: None,
+            last_source_mesh: None,
             atlas: None,
             atlas_texture,
             atlas_layout,
@@ -617,24 +656,34 @@ impl shader::Primitive for Primitive {
         bounds: &Rectangle,
         _: &Viewport,
     ) {
-        let identity = (Arc::as_ptr(&self.vertices) as usize, self.vertices.len());
+        let mesh_identity_changed = pipeline
+            .last_source_mesh
+            .as_ref()
+            .is_none_or(|previous| !Arc::ptr_eq(previous, &self.vertices));
         let changed_camera = pipeline.last_camera != self.camera;
         let needs_transparent_sort = self.camera.is_some()
             && self
                 .vertices
                 .iter()
                 .any(|v| v.mode == 2 && v.world_mode == 1);
-        let mesh_identity_changed = pipeline.last_mesh_identity != Some(identity);
         let resort = needs_transparent_sort && (changed_camera || mesh_identity_changed);
-        let ordered = if resort {
-            self.camera
-                .as_ref()
-                .map(|camera| ordered_transparent_vertices(self.vertices.as_slice(), camera))
-        } else {
+        // Transparent ordering is itself the uploaded representation. Reuse
+        // it across unchanged camera frames instead of replacing it with
+        // original (unsorted) vertex order on a redraw.
+        let unchanged_scene = !mesh_identity_changed && !resort;
+        let uploaded = if unchanged_scene {
             None
+        } else if resort {
+            self.camera.as_ref().map(|camera| {
+                Arc::new(ordered_transparent_vertices(
+                    self.vertices.as_slice(),
+                    camera,
+                ))
+            })
+        } else {
+            Some(Arc::clone(&self.vertices))
         };
-        let bytes = bytemuck::cast_slice(ordered.as_deref().unwrap_or(self.vertices.as_slice()));
-        let needed = bytes.len() as u64;
+        let needed = (self.vertices.len() * std::mem::size_of::<Vertex>()) as u64;
         let resized_mesh = needed > pipeline.capacity;
         if resized_mesh {
             pipeline.capacity = needed.next_power_of_two();
@@ -645,20 +694,31 @@ impl shader::Primitive for Primitive {
                 mapped_at_creation: false,
             });
         }
-        let changed_mesh = if !resized_mesh && !mesh_identity_changed && !resort {
-            false
+        let (changed_mesh, first_upload) = if unchanged_scene && !resized_mesh {
+            (false, None)
         } else {
-            let fingerprint = mesh_fingerprint(bytes);
-            let changed = should_upload_mesh(pipeline.last_mesh, fingerprint, resized_mesh);
-            pipeline.last_mesh = Some(fingerprint);
-            // A new camera direction can change the ordering, but if the
-            // order remains byte-identical no GPU vertex upload is needed.
-            changed
+            let current = uploaded.as_ref().unwrap_or(&self.vertices);
+            mesh_upload_suffix(
+                pipeline
+                    .last_uploaded_vertices
+                    .as_deref()
+                    .map(Vec::as_slice),
+                current,
+                resized_mesh,
+            )
         };
-        pipeline.last_mesh_identity = Some(identity);
-        if changed_mesh && !bytes.is_empty() {
-            queue.write_buffer(&pipeline.buffer, 0, bytes);
+        if let Some(first) = first_upload {
+            let current = uploaded.as_ref().unwrap_or(&self.vertices);
+            let offset = first * std::mem::size_of::<Vertex>();
+            let bytes = bytemuck::cast_slice::<Vertex, u8>(&current[first..]);
+            // Vertex is Pod/repr(C), so start offsets and data lengths are
+            // multiples of the four-byte wgpu queue.write_buffer alignment.
+            queue.write_buffer(&pipeline.buffer, offset as u64, bytes);
         }
+        if let Some(vertices) = uploaded {
+            pipeline.last_uploaded_vertices = Some(vertices);
+        }
+        pipeline.last_source_mesh = Some(Arc::clone(&self.vertices));
         pipeline.count = self.vertices.len() as u32;
         let changed_atlas = match (&pipeline.atlas, &self.atlas) {
             (Some(old), Some(new)) => !Arc::ptr_eq(old, new),
@@ -938,17 +998,79 @@ mod tests {
             first
         );
     }
+    fn gpu_test_quad(id: f32) -> [Vertex; 6] {
+        [Vertex {
+            xy: [0.0; 2],
+            depth: id,
+            rgba: [1.0; 4],
+            uv: [0.0; 2],
+            mode: 0,
+            xyz: [id, 0.0, 0.0],
+            world_mode: 1,
+            atlas_page: 0,
+        }; 6]
+    }
     #[test]
-    fn identical_projected_mesh_skips_expensive_gpu_buffer_upload() {
-        let first = mesh_fingerprint(&[3, 1, 4, 1, 5, 9]);
-        let same = mesh_fingerprint(&[3, 1, 4, 1, 5, 9]);
-        let changed = mesh_fingerprint(&[3, 1, 4, 1, 5, 8]);
-        assert_eq!(first, same);
-        assert_ne!(first, changed);
-        assert!(!should_upload_mesh(Some(first), same, false));
-        assert!(should_upload_mesh(Some(first), changed, false));
-        assert!(should_upload_mesh(Some(first), same, true));
-        assert!(should_upload_mesh(None, same, false));
+    fn gpu_upload_avoids_rewriting_unchanged_prefix_and_handles_shorter_mesh() {
+        let a = gpu_test_quad(1.0);
+        let b = gpu_test_quad(2.0);
+        let c = gpu_test_quad(3.0);
+        let original = [a.as_slice(), b.as_slice()].concat();
+        let appended = [a.as_slice(), b.as_slice(), c.as_slice()].concat();
+        assert_eq!(
+            mesh_upload_suffix(Some(&original), &original, false),
+            (false, None)
+        );
+        assert_eq!(
+            mesh_upload_suffix(Some(&original), &appended, false),
+            (true, Some(12))
+        );
+        assert_eq!(
+            mesh_upload_suffix(Some(&appended), &original, false),
+            (true, None)
+        );
+        assert_eq!(mesh_upload_suffix(None, &original, false), (true, Some(0)));
+        assert_eq!(
+            mesh_upload_suffix(Some(&original), &original, true),
+            (true, Some(0))
+        );
+    }
+    #[test]
+    fn replacing_middle_chunk_uploads_entire_shifted_suffix() {
+        let a = gpu_test_quad(1.0);
+        let b = gpu_test_quad(2.0);
+        let c = gpu_test_quad(3.0);
+        let d = gpu_test_quad(4.0);
+        let old = [a.as_slice(), b.as_slice(), c.as_slice()].concat();
+        let new = [a.as_slice(), d.as_slice(), c.as_slice()].concat();
+        assert_eq!(mesh_upload_suffix(Some(&old), &new, false), (true, Some(6)));
+        let shifted = [a.as_slice(), c.as_slice()].concat();
+        assert_eq!(
+            mesh_upload_suffix(Some(&old), &shifted, false),
+            (true, Some(6))
+        );
+    }
+    #[test]
+    fn bitwise_vertex_comparison_is_stable_across_identical_allocations() {
+        let original = gpu_test_quad(1.0).to_vec();
+        let another = original.clone();
+        assert_eq!(
+            mesh_upload_suffix(Some(&original), &another, false),
+            (false, None)
+        );
+        // NaN channels have unequal float comparisons, but identical Pod
+        // bytes must not trigger needless uploads between scene snapshots.
+        let mut nan = original.clone();
+        nan[0].depth = f32::from_bits(0x7fc0_0001);
+        let same_nan = nan.clone();
+        assert_eq!(
+            mesh_upload_suffix(Some(&nan), &same_nan, false),
+            (false, None)
+        );
+        assert_eq!(
+            mesh_upload_suffix(Some(&original), &nan, false),
+            (true, Some(0))
+        );
     }
     #[test]
     fn vertex_world_depth_maps_nearest_to_zero_and_farthest_to_one() {
