@@ -652,3 +652,53 @@ This makes the new nested scalar surgery discoverable in the GUI without
 rewriting original modded arrays, inventories or sibling payloads.
 All five rounds are now complete; one check/test-only Linux/Windows CI
 may run. Packaging and binary builds remain manual only.
+
+## Migration cycle — Major commit 1/5: Sponge Schematic v3
+
+The native Java edition block-only interchange reads and exports the official
+v3 root `Schematic` compound with nested `Blocks.Palette` and `Blocks.Data`
+VarInts. Version-3 importer enforces exact original DataVersion, bounded
+volume/palette size, zero offsets and empty BE/Entity/Biome containers.
+It cannot silently drop original modded inventories or entities and never
+writes original region data on import preview. iced adds separate v3 export
+and guarded paste preview alongside v2 and numeric legacy schematics.
+
+## Major 2/5 — 3D geometry editing tools
+
+Five native original-world-safe brushes (hollow box, ellipsoid, hollow
+ellipsoid, Y-cylinder and Y-cylinder shell) now share the strict bounded
+block editor. They only read/mutate voxels in the actual brush mask, refuse
+original BE collisions and missing source Sections, use exact optional
+block filters, and stage as one Undo/Redo group. iced exposes dedicated
+preview commands; no world files are written during brush previews.
+
+## Major feature 3/5 — isometric camera controls and world-space picking
+
+The iced 3D surface supports bounded zoom (0.5x–3x), XY pan, four viewing
+quarters and camera reset, with selected block highlighting. Drawn top and
+side polygon geometry shares the same transforms with original XYZ mouse
+picking; the NBT world/editor overlays remain unchanged by camera actions.
+
+## Major 4/5 — versioned multi-operation safe plugin engine
+
+The declarative plugin protocol now accepts v2 `.mcedit2plugin.json`
+manifests with up to 24 dependent ReplaceBlocks/Brush actions, optional
+exact source DataVersion and dimension constraints. Every action is safely
+simulated on a cloned original-world Session; its resulting effective block
+states feed the next action, including the new 3D geometry masks. Only after
+the entire sequence passes strict original BE/source preflight is the final
+state compressed into ONE bounded (<=4096 distinct cells) preview and one
+Undo/Redo group. Existing v1 manifests remain supported; neither version
+executes untrusted Python, shell or native code. Iced's plugin preview UI
+accepts both manifest versions.
+
+## Major 5/5 — original Java entity sidecar catalog and snapshots
+
+Recognizes both legacy embedded Entities lists and separate modern
+`entities/r.X.Z.mca` files. The strict read-only catalog validates actual
+entity Region chunk Position metadata, reports modded entity IDs, original
+Compound SHA-256, tag counts and optional finite Double positions. An
+external create-new `.mcedit2entities` file stores exact original entity
+chunk NBT and full source provenance; verification refuses changed source
+bytes. iced adds entity inspection, export and source verification. No
+entity mutation or hidden BE serialization is enabled.

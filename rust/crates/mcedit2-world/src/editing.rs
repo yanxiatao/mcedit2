@@ -71,6 +71,42 @@ impl Bounds {
         usize::try_from(count).map_err(|_| refuse("Selection volume overflows address size"))
     }
 }
+/// Exact original-coordinate 3D edit masks; no chunks or Sections generated.
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+pub enum BrushShape{HollowBox,Ellipsoid,EllipsoidShell,CylinderY,CylinderShellY}
+fn brush_inside(shape:BrushShape,bounds:Bounds,p:Position)->bool{
+    let min=bounds.minimum;let max=bounds.maximum;
+    let (x,y,z)=p;
+    if shape==BrushShape::HollowBox{
+        return x==min[0]||x==max[0]||y==min[1]||y==max[1]
+            ||z==min[2]||z==max[2];
+    }
+    let norm=|index:usize,point:i32|{
+        let span=max[index] as f64-min[index] as f64;
+        if span==0.0{0.0}
+        else{(2.0*point as f64-min[index] as f64-max[index] as f64)/span}
+    };
+    let inside=|x:i32,y:i32,z:i32|{
+        let r=norm(0,x).powi(2)+norm(2,z).powi(2)
+            +if matches!(shape,BrushShape::CylinderY|BrushShape::CylinderShellY){
+                0.0
+            }else{norm(1,y).powi(2)};
+        r<=1.000000001
+    };
+    if !inside(x,y,z){return false;}
+    if matches!(shape,BrushShape::Ellipsoid|BrushShape::CylinderY){return true;}
+    for (dx,dy,dz) in [(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)]{
+        if shape==BrushShape::CylinderShellY&&dy!=0 {
+            if (dy>0&&y==max[1])||(dy<0&&y==min[1]){return true;}
+            continue;
+        }
+        let (nx,ny,nz)=(x+dx,y+dy,z+dz);
+        if nx<min[0]||nx>max[0]||ny<min[1]||ny>max[1]
+            ||nz<min[2]||nz>max[2]||!inside(nx,ny,nz){return true;}
+    }
+    false
+}
+
 /// Two endpoint triples separated by semicolon:
 /// "-4, -63, 0; 4, -63, 3", allowing reversed selections.
 pub fn parse_bounds(input: &str) -> Result<Bounds, WorldError> {
@@ -377,6 +413,19 @@ impl Session {
         self.overlay.get(&position).unwrap_or(source).clone()
     }
     pub fn dimension(&self) -> &str { &self.dimension }
+    /// Original entities are never inserted into the block-only overlay.
+    pub fn inspect_entities(&self,cx:i32,cz:i32)
+        ->Result<crate::entity_catalog::EntityCatalog,WorldError>{
+        crate::entity_catalog::inspect(&self.world,&self.dimension,cx,cz)
+    }
+    pub fn export_original_entities(&self,cx:i32,cz:i32,path:&Path)
+        ->Result<usize,WorldError>{
+        crate::entity_catalog::export(&self.world,&self.dimension,cx,cz,path)
+    }
+    pub fn verify_original_entities(&self,path:&Path)
+        ->Result<usize,WorldError>{
+        crate::entity_catalog::verify(&self.world,&self.dimension,path)
+    }
     pub fn pending_cells(&self) -> usize { self.overlay.len() }
     pub fn undo_depth(&self) -> usize { self.undo.len() }
     pub fn redo_depth(&self) -> usize { self.redo.len() }
@@ -702,6 +751,52 @@ impl Session {
     pub fn stage_be_operation_file(&mut self,path:&Path)->Result<usize,WorldError>{
         crate::be_operations::stage_file(self,path)
     }
+    /// V2 declarative plugins may comprise several dependent edits, but the
+    /// entire sequence is simulated on an isolated cloned Session and
+    /// compressed into ONE source-authenticated Undo-able preview.
+    pub(crate) fn prepare_plugin_sequence(
+        &self,operations:&[crate::plugins::PluginOperation]
+    )->Result<Preview,WorldError>{
+        if operations.is_empty()||operations.len()>24{
+            return Err(refuse("Plugin requires 1..24 bounded operations"));
+        }
+        let mut trial=self.clone();
+        let mut merged:BTreeMap<Position,Change>=BTreeMap::new();
+        let (mut examined,mut matched,mut touched)=(0usize,0usize,0usize);
+        for op in operations{
+            let preview=crate::plugins::preview_op(&trial,op)?;
+            if preview.changed()==0 {
+                return Err(refuse("Declarative plugin step matched no actual original block changes"));
+            }
+            examined=examined.checked_add(preview.examined)
+                .ok_or_else(||refuse("Plugin examined-cell budget overflow"))?;
+            matched=matched.checked_add(preview.matched)
+                .ok_or_else(||refuse("Plugin matched-cell budget overflow"))?;
+            touched=touched.checked_add(preview.source_chunks)
+                .ok_or_else(||refuse("Plugin source-chunk counter overflow"))?;
+            for item in &preview.changes{
+                merged.entry(item.position)
+                    .and_modify(|c|c.after=item.after.clone())
+                    .or_insert_with(||item.clone());
+            }
+            trial.commit(preview)?;
+            if merged.len()>MAX_CELLS{
+                return Err(refuse("Plugin exceeds 4096 distinct edited cells"));
+            }
+        }
+        let changes:Vec<Change>=merged.into_values()
+            .filter(|c|c.before!=c.after).collect();
+        if changes.is_empty() {
+            return Err(refuse("Declarative plugin finished without any effective changes"));
+        }
+        Ok(Preview{
+            root:self.world.root.clone(),dimension:self.dimension.clone(),
+            data_version:self.world.data_version,changes,
+            source_checks:Vec::new(),
+            is_copy:false,is_move:false,is_fill:false,
+            examined,matched,skipped:0,source_chunks:touched,
+        })
+    }
     pub fn prepare_plugin_file(&self,path:&Path)->Result<Preview,WorldError>{
         crate::plugins::prepare_file(self,path)
     }
@@ -710,6 +805,15 @@ impl Session {
     /// REFUSED: no auto-created air, chunk or legacy ID registry is assumed.
     pub fn prepare(&self, bounds: Bounds, replacement: &State,
                    only_if: Option<&State>) -> Result<Preview, WorldError> {
+        self.prepare_masked(bounds,replacement,only_if,|_|true)
+    }
+    pub fn prepare_brush(&self,bounds:Bounds,shape:BrushShape,
+        replacement:&State,only_if:Option<&State>)->Result<Preview,WorldError>{
+        self.prepare_masked(bounds,replacement,only_if,|p|brush_inside(shape,bounds,p))
+    }
+    fn prepare_masked(&self,bounds:Bounds,replacement:&State,
+        only_if:Option<&State>,included:impl Fn(Position)->bool
+    )->Result<Preview,WorldError>{
         if bounds.volume()? > MAX_CELLS {
             return Err(refuse("Original block edit batch exceeds limit"));
         }
@@ -721,6 +825,7 @@ impl Session {
             for z in bounds.minimum[2]..=bounds.maximum[2] {
                 for x in bounds.minimum[0]..=bounds.maximum[0] {
                     let position = (x, y, z);
+                    if !included(position){continue;}
                     let key = (x.div_euclid(16), z.div_euclid(16));
                     if !chunks.contains_key(&key) {
                         chunks.insert(key, read_world_chunk(
@@ -1530,6 +1635,21 @@ impl Session {
     )->Result<Preview,WorldError>{
         let block_clip=schematic::import_sponge_v2(&self.world,&self.dimension,path)?;
         self.prepare_paste_clipboard(&block_clip,destination_min)
+    }
+    /// Original Sponge v3 block-only paste; preserve full named properties,
+    /// reject unknown BE/Entity/Biome payloads and DataVersion drift.
+    pub fn prepare_import_sponge_v3(
+        &self,path:&Path,destination_min:Position,
+    )->Result<Preview,WorldError>{
+        let clip=schematic::import_sponge_v3(&self.world,&self.dimension,path)?;
+        self.prepare_paste_clipboard(&clip,destination_min)
+    }
+    pub fn export_sponge_v3(
+        &self,bounds:Bounds,path:&Path,
+    )->Result<usize,WorldError>{
+        let clip=self.capture_clipboard(bounds)?;
+        schematic::export_sponge_v3(&self.world,&clip,path)?;
+        Ok(clip.blocks.len())
     }
     /// Export only BE-free named blocks to Sponge v2; no entity/biome data.
     pub fn export_sponge_v2(

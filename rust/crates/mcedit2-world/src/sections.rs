@@ -74,7 +74,7 @@ impl Tag<'_> {
         if self.kind != 1 || self.raw.len() != 1 { return Err(error("Expected TAG_Byte")); }
         Ok(self.raw[0] as i8)
     }
-    fn string(&self) -> Result<String> {
+    pub(super) fn string(&self) -> Result<String> {
         if self.kind != 8 || self.raw.len() < 2 { return Err(error("Expected TAG_String")); }
         let n = u16::from_be_bytes(self.raw[0..2].try_into().unwrap()) as usize;
         if n + 2 != self.raw.len() { return Err(error("Invalid original NBT string size")); }

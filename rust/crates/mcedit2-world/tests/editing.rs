@@ -1439,3 +1439,131 @@ fn original_modded_be_tree_lists_nested_scalar_paths_without_mutating_data(){
     ).unwrap();
     assert!(absent.is_empty());
 }
+
+#[test]
+fn five_geometry_brushes_produce_atomic_edit_previews_and_restore_original_bytes(){
+    use mcedit2_world::editing::BrushShape;
+    let world=NativeWorld::create(true);
+    let unchanged=world.bytes_now();
+    let mut editor=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    let area=Bounds::new((0,-64,0),(4,-62,4)).unwrap();
+    let target=parse_state("minecraft:gold_block").unwrap();
+    for shape in [BrushShape::HollowBox,BrushShape::Ellipsoid,
+        BrushShape::EllipsoidShell,BrushShape::CylinderY,BrushShape::CylinderShellY]{
+        let planned=editor.prepare_brush(area,shape,&target,None).unwrap();
+        assert!(planned.changed()>0 && planned.changed()<=125);
+        editor.commit(planned).unwrap();
+        assert!(editor.undo().unwrap());
+        assert_eq!(editor.pending_cells(),0);
+    }
+    assert_eq!(world.bytes_now(),unchanged);
+}
+#[test]
+fn hollow_3d_brush_skips_original_be_outside_mask_and_refuses_inside(){
+    use mcedit2_world::editing::BrushShape;
+    let world=NativeWorld::create(true);
+    overwrite_region(&world,&chunk_with_be("minecraft:stone",(2,-63,2)));
+    let editor=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    let bounds=Bounds::new((0,-64,0),(4,-62,4)).unwrap();
+    let target=parse_state("minecraft:gold_block").unwrap();
+    assert!(editor.prepare_brush(bounds,BrushShape::HollowBox,&target,None).is_ok());
+    assert!(editor.prepare_brush(bounds,BrushShape::Ellipsoid,&target,None).is_err());
+}
+
+#[test]
+fn version2_plugin_composes_dependent_original_edits_as_one_undo(){
+    let world=NativeWorld::create(true);
+    let unchanged=world.bytes_now();
+    let path=std::env::temp_dir().join(format!(
+        "mcedit-v2-{}-{}.mcedit2plugin.json",
+        std::process::id(),COUNTER.fetch_add(1,Ordering::Relaxed)
+    ));
+    let ops=serde_json::json!({
+        "schema_version":2,"name":"two-step paint and geometry",
+        "operations":[
+            {"kind":"replace_blocks","minimum":[0,-64,0],"maximum":[4,-64,4],
+                "with_state":"minecraft:gold_block","only_if_state":"minecraft:stone"},
+            {"kind":"brush","minimum":[0,-64,0],"maximum":[4,-64,4],
+                "shape":"ellipsoid","with_state":"minecraft:diamond_block",
+                "only_if_state":"minecraft:gold_block"}
+        ]
+    });
+    fs::write(&path,serde_json::to_vec(&ops).unwrap()).unwrap();
+    let mut editor=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    let preview=editor.prepare_plugin_file(&path).unwrap();
+    assert_eq!(preview.changed(),25);
+    assert_eq!(editor.pending_cells(),0);
+    editor.commit(preview).unwrap();
+    assert_eq!(editor.undo_depth(),1);
+    assert_eq!(editor.pending_cells(),25);
+    assert!(editor.undo().unwrap());
+    assert_eq!(editor.pending_cells(),0);
+    assert_eq!(world.bytes_now(),unchanged);
+    fs::remove_file(&path).unwrap();
+}
+#[test]
+fn version2_plugin_refuses_any_late_bad_step_without_staging(){
+    let world=NativeWorld::create(true);
+    let path=std::env::temp_dir().join(format!(
+        "mcedit-v2-bad-{}-{}.mcedit2plugin.json",
+        std::process::id(),COUNTER.fetch_add(1,Ordering::Relaxed)
+    ));
+    let ops=serde_json::json!({
+        "schema_version":2,"name":"bad dependent step",
+        "operations":[
+            {"kind":"replace_blocks","minimum":[0,-64,0],"maximum":[1,-64,1],
+                "with_state":"minecraft:gold_block"},
+            {"kind":"brush","minimum":[0,-64,0],"maximum":[1,-64,1],
+                "shape":"ellipsoid","with_state":"numeric:2[data=0]"}
+        ]
+    });
+    fs::write(&path,serde_json::to_vec(&ops).unwrap()).unwrap();
+    let editor=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    assert!(editor.prepare_plugin_file(&path).is_err());
+    assert_eq!(editor.pending_cells(),0);
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn modern_entities_sidecar_is_inspected_and_snapshotted_without_modded_nbt_loss(){
+    let world=NativeWorld::create(true);
+    let original=world.bytes_now();
+    fs::create_dir_all(world.path.join("entities")).unwrap();
+    let region=world.path.join("entities/r.0.0.mca");
+    let mut pos=2i32.to_be_bytes().to_vec();
+    pos.extend(0i32.to_be_bytes());pos.extend(0i32.to_be_bytes());
+    let mut doubles=vec![6];doubles.extend(3i32.to_be_bytes());
+    for value in [1.5f64,70.0,2.5]{doubles.extend(value.to_be_bytes());}
+    let entity=compound(vec![
+        tag(8,"id",&nbt_string("mod:custom_entity")),
+        tag(8,"OpaqueData",&nbt_string("KEEP CUSTOM ENTITY EXACTLY")),
+        tag(9,"Pos",&doubles),
+    ]);
+    let mut list=vec![10];list.extend(1i32.to_be_bytes());list.extend(entity);
+    let raw=tag(10,"",&compound(vec![
+        tag(3,"DataVersion",&3955i32.to_be_bytes()),
+        tag(11,"Position",&pos),
+        tag(9,"Entities",&list),
+    ]));
+    fs::write(&region,region_bytes(&raw)).unwrap();
+    let session=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    let catalog=session.inspect_entities(0,0).unwrap();
+    assert_eq!(catalog.entities.len(),1);
+    assert_eq!(catalog.entities[0].id.as_deref(),Some("mod:custom_entity"));
+    assert_eq!(catalog.entities[0].pos,Some([1.5,70.0,2.5]));
+    let filename=std::env::temp_dir().join(format!(
+        "mcedit-entities-{}-{}.mcedit2entities",
+        std::process::id(),COUNTER.fetch_add(1,Ordering::Relaxed)
+    ));
+    assert!(session.export_original_entities(0,0,&filename).unwrap()>0);
+    assert!(session.verify_original_entities(&filename).is_ok());
+    assert_eq!(world.bytes_now(),original);
+    let replacement=tag(10,"",&compound(vec![
+        tag(3,"DataVersion",&3955i32.to_be_bytes()),
+        tag(11,"Position",&pos),
+        tag(9,"Entities",&[10,0,0,0,0]),
+    ]));
+    fs::write(&region,region_bytes(&replacement)).unwrap();
+    assert!(session.verify_original_entities(&filename).is_err());
+    fs::remove_file(filename).unwrap();
+}

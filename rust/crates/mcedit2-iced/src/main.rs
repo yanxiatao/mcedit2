@@ -6,7 +6,7 @@ use isometric::IsometricSurface;
 use iced::{Element,Length,Theme};
 use mcedit2_world::{compatibility_label,inspect_input,launch,WorldSummary};
 use mcedit2_world::block_lookup::{parse_xyz,read_world_block};
-use mcedit2_world::editing::{parse_bounds,parse_state,BeScalarPreview,Bounds,Preview,Session,Slice,SliceCell,VerticalSlice};
+use mcedit2_world::editing::{parse_bounds,parse_state,BeScalarPreview,Bounds,BrushShape,Preview,Session,Slice,SliceCell,VerticalSlice};
 use mcedit2_world::region_plan::NativeRegionCandidate;
 use mcedit2_world::clipboard::HorizontalTransform;
 use mcedit2_world::region_transaction::{apply_single_region,apply_authenticated_be_single_region,finalize_single_region,rollback_pending_region};
@@ -62,6 +62,10 @@ struct App{
     path:String,
     surface_area:String,
     surface_camera:u8,
+    surface_zoom:f32,
+    surface_pan_x:f32,
+    surface_pan_y:f32,
+    selected_surface:Option<(i32,i32,i32)>,
     surface:Option<(usize,usize,SurfaceView)>,
     surface_report:String,
     slice_grid:Option<(usize,usize,Slice)>,
@@ -81,6 +85,7 @@ struct App{
     be_scalar_field:String,
     be_scalar_value:String,
     be_snapshot_path:String,
+    entity_snapshot_path:String,
     be_journal_path:String,
     be_batch_path:String,
     plugin_manifest_path:String,
@@ -108,9 +113,11 @@ struct App{
 enum Message{
     Path(String),Open,Select(usize),Coordinates(String),Dimension(usize),
     SurfaceArea(String),InspectSurface,InspectVolume,PickSurface(i32,i32,i32),RotateSurface,
+    ZoomSurface(i8),PanSurface(i32,i32),ResetSurfaceCamera,
     BeScalarField(String),BeScalarValue(String),PreviewBeScalar,
     StageBeScalar,UndoBeScalar,RedoBeScalar,InspectStagedBe,InspectBeTree,
     BeSnapshotPath(String),ExportOriginalBe,VerifyOriginalBe,
+    EntitySnapshotPath(String),InspectEntities,ExportEntities,VerifyEntities,
     BeJournalPath(String),ExportBeJournal,ImportBeJournal,
     BeBatchPath(String),PreviewBeBatch,StageBeBatch,
     PluginManifestPath(String),PreviewPlugin,
@@ -118,12 +125,12 @@ enum Message{
     VerticalText(String),InspectVertical,PickVertical(usize,usize),
     SelectionText(String),TargetText(String),FilterText(String),
     CloneDestination(String), PreviewClone,PreviewMove,
-    FillSeed(String), PreviewFill,
+    FillSeed(String), PreviewFill,PreviewBrush(BrushShape),
     PatchPath(String),ExportPatch,ImportPatch,AnalyzeNativePatch,AnalyzeRegionPlan,
     ClipboardPath(String),ClipboardDestination(String),ExportClipboard,PreviewPasteClipboard,
     PreviewTransformedClipboard(HorizontalTransform),
     SchematicPath(String),PreviewLegacySchematic,ExportLegacySchematic,
-    SpongePath(String),PreviewSpongeV2,ExportSpongeV2,
+    SpongePath(String),PreviewSpongeV2,ExportSpongeV2,PreviewSpongeV3,ExportSpongeV3,
     PreviewBeRegion,PrepareWorldSave,SavePhrase(String),ConfirmWorldSave,
     RegionBatchPath(String),PreviewRegionBatch,ExportRegionBatch,VerifyRegionBatch,
     PrepareBeSave,BeSavePhrase(String),ConfirmBeSave,
@@ -132,7 +139,7 @@ enum Message{
 }
 impl App{
     fn inspect_surface(&mut self,exposed_volume:bool){
-        self.surface=None;
+        self.surface=None;self.selected_surface=None;
         self.surface_report=match self.current_key(){
             None=>"Select a Java world first.".into(),
             Some(key)=>match parse_bounds(&self.surface_area){
@@ -180,6 +187,7 @@ impl App{
             return;
         }
         self.query_coordinates=format!("{x}, {y}, {z}");
+        self.selected_surface=Some((x,y,z));
         self.edit_area=format!("{x},{y},{z};{x},{y},{z}");
         self.be_prepared=None;
         self.save_preview=None;self.prepared=None;
@@ -563,7 +571,8 @@ impl App{
             fill_seed:"0, 64, 0".into(),
             clipboard_destination:"0, 64, 0".into(),
             vertical_area:"0,-64,0;15,-49,0".into(),
-            surface_area:"0,-64,0;15,-49,15".into(),..Default::default()
+            surface_area:"0,-64,0;15,-49,15".into(),
+            surface_zoom:1.0,..Default::default()
         };
         for path in &args.worlds {
             match inspect_input(path) {
@@ -735,6 +744,15 @@ fn update(app:&mut App,message:Message){
         Message::InspectVolume=>app.inspect_surface(true),
         Message::PickSurface(x,y,z)=>app.pick_surface(x,y,z),
         Message::RotateSurface=>app.surface_camera=(app.surface_camera+1)%4,
+        Message::ZoomSurface(n)=>app.surface_zoom=(app.surface_zoom+n as f32*0.25).clamp(0.5,3.0),
+        Message::PanSurface(dx,dy)=>{
+            app.surface_pan_x=(app.surface_pan_x+dx as f32).clamp(-1000.0,1000.0);
+            app.surface_pan_y=(app.surface_pan_y+dy as f32).clamp(-1000.0,1000.0);
+        },
+        Message::ResetSurfaceCamera=>{
+            app.surface_zoom=1.0;app.surface_pan_x=0.0;app.surface_pan_y=0.0;
+            app.surface_camera=0;
+        },
         Message::ClipboardPath(value)=>app.clipboard_path=value,
         Message::SchematicPath(value)=>app.schematic_path=value,
         Message::SpongePath(value)=>app.sponge_path=value,
@@ -753,6 +771,36 @@ fn update(app:&mut App,message:Message){
                 Ok(n)=>format!("Exported {n} selected block states to a create-new .mcedit2clip file. Block Entities/entities excluded; Minecraft world unchanged."),
                 Err(e)=>format!("Block-only clipboard export refused: {e}"),
             };
+        },
+        Message::ExportSpongeV3=>{
+            let path=PathBuf::from(app.sponge_path.trim());
+            let result=(||->Result<usize,String>{
+                let area=parse_bounds(&app.edit_area).map_err(|e|e.to_string())?;
+                let key=app.current_key().ok_or("Select original world")?;
+                app.current_session(key)?.export_sponge_v3(area,&path)
+                    .map_err(|e|e.to_string())
+            })();
+            app.edit_report=match result{
+                Ok(n)=>format!("Exported {n} named source blocks to Sponge v3; unknown BEs/entities/biomes are not silently discarded."),
+                Err(e)=>format!("Sponge v3 export refused: {e}"),
+            };
+        },
+        Message::PreviewSpongeV3=>{
+            app.save_preview=None;app.prepared=None;
+            let path=PathBuf::from(app.sponge_path.trim());
+            let result=(||->Result<Preview,String>{
+                let dest=parse_xyz(&app.clipboard_destination).map_err(|e|e.to_string())?;
+                let key=app.current_key().ok_or("Select original world")?;
+                app.current_session(key)?.prepare_import_sponge_v3(&path,dest)
+                    .map_err(|e|e.to_string())
+            })();
+            match result{
+                Ok(preview)=>{
+                    app.edit_report=format!("Sponge v3 exact DataVersion safe paste preview: {}",preview.summary());
+                    if let Some((wi,di))=app.current_key(){app.prepared=Some((wi,di,preview));}
+                },
+                Err(e)=>app.edit_report=format!("Sponge v3 import refused: {e}"),
+            }
         },
         Message::ExportSpongeV2=>{
             app.save_preview=None;
@@ -959,6 +1007,49 @@ fn update(app:&mut App,message:Message){
             };
         },
         Message::BeScalarField(value)=>{app.be_scalar_field=value;app.be_prepared=None;},
+        Message::EntitySnapshotPath(value)=>app.entity_snapshot_path=value,
+        Message::InspectEntities=>{
+            let outcome=(||->Result<String,String>{
+                let p=parse_xyz(&app.query_coordinates).map_err(|e|e.to_string())?;
+                let key=app.current_key().ok_or("Select original world")?;
+                let report=app.current_session(key)?
+                    .inspect_entities(p.0.div_euclid(16),p.2.div_euclid(16))
+                    .map_err(|e|e.to_string())?;
+                let mut out=format!("Original {} chunk {:?}, {} entities, SHA-256 {}. READ ONLY.\n",
+                    report.source,report.chunk,report.entities.len(),report.source_sha256);
+                for e in report.entities.iter().take(64){
+                    out.push_str(&format!("id={} Pos={:?} fields={} original NBT={} bytes SHA={}\n",
+                        e.id.as_deref().unwrap_or("unknown"),e.pos,e.fields,e.bytes,e.sha256));
+                }
+                Ok(out)
+            })();
+            app.block_result=outcome.unwrap_or_else(|e|format!("Entity inspection refused: {e}"));
+        },
+        Message::ExportEntities=>{
+            let file=PathBuf::from(app.entity_snapshot_path.trim());
+            let outcome=(||->Result<usize,String>{
+                let p=parse_xyz(&app.query_coordinates).map_err(|e|e.to_string())?;
+                let key=app.current_key().ok_or("Select original world")?;
+                app.current_session(key)?.export_original_entities(
+                    p.0.div_euclid(16),p.2.div_euclid(16),&file
+                ).map_err(|e|e.to_string())
+            })();
+            app.block_result=match outcome{
+                Ok(n)=>format!("Exported {n} bytes of exact original entity snapshot. World unchanged."),
+                Err(e)=>format!("Entity snapshot export refused: {e}"),
+            };
+        },
+        Message::VerifyEntities=>{
+            let file=PathBuf::from(app.entity_snapshot_path.trim());
+            let outcome=app.current_key().ok_or_else(||"Select original world".to_string())
+                .and_then(|key|app.current_session(key))
+                .and_then(|editor|editor.verify_original_entities(&file)
+                    .map_err(|e|e.to_string()));
+            app.block_result=match outcome{
+                Ok(n)=>format!("Verified {n} original entity NBT bytes against current source."),
+                Err(e)=>format!("Entity snapshot verification refused: {e}"),
+            };
+        },
         Message::BeSnapshotPath(value)=>app.be_snapshot_path=value,
         Message::BeJournalPath(value)=>app.be_journal_path=value,
         Message::BeBatchPath(value)=>app.be_batch_path=value,
@@ -1313,6 +1404,25 @@ fn update(app:&mut App,message:Message){
             app.fill_seed=value;app.prepared=None;app.save_preview=None;app.save_phrase.clear();
         }
         Message::PreviewFill=>app.prepare_fill(),
+        Message::PreviewBrush(shape)=>{
+            app.prepared=None;app.save_preview=None;
+            let result=(||->Result<Preview,String>{
+                let bounds=parse_bounds(&app.edit_area).map_err(|e|e.to_string())?;
+                let state=parse_state(&app.edit_target).map_err(|e|e.to_string())?;
+                let filter=if app.edit_filter.trim().is_empty(){None}
+                    else{Some(parse_state(&app.edit_filter).map_err(|e|e.to_string())?)};
+                let key=app.current_key().ok_or("Select a dimension")?;
+                app.current_session(key)?.prepare_brush(bounds,shape,&state,filter.as_ref())
+                    .map_err(|e|e.to_string())
+            })();
+            match result{
+                Ok(preview)=>{
+                    app.edit_report=format!("{shape:?} brush preview: {}. One guarded Undo group.",preview.summary());
+                    if let Some((wi,di))=app.current_key(){app.prepared=Some((wi,di,preview));}
+                },
+                Err(e)=>app.edit_report=format!("3D brush refused: {e}"),
+            }
+        },
         Message::CloneDestination(value)=>{
             app.clone_destination=value;app.prepared=None;app.save_preview=None;app.save_phrase.clear();
         }
@@ -1418,10 +1528,21 @@ fn view(app:&App)->Element<'_,Message>{
         ].spacing(8));
         if let Some((wi,di,view))=&app.surface{
             if app.current_key()==Some((*wi,*di)){
-                body=body.push(button(text(format!("Rotate 3D camera 90° (view {})",app.surface_camera)))
-                    .on_press(Message::RotateSurface));
+                body=body.push(row![
+                    button(text(format!("Rotate 90° ({})",app.surface_camera)))
+                        .on_press(Message::RotateSurface),
+                    button("Zoom +").on_press(Message::ZoomSurface(1)),
+                    button("Zoom -").on_press(Message::ZoomSurface(-1)),
+                    button("Pan ←").on_press(Message::PanSurface(-40,0)),
+                    button("Pan →").on_press(Message::PanSurface(40,0)),
+                    button("Pan ↑").on_press(Message::PanSurface(0,-40)),
+                    button("Pan ↓").on_press(Message::PanSurface(0,40)),
+                    button("Reset camera").on_press(Message::ResetSurfaceCamera),
+                ].spacing(5));
                 body=body.push(canvas(IsometricSurface{
-                    surface:view.clone(),camera_quarters:app.surface_camera
+                    surface:view.clone(),camera_quarters:app.surface_camera,
+                    zoom:app.surface_zoom,pan_x:app.surface_pan_x,
+                    pan_y:app.surface_pan_y,selected:app.selected_surface
                 })
                     .width(Length::Fill).height(Length::Fixed(440.0)));
             }
@@ -1462,6 +1583,13 @@ fn view(app:&App)->Element<'_,Message>{
                 .on_input(Message::BeJournalPath).width(Length::Fill),
             button("Checkpoint staged BE edits").on_press(Message::ExportBeJournal),
             button("Restore BE edits (memory)").on_press(Message::ImportBeJournal),
+        ].spacing(8));
+        body=body.push(row![
+            text_input("External .mcedit2entities original source snapshot",&app.entity_snapshot_path)
+                .on_input(Message::EntitySnapshotPath).width(Length::Fill),
+            button("Inspect original entities").on_press(Message::InspectEntities),
+            button("Export entity NBT").on_press(Message::ExportEntities),
+            button("Verify entity source").on_press(Message::VerifyEntities),
         ].spacing(8));
         body=body.push(row![
             text_input("Outside-world .mcedit2be original NBT snapshot",&app.be_snapshot_path)
@@ -1558,6 +1686,13 @@ fn view(app:&App)->Element<'_,Message>{
                 .on_input(Message::FillSeed).width(Length::Fill),
             button("Preview connected 3D fill").on_press(Message::PreviewFill)
         ].spacing(8));
+        body=body.push(row![
+            button("Hollow box").on_press(Message::PreviewBrush(BrushShape::HollowBox)),
+            button("Ellipsoid").on_press(Message::PreviewBrush(BrushShape::Ellipsoid)),
+            button("Ellipsoid shell").on_press(Message::PreviewBrush(BrushShape::EllipsoidShell)),
+            button("Cylinder Y").on_press(Message::PreviewBrush(BrushShape::CylinderY)),
+            button("Cylinder shell Y").on_press(Message::PreviewBrush(BrushShape::CylinderShellY)),
+        ].spacing(6));
         let apply=if app.prepared.is_some() && !app.readonly {
             button("Stage approved preview (memory)").on_press(Message::ApplyEdit)
         } else {button("Stage approved preview (memory)")};
@@ -1601,6 +1736,8 @@ fn view(app:&App)->Element<'_,Message>{
                 .on_input(Message::SpongePath).width(Length::Fill),
             button("Export selection to Sponge v2").on_press(Message::ExportSpongeV2),
             button("Preview Sponge v2 paste").on_press(Message::PreviewSpongeV2),
+            button("Export Sponge v3").on_press(Message::ExportSpongeV3),
+            button("Preview Sponge v3 paste").on_press(Message::PreviewSpongeV3),
         ].spacing(8));
         body=body.push(row![
             text_input("External .mcedit2regionplan.json",&app.region_batch_path)
