@@ -4,7 +4,7 @@
 //! geometry use the ordinary named-texture fallback rather than guessing.
 use crate::{isometric::Face, resource_ids};
 use crate::models::{Box3, ElementRotation, Part};
-use crate::special_obj;
+use crate::{special_obj, special_gltf, special_mtl};
 use mcedit2_world::sections::State;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -27,11 +27,14 @@ pub(crate) struct ObjSelection {
     pub xyz: [[f32; 3]; 3],
     pub uv: [[f32; 2]; 3],
     pub texture: String,
+    pub tint: [f32; 4],
 }
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ModelBank {
     files: BTreeMap<String, Value>,
     obj_meshes: BTreeMap<String, Vec<special_obj::Triangle>>,
+    gltf_meshes: BTreeMap<String, Vec<special_obj::Triangle>>,
+    obj_materials: BTreeMap<String, BTreeMap<String, special_mtl::Material>>,
     json_sizes: BTreeMap<String, usize>,
     total_json_bytes: usize,
 }
@@ -697,52 +700,169 @@ impl ModelBank {
     /// Guarded static Wavefront OBJ; model key uses original Java resource ID.
     pub fn insert_obj(&mut self, path: &str, bytes: &[u8]) -> Result<bool, String> {
         let parts: Vec<_> = path.split('/').collect();
-        if parts.len() < 5 || parts[0] != "assets" || parts[2] != "models"
-            || !resource_ids::namespace(parts[1]) {
+        if parts.len() < 5
+            || parts[0] != "assets"
+            || parts[2] != "models"
+            || !resource_ids::namespace(parts[1])
+        {
             return Ok(false);
         }
         let name = parts[3..].join("/");
-        let Some(name) = name.strip_suffix(".obj") else { return Ok(false); };
-        if !resource_ids::path(name, 160) { return Ok(false); }
-        let key = format!("model:{}:{}",
-            parts[1], name.strip_prefix("block/").unwrap_or(name));
-        self.obj_meshes.insert(key, special_obj::parse(bytes)?);
+        let Some(name) = name.strip_suffix(".obj") else {
+            return Ok(false);
+        };
+        if !resource_ids::path(name, 160) {
+            return Ok(false);
+        }
+        let key = format!(
+            "model:{}:{}",
+            parts[1],
+            name.strip_prefix("block/").unwrap_or(name)
+        );
+        let mesh = special_obj::parse(bytes)?;
+        self.obj_meshes.insert(key, mesh);
         Ok(true)
     }
-    /// Select the supported OBJ backend through the original JSON loader
-    /// declaration. No individual block name can trigger this path.
-    pub fn obj_at(&self, state: &State, pos:(i32,i32,i32)) -> Option<Vec<ObjSelection>> {
-        let selected = self.selections_at(state, pos)?;
+    /// Each OBJ may use an optional same-stem MTL from the same pack.
+    /// No external mtllib reference is followed.
+    pub fn insert_mtl(&mut self, path: &str, bytes: &[u8]) -> Result<bool, String> {
+        let parts: Vec<_> = path.split('/').collect();
+        if parts.len() < 5
+            || parts[0] != "assets"
+            || parts[2] != "models"
+            || !resource_ids::namespace(parts[1])
+        {
+            return Ok(false);
+        }
+        let name = parts[3..].join("/");
+        let Some(name) = name.strip_suffix(".mtl") else {
+            return Ok(false);
+        };
+        if !resource_ids::path(name, 160) {
+            return Ok(false);
+        }
+        let key = format!(
+            "model:{}:{}",
+            parts[1],
+            name.strip_prefix("block/").unwrap_or(name)
+        );
+        self.obj_materials.insert(key, special_mtl::parse(bytes)?);
+        Ok(true)
+    }
+    /// Static glTF / GLB source meshes share the same vertex material pipeline
+    /// as OBJ. All buffers must be embedded; there is no network/file resolver.
+    pub fn insert_gltf(&mut self, path: &str, bytes: &[u8]) -> Result<bool, String> {
+        let parts: Vec<_> = path.split('/').collect();
+        if parts.len() < 5
+            || parts[0] != "assets"
+            || parts[2] != "models"
+            || !resource_ids::namespace(parts[1])
+        {
+            return Ok(false);
+        }
+        let name = parts[3..].join("/");
+        let name = name
+            .strip_suffix(".gltf")
+            .or_else(|| name.strip_suffix(".glb"));
+        let Some(name) = name else {
+            return Ok(false);
+        };
+        if !resource_ids::path(name, 160) {
+            return Ok(false);
+        }
+        let key = format!(
+            "model:{}:{}",
+            parts[1],
+            name.strip_prefix("block/").unwrap_or(name)
+        );
+        self.gltf_meshes.insert(key, special_gltf::parse(bytes)?);
+        Ok(true)
+    }
+    /// Select special models through the original blockstate JSON. Loader
+    /// declarations are a data contract, not an arbitrary executable hook.
+    pub fn obj_at(&self, state: &State, pos: (i32, i32, i32)) -> Option<Vec<ObjSelection>> {
         let mut out = Vec::new();
-        for choice in selected {
-            let doc = self.files.get(&choice.key)?;
-            let loader = doc.get("loader")?.as_str()?;
-            if !matches!(loader, "forge:obj" | "neoforge:obj") { return None; }
-            let namespace = choice.key.strip_prefix("model:")?.split_once(':')?.0;
-            let reference = resource_ids::qualified(doc.get("model")?.as_str()?, namespace)?;
+        let selected = self.selections_at(state, pos)?;
+        for chosen in selected {
+            let model = self.files.get(&chosen.key)?;
+            // Any Mod-defined client-only loader can opt into a static,
+            // declarative fallback without running its executable renderer.
+            // Unknown loaders without an explicit adapter remain unsupported.
+            let adapter = model.get("mcedit2:static_renderer");
+            let suffix = if let Some(adapter) = adapter {
+                match adapter.get("format")?.as_str()? {
+                    "obj" => ".obj",
+                    "gltf" => ".gltf",
+                    "glb" => ".glb",
+                    _ => return None,
+                }
+            } else {
+                match model.get("loader")?.as_str()? {
+                    "forge:obj" | "neoforge:obj" => ".obj",
+                    "mcedit2:gltf" | "forge:gltf" | "neoforge:gltf" => ".gltf",
+                    "mcedit2:glb" | "forge:glb" | "neoforge:glb" => ".glb",
+                    _ => return None,
+                }
+            };
+            let source_ns = chosen.key.strip_prefix("model:")?.split_once(':')?.0;
+            let reference = resource_ids::qualified(
+                adapter
+                    .and_then(|a| a.get("model"))
+                    .or_else(|| model.get("model"))?
+                    .as_str()?,
+                source_ns,
+            )?;
             let (ns, path) = reference.split_once(':')?;
             let path = path.strip_prefix("models/").unwrap_or(path);
-            let path = path.strip_suffix(".obj")?;
+            let path = path.strip_suffix(suffix)?;
             let path = path.strip_prefix("block/").unwrap_or(path);
-            let triangles = self.obj_meshes.get(&format!("model:{ns}:{path}"))?;
-            let rotation = Part {
-                bounds: Box3::FULL, rotation: None,
-                variant_x: choice.x, variant_y: choice.y,
+            let id = format!("model:{ns}:{path}");
+            let mesh = if suffix == ".obj" {
+                self.obj_meshes.get(&id)?
+            } else {
+                self.gltf_meshes.get(&id)?
             };
-            let textures = doc.get("textures").and_then(Value::as_object)?;
-            for tri in triangles {
-                let raw = textures.get(&tri.material)
-                    .or_else(|| textures.get("particle"))?.as_str()?;
-                let texture = resource_ids::qualified(raw, namespace)?;
+            let rotation = Part {
+                bounds: Box3::FULL,
+                rotation: None,
+                variant_x: chosen.x,
+                variant_y: chosen.y,
+            };
+            let mappings = adapter
+                .and_then(|a| a.get("textures"))
+                .or_else(|| model.get("textures"))
+                .and_then(Value::as_object);
+            let materials = if suffix == ".obj" {
+                self.obj_materials.get(&id)
+            } else {
+                None
+            };
+            for tri in mesh {
+                let mtl = materials.and_then(|m| m.get(&tri.material));
+                let raw = mappings
+                    .and_then(|m| m.get(&tri.material))
+                    .and_then(Value::as_str)
+                    .or_else(|| mtl.and_then(|m| m.map_kd.as_deref()))
+                    .or_else(|| {
+                        mappings
+                            .and_then(|m| m.get("particle"))
+                            .and_then(Value::as_str)
+                    })?;
+                let texture = resource_ids::qualified(raw, source_ns)?;
                 let (ns, path) = texture.split_once(':')?;
-                let path = path.strip_prefix("block/")
-                    .or_else(|| path.strip_prefix("blocks/")).unwrap_or(path);
+                let id = path
+                    .strip_prefix("block/")
+                    .or_else(|| path.strip_prefix("blocks/"))
+                    .unwrap_or(path);
                 out.push(ObjSelection {
-                    xyz: tri.xyz.map(|point| rotation.point(point)),
+                    xyz: tri.xyz.map(|p| rotation.point(p)),
                     uv: tri.uv,
-                    texture: format!("{ns}:{path}"),
+                    texture: format!("{ns}:{id}"),
+                    tint: mtl.map_or([1.; 4], |m| m.diffuse),
                 });
-                if out.len() > 4096 { return None; }
+                if out.len() > 4096 {
+                    return None;
+                }
             }
         }
         (!out.is_empty()).then_some(out)

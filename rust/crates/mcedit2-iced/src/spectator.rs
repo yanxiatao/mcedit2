@@ -354,7 +354,7 @@ pub(crate) fn build_cancellable(
                         out.push(Vertex {
                             xy: [0.0, 0.0],
                             depth: 0.0,
-                            rgba: [1.0; 4],
+                            rgba: tri.tint,
                             uv: tri.uv[index],
                             mode: tri.alpha as u32,
                             xyz: xyz[index],

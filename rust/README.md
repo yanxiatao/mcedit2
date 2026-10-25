@@ -221,3 +221,42 @@ dynamic block entity renderers still need independent, source-verified
 render backends. Current OBJ UV values outside the sprite's [0,1] domain
 are clamped; the general repeated-UV path presently applies to Java JSON
 faces, not arbitrary OBJ triangles.
+
+## Static resource-renderer adapters (non-executable)
+
+This branch now has three generic static mesh data paths: existing JSON
+model elements, source-declared OBJ + same-pack MTL materials, and embedded
+glTF 2.0 / GLB mesh primitives. glTF buffers must be bundled into the GLB or
+base64 data URI; remote and relative external buffers are not fetched.
+Supported meshes use finite POSITION / TEXCOORD_0 coordinates and bounded
+triangle budgets. OBJ/MTL handles static diffuse RGB, opacity (d/Tr),
+material names and same-pack same-stem map_Kd mapping; a map_d alpha-map
+identifier is validated but per-pixel map_d compositing is not implemented.
+
+All OBJ/glTF source triangles pass through the same bounded atlas-safe
+integer-period UV clipping: crossing tile boundaries creates interpolated
+triangles that remain inside their material's own GPU atlas sprite slot,
+without enabling global sampler wrapping. MTL opacity is sent as a Blend
+material in the existing GPU transparency pipeline.
+
+Any custom Mod renderer can opt into a **declarative** static fallback via
+its JSON block model, without a built-in per-block registry. For example:
+
+```json
+{
+  "loader": "othermod:custom_client_renderer",
+  "mcedit2:static_renderer": {
+    "format": "glb",
+    "model": "othermod:models/custom/structure.glb",
+    "textures": {"particle": "othermod:item/structure"}
+  }
+}
+```
+
+The adapter is resolved only from supplied JSON and exact resource asset
+identities. It does not execute Mod code, infer opaque NBT-driven rendering,
+or promise compatibility with arbitrary custom client-only algorithms.
+Remaining gaps include full glTF scene node hierarchy, external buffer
+resolution, PBR/normal/metallic material shading, independent MTL map_d
+opacity images, arbitrary non-triangulated polygons and dynamic geometry.
+This pass deliberately does not add animation.

@@ -615,6 +615,7 @@ pub(crate) struct StaticObjTriangle {
     pub uv: [[f32; 2]; 3],
     pub page: u32,
     pub alpha: AlphaMode,
+    pub tint: [f32;4],
 }
 pub(crate) struct TextureBank {
     // Original PNG/JSON source is immutable and shared across animation.
@@ -826,6 +827,8 @@ enum PackAsset {
     Colormap(&'static str),
     Model,
     Obj,
+    Gltf,
+    Mtl,
     Metadata(String),
     Texture(String),
 }
@@ -843,6 +846,12 @@ impl PackAsset {
         if let Some(id) = texture_id(name) {
             return Some(Self::Texture(id));
         }
+        if (name.ends_with(".gltf") || name.ends_with(".glb")) && name.contains("/models/") {
+            return Some(Self::Gltf);
+        }
+        if name.ends_with(".mtl") && name.contains("/models/") {
+            return Some(Self::Mtl);
+        }
         if name.ends_with(".obj") && name.contains("/models/") {
             return Some(Self::Obj);
         }
@@ -852,7 +861,8 @@ impl PackAsset {
     }
     fn max_bytes(&self) -> u64 {
         match self {
-            Self::Model | Self::Obj => 2 * 1024 * 1024,
+            Self::Model | Self::Obj | Self::Mtl => 2 * 1024 * 1024,
+            Self::Gltf => 8 * 1024 * 1024,
             Self::Metadata(_) => MAX_ANIMATION_META as u64,
             Self::Colormap(_) | Self::Texture(_) => MAX_TEXTURE_BYTES,
         }
@@ -875,6 +885,16 @@ impl TextureBank {
             PackAsset::Obj => {
                 if let Err(e) = Arc::make_mut(&mut self.models).insert_obj(name, &bytes) {
                     self.warnings.push(format!("Skipped OBJ {name}: {e}"));
+                }
+            }
+            PackAsset::Gltf => {
+                if let Err(e) = Arc::make_mut(&mut self.models).insert_gltf(name, &bytes) {
+                    self.warnings.push(format!("Skipped glTF {name}: {e}"));
+                }
+            }
+            PackAsset::Mtl => {
+                if let Err(e) = Arc::make_mut(&mut self.models).insert_mtl(name, &bytes) {
+                    self.warnings.push(format!("Skipped MTL {name}: {e}"));
                 }
             }
             PackAsset::Metadata(id) => {
@@ -1461,7 +1481,9 @@ impl TextureBank {
     /// Every declared OBJ material maps through the same namespace-safe
     /// atlas lookup as JSON faces, without any block ID special cases.
     pub fn static_obj_at(
-        &self, state: &State, pos: (i32, i32, i32),
+        &self,
+        state: &State,
+        pos: (i32, i32, i32),
     ) -> Option<Vec<StaticObjTriangle>> {
         let chosen = self.models.obj_at(state, pos)?;
         let atlas = self.atlas.as_ref()?;
@@ -1473,15 +1495,20 @@ impl TextureBank {
                 MISSING_TEXTURE_ID
             };
             let slot = atlas.entries.get(id)?;
-            let alpha = self.tiles.get(id)?.alpha_mode();
-            out.push(StaticObjTriangle {
-                xyz: tri.xyz,
-                uv: tri.uv.map(|uv| {
-                    slot.sample(uv[0].clamp(0.0, 1.0), uv[1].clamp(0.0, 1.0))
-                }),
-                page: slot.page,
-                alpha,
-            });
+            let alpha = if tri.tint[3] < 0.999 { AlphaMode::Blend } else { self.tiles.get(id)?.alpha_mode() };
+            if !crate::static_triangle_uv::tile(tri.xyz, tri.uv, slot, |xyz, uv| {
+                if out.len() < 4096 {
+                    out.push(StaticObjTriangle {
+                        xyz,
+                        uv,
+                        page: slot.page,
+                        alpha,
+                        tint: tri.tint,
+                    });
+                }
+            }) {
+                return None;
+            }
         }
         Some(out)
     }

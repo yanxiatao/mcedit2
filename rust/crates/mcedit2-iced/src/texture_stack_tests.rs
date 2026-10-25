@@ -376,3 +376,113 @@ fn declared_obj_loader_emits_generic_static_mesh_via_gpu_path() {
     assert!(vertices.iter().all(|v|v.atlas_page==mesh[0].page));
     assert!(vertices.iter().all(|v|v.uv.iter().all(|x|x.is_finite())));
 }
+
+#[test]
+fn obj_mtl_and_gltf_renderers_follow_resource_model_without_block_id_tables() {
+    use mcedit2_world::sections::State;
+    let fixture = Fixture::new();
+    let path = fixture.path("special_renderers");
+    put(&path,"assets/example/textures/item/casing.png",&png(&[40,80,120,255],1));
+    put(&path,"assets/example/blockstates/casing.json",
+        br#"{"variants":{"":{"model":"example:block/casing"}}}"#);
+    put(&path,"assets/example/models/block/casing.json",
+        br#"{"loader":"neoforge:obj","model":"example:models/block/casing.obj"}"#);
+    put(&path,"assets/example/models/block/casing.obj",
+        b"v 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 3 0\nvt 0 2\nusemtl shell\nf 1/1 2/2 3/3\n");
+    put(&path,"assets/example/models/block/casing.mtl",
+        b"newmtl shell\nKd 0.25 0.5 1.0\nd 0.5\nmap_Kd example:item/casing\n");
+    let bank = TextureBank::open(&path).unwrap();
+    let state=State{name:"example:casing".into(),properties:vec![]};
+    let mesh=bank.static_obj_at(&state,(0,70,0)).unwrap();
+    assert!(mesh.len()>1,"UV repetition must split OBJ triangles");
+    assert!(mesh.iter().all(|m|m.tint==[0.25,0.5,1.0,0.5]));
+    let sprite=bank.atlas().unwrap().entries.get("example:item/casing").unwrap();
+    assert!(mesh.iter().all(|m|m.uv.iter().all(|uv|
+        uv[0]>=sprite.start[0]-1e-6&&uv[0]<=sprite.end[0]+1e-6
+        && uv[1]>=sprite.start[1]-1e-6&&uv[1]<=sprite.end[1]+1e-6)));
+
+    // Replace the blockstate's model reference with a glTF/GLB backend.
+    let path2=fixture.path("gltf_renderers");
+    put(&path2,"assets/example/textures/item/casing.png",&png(&[40,80,120,255],1));
+    put(&path2,"assets/example/blockstates/casing.json",
+        br#"{"variants":{"":{"model":"example:block/casing"}}}"#);
+    put(&path2,"assets/example/models/block/casing.json",
+        br#"{"loader":"mcedit2:glb","model":"example:models/block/casing.glb","textures":{"particle":"example:item/casing"}}"#);
+    let mut bin=Vec::new();
+    for v in [0f32,0.,0.,1.,0.,0.,0.,1.,0.,0.,0.,1.,0.,0.,1.] {
+        bin.extend_from_slice(&v.to_le_bytes());
+    }
+    let doc=serde_json::json!({"asset":{"version":"2.0"},"buffers":[{"byteLength":60}],
+        "bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36},
+            {"buffer":0,"byteOffset":36,"byteLength":24}],
+        "accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"},
+            {"bufferView":1,"componentType":5126,"count":3,"type":"VEC2"}],
+        "meshes":[{"primitives":[{"attributes":{"POSITION":0,"TEXCOORD_0":1}}]}]});
+    let mut json=serde_json::to_vec(&doc).unwrap();
+    while json.len()%4!=0 {json.push(b' ')}
+    let size=(12+8+json.len()+8+bin.len()) as u32;
+    let mut glb=Vec::new();
+    glb.extend_from_slice(b"glTF");glb.extend_from_slice(&2u32.to_le_bytes());
+    glb.extend_from_slice(&size.to_le_bytes());
+    glb.extend_from_slice(&(json.len() as u32).to_le_bytes());
+    glb.extend_from_slice(b"JSON");glb.extend_from_slice(&json);
+    glb.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+    glb.extend_from_slice(b"BIN\0");glb.extend_from_slice(&bin);
+    put(&path2,"assets/example/models/block/casing.glb",&glb);
+    let bank=TextureBank::open(&path2).unwrap();
+    assert_eq!(bank.static_obj_at(&state,(0,70,0)).unwrap().len(),1);
+}
+
+#[test]
+fn custom_mod_loader_static_renderer_adapter_is_declarative_and_id_independent() {
+    use mcedit2_world::sections::State;
+    let fixture = Fixture::new();
+    let root = fixture.path("mod_adapter");
+    put(
+        &root,
+        "assets/foreign.mod/textures/item/skin.png",
+        &png(&[25, 75, 150, 255], 1),
+    );
+    put(
+        &root,
+        "assets/foreign.mod/blockstates/sculpture.json",
+        br#"{"variants":{"":{"model":"foreign.mod:custom/sculpture"}}}"#,
+    );
+    put(
+        &root,
+        "assets/foreign.mod/models/custom/sculpture.json",
+        br#"{"loader":"foreign.mod:procedural_renderer",
+            "mcedit2:static_renderer":{"format":"obj",
+              "model":"foreign.mod:models/custom/sculpture.obj",
+              "textures":{"shell":"foreign.mod:item/skin"}}}"#,
+    );
+    put(
+        &root,
+        "assets/foreign.mod/models/custom/sculpture.obj",
+        b"v 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nusemtl shell\nf 1/1 2/2 3/3\n",
+    );
+    let bank = TextureBank::open(&root).unwrap();
+    let state = State {
+        name: "foreign.mod:sculpture".into(),
+        properties: vec![],
+    };
+    assert_eq!(bank.static_obj_at(&state, (0, 64, 0)).unwrap().len(), 1);
+    let no_adapter_root = fixture.path("no_adapter");
+    put(
+        &no_adapter_root,
+        "assets/foreign.mod/blockstates/sculpture.json",
+        br#"{"variants":{"":{"model":"foreign.mod:custom/sculpture"}}}"#,
+    );
+    put(
+        &no_adapter_root,
+        "assets/foreign.mod/models/custom/sculpture.json",
+        br#"{"loader":"foreign.mod:procedural_renderer"}"#,
+    );
+    assert!(
+        TextureBank::open(&no_adapter_root).is_err()
+            || TextureBank::open(&no_adapter_root)
+                .unwrap()
+                .static_obj_at(&state, (0, 64, 0))
+                .is_none()
+    );
+}
