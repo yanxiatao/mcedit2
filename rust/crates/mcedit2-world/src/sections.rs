@@ -378,6 +378,227 @@ pub fn inspect_original_block_entity(
     }))
 }
 
+
+/// An original bounded nested NBT path. Slash-delimited path fields are
+/// informational; only a scalar path through real Compound ancestors can
+/// be passed to the surgical editor. No NBT bytes are normalized.
+#[derive(Debug,Clone,PartialEq,Eq)]
+pub struct OriginalBePath{
+    pub path:String,
+    pub kind:u8,
+    pub payload_bytes:usize,
+    pub immediate_children:usize,
+    pub safely_editable_scalar:bool,
+}
+fn flatten_original_be(
+    node:&Tag<'_>,prefix:&str,depth:usize,
+    safe_parent:bool,out:&mut Vec<OriginalBePath>,
+){
+    for (key,child) in &node.fields{
+        if out.len()>=256{return;}
+        let clean=!key.is_empty()&&!key.contains('/')
+            &&key.len()<=64
+            &&!matches!(key.as_str(),"x"|"y"|"z"|"id"|"keepPacked");
+        let name=if prefix.is_empty(){key.clone()}
+            else{format!("{prefix}/{key}")};
+        let editable=safe_parent&&clean&&depth<8
+            &&matches!(child.kind,1|2|3|4|5|6|8);
+        out.push(OriginalBePath{
+            path:name.clone(),kind:child.kind,
+            payload_bytes:child.raw.len(),
+            immediate_children:if child.kind==10{child.fields.len()}
+                else if child.kind==9{child.items.len()}else{0},
+            safely_editable_scalar:editable,
+        });
+        if child.kind==10 && depth<7{
+            flatten_original_be(child,&name,depth+1,safe_parent&&clean,out);
+        }
+    }
+}
+pub fn inspect_original_be_tree(
+    original_nbt:&[u8],position:(i32,i32,i32)
+)->Result<Vec<OriginalBePath>>{
+    if inspect_original_block_entity(original_nbt,position)?.is_none(){
+        return Ok(Vec::new());
+    }
+    let root=parse_root(original_nbt)?;
+    let modern=root.field("sections").is_some();
+    let source=if modern{&root}else{root.require("Level",10)?};
+    let list=source.require(if modern{"block_entities"}else{"TileEntities"},9)?;
+    let entity=list.items.iter().find(|t|
+        t.kind==10
+        &&t.field("x").and_then(|x|x.i32().ok())==Some(position.0)
+        &&t.field("y").and_then(|y|y.i32().ok())==Some(position.1)
+        &&t.field("z").and_then(|z|z.i32().ok())==Some(position.2)
+    ).ok_or_else(||error("BE field tree position is inconsistent"))?;
+    let mut out=Vec::new();
+    flatten_original_be(entity,"",0,true,&mut out);
+    Ok(out)
+}
+
+/// Read-only prototype for precisely editing one existing scalar TAG payload
+/// inside a single original Block Entity. This NEVER saves a world file.
+/// Unknown siblings, other entities, blocks, registry IDs and nested NBT
+/// remain exact original bytes. No deletions, additions or type changes.
+/// Every ancestor must be a real Compound in the original source. Only
+/// the final leaf is replaceable; all sibling names, kinds and raw payloads
+/// must survive byte-for-byte. Lists and arrays are deliberately opaque.
+fn verify_be_scalar_path<'a>(
+    original:&Tag<'a>,replaced:&Tag<'_>,path:&[&str],bytes:&[u8],
+)->Result<()>{
+    if original.kind!=10||replaced.kind!=10
+        ||original.fields.len()!=replaced.fields.len()||path.is_empty(){
+        return Err(error("Nested BE edit changed Compound schema"));
+    }
+    for ((name,old),(new_name,new)) in
+        original.fields.iter().zip(&replaced.fields){
+        if name!=new_name||old.kind!=new.kind{
+            return Err(error("Nested BE edit changed original field identity"));
+        }
+        if name==path[0]{
+            if path.len()==1{
+                if new.raw!=bytes{
+                    return Err(error("Targeted BE scalar bytes not found after replay"));
+                }
+            }else{
+                verify_be_scalar_path(old,new,&path[1..],bytes)?;
+            }
+        }else if old.raw!=new.raw{
+            return Err(error("Nested BE edit touched an unselected field"));
+        }
+    }
+    if original.field(path[0]).is_none(){
+        return Err(error("Nested BE path disappeared during replay"));
+    }
+    Ok(())
+}
+
+pub fn patch_original_block_entity_scalar(
+    original_nbt:&[u8],position:(i32,i32,i32),field:&str,text:&str,
+)->Result<Vec<u8>>{
+    if field.is_empty()||field.len()>128||text.len()>4096{
+        return Err(error("Block Entity field/value exceeds preview safety budget"));
+    }
+    let path=field.split('/').collect::<Vec<_>>();
+    if path.is_empty()||path.len()>8||path.iter().any(|segment|
+        segment.is_empty()||segment.len()>64
+        ||matches!(*segment,"x"|"y"|"z"|"id"|"keepPacked")
+    ){
+        return Err(error("Unsafe or excessively deep original BE scalar field path"));
+    }
+    let before=decode_sections(original_nbt)?;
+    if !before.block_entities.contains(&position){
+        return Err(error("No original Block Entity at selected XYZ"));
+    }
+    let root=parse_root(original_nbt)?;
+    let modern=root.field("sections").is_some();
+    let source=if modern{&root}else{root.require("Level",10)?};
+    let list=source.require(if modern{"block_entities"}else{"TileEntities"},9)?;
+    let entity=list.items.iter().find(|item|{
+        item.field("x").and_then(|t|t.i32().ok())==Some(position.0)
+        &&item.field("y").and_then(|t|t.i32().ok())==Some(position.1)
+        &&item.field("z").and_then(|t|t.i32().ok())==Some(position.2)
+    }).ok_or_else(||error("Original Block Entity missing from compound List"))?;
+    let mut parent=entity;
+    for segment in &path[..path.len()-1]{
+        parent=parent.require(segment,10)?;
+    }
+    let old=parent.field(path[path.len()-1])
+        .ok_or_else(||error("Field not present in original Block Entity"))?;
+    let replacement=match old.kind{
+        1=>vec![text.parse::<i8>().map_err(|_|error("Expected signed TAG_Byte"))? as u8],
+        2=>text.parse::<i16>().map_err(|_|error("Expected signed TAG_Short"))?
+            .to_be_bytes().to_vec(),
+        3=>text.parse::<i32>().map_err(|_|error("Expected signed TAG_Int"))?
+            .to_be_bytes().to_vec(),
+        4=>text.parse::<i64>().map_err(|_|error("Expected signed TAG_Long"))?
+            .to_be_bytes().to_vec(),
+        5=>{
+            let number=text.parse::<f32>()
+                .map_err(|_|error("Expected TAG_Float numeric value"))?;
+            if !number.is_finite(){return Err(error("Non-finite NBT Float rejected"));}
+            number.to_bits().to_be_bytes().to_vec()
+        },
+        6=>{
+            let number=text.parse::<f64>()
+                .map_err(|_|error("Expected TAG_Double numeric value"))?;
+            if !number.is_finite(){return Err(error("Non-finite NBT Double rejected"));}
+            number.to_bits().to_be_bytes().to_vec()
+        },
+        8=>{
+            let size=u16::try_from(text.len())
+                .map_err(|_|error("NBT UTF-8 string too long"))?;
+            let mut bytes=size.to_be_bytes().to_vec();
+            bytes.extend(text.as_bytes());bytes
+        },
+        _=>return Err(error("Only original numeric or String scalar tags can be preview-edited")),
+    };
+    if old.raw==replacement {
+        return Err(error("Scalar preview does not change original data"));
+    }
+    let (start,end)=payload_span(original_nbt,old.raw)?;
+    let mut patched=Vec::with_capacity(original_nbt.len() + replacement.len());
+    patched.extend_from_slice(&original_nbt[..start]);
+    patched.extend_from_slice(&replacement);
+    patched.extend_from_slice(&original_nbt[end..]);
+    if patched.len()>64*1024*1024{
+        return Err(error("Scalar NBT preview exceeds 64 MiB"));
+    }
+    let after=decode_sections(&patched)?;
+    if before.x!=after.x||before.z!=after.z
+        ||before.data_version!=after.data_version
+        ||before.layout!=after.layout||before.block_entities!=after.block_entities
+        ||before.sections.len()!=after.sections.len(){
+        return Err(error("Original chunk structure altered by BE scalar surgery"));
+    }
+    for section in &before.sections {
+        let updated=after.sections.iter().find(|s|s.y==section.y)
+            .ok_or_else(||error("Section disappeared after scalar patch"))?;
+        if updated.indices!=section.indices||updated.palette!=section.palette{
+            return Err(error("BlockStates unexpectedly changed during scalar edit"));
+        }
+    }
+    let new_root=parse_root(&patched)?;
+    let new_source=if modern{&new_root}else{new_root.require("Level",10)?};
+    let new_list=new_source.require(if modern{"block_entities"}else{"TileEntities"},9)?;
+    if new_list.items.len()!=list.items.len(){
+        return Err(error("Block Entity list changed length after scalar preview"));
+    }
+    for (original,updated) in list.items.iter().zip(&new_list.items){
+        if original.raw.as_ptr()==entity.raw.as_ptr(){
+            if original.fields.len()!=updated.fields.len(){
+                return Err(error("Edited BE changed number of existing tags"));
+            }
+            verify_be_scalar_path(original,updated,&path,&replacement)?;
+        }else if original.raw!=updated.raw{
+            return Err(error("BE scalar preview touched a different original Block Entity"));
+        }
+    }
+    Ok(patched)
+}
+
+/// Borrow the original Block Entity NBT Compound *payload* and clone
+/// it byte-for-byte for an independent opaque snapshot.
+pub fn original_block_entity_bytes(
+    original_nbt:&[u8],position:(i32,i32,i32),
+)->Result<Option<Vec<u8>>>{
+    let decoded=decode_sections(original_nbt)?;
+    if !decoded.block_entities.contains(&position){return Ok(None);}
+    let root=parse_root(original_nbt)?;
+    let source=if root.field("sections").is_some(){
+        &root
+    }else{root.require("Level",10)?};
+    let key=if root.field("sections").is_some(){"block_entities"}else{"TileEntities"};
+    let list=source.require(key,9)?;
+    let item=list.items.iter().find(|node|
+        node.kind==10
+        &&node.field("x").and_then(|tag|tag.i32().ok())==Some(position.0)
+        &&node.field("y").and_then(|tag|tag.i32().ok())==Some(position.1)
+        &&node.field("z").and_then(|tag|tag.i32().ok())==Some(position.2)
+    ).ok_or_else(||error("Original BE list inconsistent with decoded coordinates"))?;
+    Ok(Some(item.raw.to_vec()))
+}
+
 /// A strict original-byte, SAME-PALETTE named-state patch candidate.
 /// This is an IN-MEMORY NBT transform, not a disk writer.
 #[derive(Debug, Clone)]

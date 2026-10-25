@@ -7,7 +7,7 @@ license.workspace = true
 description = "Native Rust iced Minecraft world inspector and future editor"
 
 [dependencies]
-iced = "0.14"
+iced = { version = "0.14", features = ["canvas"] }
 mcedit2-world = { path = "../mcedit2-world" }
 
 [[bin]]

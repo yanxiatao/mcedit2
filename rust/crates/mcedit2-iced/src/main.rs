@@ -1,12 +1,15 @@
 //! Native Rust + iced desktop with legacy MCEdit2 positional world arguments.
-use iced::widget::{button,column,container,row,scrollable,text,text_input};
+mod isometric;
+use iced::widget::{button,canvas,column,container,row,scrollable,text,text_input};
+use mcedit2_world::surface::SurfaceView;
+use isometric::IsometricSurface;
 use iced::{Element,Length,Theme};
 use mcedit2_world::{compatibility_label,inspect_input,launch,WorldSummary};
 use mcedit2_world::block_lookup::{parse_xyz,read_world_block};
-use mcedit2_world::editing::{parse_bounds,parse_state,Bounds,Preview,Session,Slice,SliceCell,VerticalSlice};
+use mcedit2_world::editing::{parse_bounds,parse_state,BeScalarPreview,Bounds,Preview,Session,Slice,SliceCell,VerticalSlice};
 use mcedit2_world::region_plan::NativeRegionCandidate;
 use mcedit2_world::clipboard::HorizontalTransform;
-use mcedit2_world::region_transaction::{apply_single_region,finalize_single_region,rollback_pending_region};
+use mcedit2_world::region_transaction::{apply_single_region,apply_authenticated_be_single_region,finalize_single_region,rollback_pending_region};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{SystemTime,UNIX_EPOCH};
@@ -17,6 +20,7 @@ struct SaveIntent {
     key:(usize,usize),
     timestamp:u32,
     candidate:NativeRegionCandidate,
+    be_mode:bool,
 }
 fn parse_region_name(name:&str)->Result<(i32,i32,&str),String>{
     let mut parts=name.trim().split('.');
@@ -56,6 +60,10 @@ fn shifted_slice(bounds:Bounds,dx:i32,dy:i32,dz:i32)->Result<String,String>{
 #[derive(Default)]
 struct App{
     path:String,
+    surface_area:String,
+    surface_camera:u8,
+    surface:Option<(usize,usize,SurfaceView)>,
+    surface_report:String,
     slice_grid:Option<(usize,usize,Slice)>,
     vertical_grid:Option<(usize,usize,VerticalSlice)>,
     vertical_area:String,
@@ -70,6 +78,13 @@ struct App{
     edit_area:String,
     edit_target:String,
     edit_filter:String,
+    be_scalar_field:String,
+    be_scalar_value:String,
+    be_snapshot_path:String,
+    be_journal_path:String,
+    be_batch_path:String,
+    plugin_manifest_path:String,
+    region_batch_path:String,
     clone_destination:String,
     fill_seed:String,
     patch_path:String,
@@ -81,6 +96,8 @@ struct App{
     recover_region:String,
     recovery_phrase:String,
     save_preview:Option<SaveIntent>,
+    be_save_phrase:String,
+    be_prepared:Option<(usize,usize,BeScalarPreview)>,
     edit_report:String,
     sessions:BTreeMap<(usize,usize),Session>,
     prepared:Option<(usize,usize,Preview)>,
@@ -90,6 +107,13 @@ struct App{
 #[derive(Debug,Clone)]
 enum Message{
     Path(String),Open,Select(usize),Coordinates(String),Dimension(usize),
+    SurfaceArea(String),InspectSurface,InspectVolume,PickSurface(i32,i32,i32),RotateSurface,
+    BeScalarField(String),BeScalarValue(String),PreviewBeScalar,
+    StageBeScalar,UndoBeScalar,RedoBeScalar,InspectStagedBe,InspectBeTree,
+    BeSnapshotPath(String),ExportOriginalBe,VerifyOriginalBe,
+    BeJournalPath(String),ExportBeJournal,ImportBeJournal,
+    BeBatchPath(String),PreviewBeBatch,StageBeBatch,
+    PluginManifestPath(String),PreviewPlugin,
     InspectBlock,InspectOriginalBlockEntity,SliceText(String),InspectSlice,PickSlice(i32,i32,i32),MoveSlice(i32,i32,i32),
     VerticalText(String),InspectVertical,PickVertical(usize,usize),
     SelectionText(String),TargetText(String),FilterText(String),
@@ -100,11 +124,69 @@ enum Message{
     PreviewTransformedClipboard(HorizontalTransform),
     SchematicPath(String),PreviewLegacySchematic,ExportLegacySchematic,
     SpongePath(String),PreviewSpongeV2,ExportSpongeV2,
-    PrepareWorldSave,SavePhrase(String),ConfirmWorldSave,
+    PreviewBeRegion,PrepareWorldSave,SavePhrase(String),ConfirmWorldSave,
+    RegionBatchPath(String),PreviewRegionBatch,ExportRegionBatch,VerifyRegionBatch,
+    PrepareBeSave,BeSavePhrase(String),ConfirmBeSave,
     RecoverRegion(String),RecoveryPhrase(String),FinalizeRegion,RollbackRegion,
     PreviewEdit,ApplyEdit,UndoEdit,RedoEdit,DiscardEdits,Clear
 }
 impl App{
+    fn inspect_surface(&mut self,exposed_volume:bool){
+        self.surface=None;
+        self.surface_report=match self.current_key(){
+            None=>"Select a Java world first.".into(),
+            Some(key)=>match parse_bounds(&self.surface_area){
+                Err(e)=>format!("Invalid 3D surface bounds: {e}"),
+                Ok(bounds)=>{
+                    let w=bounds.maximum[0] as i64-bounds.minimum[0] as i64+1;
+                    let depth=bounds.maximum[2] as i64-bounds.minimum[2] as i64+1;
+                    if w<=0 || w>16 || depth<=0 || depth>16{
+                        "Original 3D surface footprint must fit 16x16.".into()
+                    }else{
+                        match self.current_session(key).and_then(|session|
+                            (if exposed_volume{
+                                session.inspect_exposed_volume(
+                                    bounds.minimum[0],bounds.minimum[2],
+                                    bounds.minimum[1],bounds.maximum[1],
+                                    w as u8,depth as u8)
+                            }else{
+                                session.inspect_surface(
+                                    bounds.minimum[0],bounds.minimum[2],
+                                    bounds.minimum[1],bounds.maximum[1],
+                                    w as u8,depth as u8)
+                            }).map_err(|e|e.to_string())){
+                            Ok(result)=>{
+                                let message=format!(
+                                    "3D {}: {} visible voxels, {} missing source columns across {} chunks. Click top/side faces for exact XYZ; cropped boundary faces are viewport cuts, not inferred air.",
+                                    if exposed_volume{"exposed multilayer volume"}else{"highest-column surface"},
+                                    result.voxels.len(),result.missing_columns,result.source_chunks
+                                );
+                                self.surface=Some((key.0,key.1,result));
+                                message
+                            },
+                            Err(e)=>format!("3D surface refused: {e}"),
+                        }
+                    }
+                }
+            }
+        };
+    }
+    fn pick_surface(&mut self,x:i32,y:i32,z:i32){
+        let Some((wi,di,view))=self.surface.as_ref() else{return};
+        if self.current_key()!=Some((*wi,*di))
+            ||!view.voxels.iter().any(|v|v.x==x&&v.y==y&&v.z==z){
+            self.surface=None;
+            self.surface_report="3D view changed; reload before editing.".into();
+            return;
+        }
+        self.query_coordinates=format!("{x}, {y}, {z}");
+        self.edit_area=format!("{x},{y},{z};{x},{y},{z}");
+        self.be_prepared=None;
+        self.save_preview=None;self.prepared=None;
+        self.surface_report=format!(
+            "Selected exact original 3D voxel ({x},{y},{z}). Edits still require normal guarded preview and Apply."
+        );
+    }
     fn inspect_vertical_view(&mut self){
         self.vertical_grid=None;
         self.vertical_report=match self.current_key(){
@@ -140,6 +222,7 @@ impl App{
         let Some((x,y,z))=plane.coordinate(row,col) else{return};
         self.edit_area=format!("{x},{y},{z};{x},{y},{z}");
         self.query_coordinates=format!("{x}, {y}, {z}");
+        self.be_prepared=None;
         self.save_preview=None;
         self.prepared=None;
         self.block_result=format!("Selected vertical plane original block at ({x},{y},{z}); inspect the source Block Entity before editing.");
@@ -220,6 +303,7 @@ impl App{
         };
         self.query_coordinates=format!("{x}, {y}, {z}");
         self.edit_area=format!("{x},{y},{z};{x},{y},{z}");
+        self.be_prepared=None;
         self.prepared=None;
         self.save_preview=None;
         self.save_phrase.clear();
@@ -237,6 +321,8 @@ impl App{
         self.slice_result.clear();
         self.slice_grid=None;
         self.vertical_grid=None;
+        self.surface=None;
+        self.be_prepared=None;
     }
     fn current_world_context(&self)->Result<(usize,usize,WorldSummary,String),String>{
         let (wi,di)=self.current_key().ok_or("Select an original world and dimension")?;
@@ -284,11 +370,100 @@ impl App{
                 candidate.path.display(),candidate.modified_chunks,
                 candidate.original_bytes,candidate.planned_bytes,
             );
-            Ok((SaveIntent{key:(wi,di),timestamp,candidate},label))
+            Ok((SaveIntent{key:(wi,di),timestamp,candidate,be_mode:false},label))
         })();
         match result {
             Ok((intent,label))=>{self.save_preview=Some(intent);self.edit_report=label;},
             Err(e)=>self.edit_report=format!("Disk save preflight refused: {e}"),
+        }
+    }
+    fn prepare_be_save(&mut self){
+        self.save_preview=None;
+        self.save_phrase.clear();
+        self.be_save_phrase.clear();
+        self.be_prepared=None;
+        if self.readonly{
+            self.edit_report="-view forbids BE disk saves.".into();
+            return;
+        }
+        let result=(||->Result<(SaveIntent,String),String>{
+            let (wi,di,world,_)=self.current_world_context()?;
+            if self.sessions.iter().any(|((index,d),session)|
+                self.worlds.get(*index).is_some_and(|other|other.root==world.root)
+                &&(*index,*d)!=(wi,di)&&session.has_pending_changes()
+            ){
+                return Err("Another world/dimension has staged edits; BE save requires exclusive original world ownership".into());
+            }
+            let timestamp=u32::try_from(SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_|"System clock before epoch")?.as_secs())
+                .map_err(|_|"System clock cannot be represented as Region timestamp")?;
+            let mut plans=self.current_session((wi,di))?
+                .preview_be_region_candidates(timestamp).map_err(|e|e.to_string())?;
+            if plans.len()!=1{
+                return Err("BE save supports exactly one original Region; split or checkpoint multiple-Region edits".into());
+            }
+            let candidate=plans.pop().ok_or("Missing BE candidate")?;
+            if candidate.be_replay.is_empty(){
+                return Err("BE save requires one or more exact scalar proofs".into());
+            }
+            let msg=format!(
+                "HIGH-RISK verified BE save: {}. {} original scalar proofs, {} replaced chunks, {} -> {} bytes. The original world MUST be closed and backed up. This writes ONE Region only, retaining an immutable original backup and a pending rollback marker. Type SAVE_BE_NBT exactly; use FINALIZE or ROLLBACK afterward.",
+                candidate.path.display(),candidate.be_replay.len(),
+                candidate.modified_chunks,candidate.original_bytes,
+                candidate.planned_bytes
+            );
+            Ok((SaveIntent{key:(wi,di),timestamp,candidate,be_mode:true},msg))
+        })();
+        match result{
+            Ok((intent,msg))=>{self.save_preview=Some(intent);self.edit_report=msg;},
+            Err(e)=>self.edit_report=format!("BE save preflight refused: {e}"),
+        }
+    }
+    fn confirm_be_save(&mut self){
+        if self.readonly||self.be_save_phrase!="SAVE_BE_NBT"{
+            self.edit_report="BE disk save requires exact SAVE_BE_NBT confirmation and non-read-only mode.".into();
+            return;
+        }
+        let Some(intent)=self.save_preview.take()else{
+            self.edit_report="Prepare a fresh BE Region disk save preview first.".into();
+            return;
+        };
+        self.be_save_phrase.clear();
+        if !intent.be_mode||intent.candidate.be_replay.is_empty()
+            ||self.current_key()!=Some(intent.key){
+            self.edit_report="Wrong save mode or original world changed; BE save refused.".into();
+            return;
+        }
+        let result=(||->Result<_,String>{
+            let (wi,di,world,dimension)=self.current_world_context()?;
+            let current=self.current_session((wi,di))?
+                .preview_be_region_candidates(intent.timestamp).map_err(|e|e.to_string())?;
+            if current.len()!=1
+                ||current[0].path!=intent.candidate.path
+                ||current[0].original_region_sha256!=intent.candidate.original_region_sha256
+                ||current[0].image!=intent.candidate.image{
+                return Err("BE NBT, source world or staged blocks changed since preview; regenerate it".into());
+            }
+            let receipt=apply_authenticated_be_single_region(
+                &world,&dimension,&intent.candidate,"SAVE_BE_NBT"
+            ).map_err(|e|e.to_string())?;
+            Ok((world.root,receipt))
+        })();
+        match result{
+            Ok((root,receipt))=>{
+                self.clear_cached_world(&root);
+                self.edit_report=format!(
+                    "Authenticated BE Region written: {}. Immutable original backup {}. PENDING marker {}. MUST FINALIZE or ROLLBACK before reopening/editing the world.",
+                    receipt.region_path.display(),receipt.backup_path.display(),
+                    receipt.marker_path.display()
+                );
+            },
+            Err(e)=>{
+                self.edit_report=format!(
+                    "BE Region save refused/failed: {e}. If pending marker exists, resolve via FINALIZE/ROLLBACK before retrying."
+                );
+            }
         }
     }
     fn confirm_save(&mut self) {
@@ -301,6 +476,10 @@ impl App{
             return;
         };
         self.save_phrase.clear();
+        if intent.be_mode||!intent.candidate.be_replay.is_empty(){
+            self.edit_report="Normal SAVE refuses original BE scalar changes; use SAVE_BE_NBT.".into();
+            return;
+        }
         if self.current_key()!=Some(intent.key){
             self.edit_report="Selected world changed since save preview. Refused.".into();
             return;
@@ -383,7 +562,8 @@ impl App{
             clone_destination:"0, 64, 0".into(),
             fill_seed:"0, 64, 0".into(),
             clipboard_destination:"0, 64, 0".into(),
-            vertical_area:"0,-64,0;15,-49,0".into(),..Default::default()
+            vertical_area:"0,-64,0;15,-49,0".into(),
+            surface_area:"0,-64,0;15,-49,15".into(),..Default::default()
         };
         for path in &args.worlds {
             match inspect_input(path) {
@@ -504,6 +684,7 @@ impl App{
         }
     }
     fn apply_batch(&mut self){
+        self.surface=None;
         self.save_preview=None;
         self.slice_grid=None;
         self.vertical_grid=None;
@@ -528,6 +709,7 @@ impl App{
         };
     }
     fn history(&mut self, redo:bool){
+        self.surface=None;
         self.save_preview=None;
         self.slice_grid=None;
         self.vertical_grid=None;
@@ -548,6 +730,11 @@ impl App{
 fn update(app:&mut App,message:Message){
     match message{
         Message::Path(x)=>app.path=x,
+        Message::SurfaceArea(value)=>{app.surface_area=value;app.surface=None;},
+        Message::InspectSurface=>app.inspect_surface(false),
+        Message::InspectVolume=>app.inspect_surface(true),
+        Message::PickSurface(x,y,z)=>app.pick_surface(x,y,z),
+        Message::RotateSurface=>app.surface_camera=(app.surface_camera+1)%4,
         Message::ClipboardPath(value)=>app.clipboard_path=value,
         Message::SchematicPath(value)=>app.schematic_path=value,
         Message::SpongePath(value)=>app.sponge_path=value,
@@ -688,6 +875,9 @@ fn update(app:&mut App,message:Message){
         Message::PickSlice(x,y,z)=>app.pick_slice(x,y,z),
         Message::MoveSlice(dx,dy,dz)=>app.pan_slice(dx,dy,dz),
         Message::SavePhrase(value)=>app.save_phrase=value,
+        Message::BeSavePhrase(value)=>app.be_save_phrase=value,
+        Message::PrepareBeSave=>app.prepare_be_save(),
+        Message::ConfirmBeSave=>app.confirm_be_save(),
         Message::RecoverRegion(value)=>app.recover_region=value,
         Message::RecoveryPhrase(value)=>app.recovery_phrase=value,
         Message::PrepareWorldSave=>app.prepare_save(),
@@ -695,6 +885,8 @@ fn update(app:&mut App,message:Message){
         Message::FinalizeRegion=>app.recover_region(false),
         Message::RollbackRegion=>app.recover_region(true),
         Message::Open=>{
+            app.be_prepared=None;
+            app.surface=None;
             app.save_preview=None;
             app.slice_grid=None;
             app.vertical_grid=None;
@@ -715,6 +907,8 @@ fn update(app:&mut App,message:Message){
             }
         }
         Message::Select(index)=>{
+            app.be_prepared=None;
+            app.surface=None;
             app.save_preview=None;
             app.slice_grid=None;
             app.vertical_grid=None;
@@ -726,8 +920,10 @@ fn update(app:&mut App,message:Message){
                 app.edit_report.clear();
             }
         }
-        Message::Coordinates(value)=>app.query_coordinates=value,
+        Message::Coordinates(value)=>{app.query_coordinates=value;app.be_prepared=None;},
         Message::Dimension(index)=>{
+            app.be_prepared=None;
+            app.surface=None;
             app.save_preview=None;
             app.slice_grid=None;
             app.vertical_grid=None;
@@ -761,6 +957,263 @@ fn update(app:&mut App,message:Message){
                     }
                 }
             };
+        },
+        Message::BeScalarField(value)=>{app.be_scalar_field=value;app.be_prepared=None;},
+        Message::BeSnapshotPath(value)=>app.be_snapshot_path=value,
+        Message::BeJournalPath(value)=>app.be_journal_path=value,
+        Message::BeBatchPath(value)=>app.be_batch_path=value,
+        Message::RegionBatchPath(value)=>app.region_batch_path=value,
+        Message::PreviewRegionBatch=>{
+            let result=(||->Result<_,String>{
+                let key=app.current_key().ok_or("Select original world")?;
+                let time=u32::try_from(SystemTime::now()
+                    .duration_since(UNIX_EPOCH).map_err(|_|"System clock before UNIX epoch")?.as_secs())
+                    .map_err(|_|"Region timestamp cannot represent system clock")?;
+                app.current_session(key)?.prepare_region_batch_report(time)
+                    .map_err(|e|e.to_string())
+            })();
+            app.edit_report=match result{
+                Ok(report)=>format!("Verified {} original Region candidates across this dimension, {} BE scalar proof steps. READ-ONLY: multi-Region save is not atomic or available.",report.regions.len(),report.regions.iter().map(|r|r.be_scalar_steps).sum::<usize>()),
+                Err(e)=>format!("Region batch preflight refused: {e}"),
+            };
+        },
+        Message::ExportRegionBatch=>{
+            let path=PathBuf::from(app.region_batch_path.trim());
+            let result=(||->Result<usize,String>{
+                let key=app.current_key().ok_or("Select original world")?;
+                let time=u32::try_from(SystemTime::now()
+                    .duration_since(UNIX_EPOCH).map_err(|_|"Invalid system time")?.as_secs())
+                    .map_err(|_|"Invalid Region timestamp")?;
+                app.current_session(key)?.export_region_batch_report(time,&path)
+                    .map_err(|e|e.to_string())
+            })();
+            app.edit_report=match result{
+                Ok(n)=>format!("Wrote create-new original-byte dry-run manifest for {n} Region files; no Minecraft files changed."),
+                Err(e)=>format!("Region batch export refused: {e}"),
+            };
+        },
+        Message::VerifyRegionBatch=>{
+            let path=PathBuf::from(app.region_batch_path.trim());
+            let result=app.current_key().ok_or_else(||"Select original world".to_string())
+                .and_then(|key|app.current_session(key))
+                .and_then(|session|session.verify_region_batch_report(&path)
+                    .map_err(|e|e.to_string()));
+            app.edit_report=match result{
+                Ok(n)=>format!("Verified {n} exact Region candidates against original world bytes and current overlay; no disk writes."),
+                Err(e)=>format!("Region manifest verification refused: {e}"),
+            };
+        },
+        Message::PreviewBeBatch=>{
+            let file=PathBuf::from(app.be_batch_path.trim());
+            let result=app.current_key().ok_or_else(||"Select a world".to_string())
+                .and_then(|key|app.current_session(key))
+                .and_then(|session|session.preview_be_operation_file(&file)
+                    .map_err(|e|e.to_string()));
+            app.edit_report=match result{
+                Ok((count,chunks))=>format!("Validated all {count} BE scalar edits against source NBT across {chunks} chunks. Nothing staged or written."),
+                Err(e)=>format!("BE batch preview refused: {e}"),
+            };
+        },
+        Message::StageBeBatch=>{
+            if app.readonly {app.edit_report="-view forbids BE changes".into();}
+            else{
+                app.be_prepared=None;app.prepared=None;app.save_preview=None;
+                let file=PathBuf::from(app.be_batch_path.trim());
+                let result=app.current_key().ok_or_else(||"Select a world".to_string())
+                    .and_then(|key|app.current_session(key))
+                    .and_then(|session|session.stage_be_operation_file(&file)
+                        .map_err(|e|e.to_string()));
+                app.edit_report=match result{
+                    Ok(n)=>format!("Atomically staged all {n} BE scalar operations IN MEMORY. Existing BE Undo available; world disk unchanged."),
+                    Err(e)=>format!("Entire BE batch refused: {e}"),
+                };
+                app.surface=None;app.slice_grid=None;app.vertical_grid=None;
+            }
+        },
+        Message::ExportBeJournal=>{
+            let file=PathBuf::from(app.be_journal_path.trim());
+            let result=app.current_key().ok_or_else(||"Select an original world".to_string())
+                .and_then(|key|app.current_session(key))
+                .and_then(|editor|editor.export_be_journal(&file).map_err(|e|e.to_string()));
+            app.edit_report=match result{
+                Ok(n)=>format!("Exported {n} source-hashed BE scalar operations to detached create-new journal; original world untouched."),
+                Err(e)=>format!("BE checkpoint export refused: {e}"),
+            };
+        },
+        Message::ImportBeJournal=>{
+            if app.readonly{app.edit_report="-view forbids BE journal import.".into();}
+            else{
+                app.be_prepared=None;app.prepared=None;app.save_preview=None;
+                let file=PathBuf::from(app.be_journal_path.trim());
+                let result=app.current_key().ok_or_else(||"Select an original world".to_string())
+                    .and_then(|key|app.current_session(key))
+                    .and_then(|editor|editor.import_be_journal(&file).map_err(|e|e.to_string()));
+                app.edit_report=match result{
+                    Ok(n)=>format!("Restored {n} verified BE scalar changes IN MEMORY. Each step separately undoable; Region world save remains blocked."),
+                    Err(e)=>format!("BE journal restore refused without modifying session: {e}"),
+                };
+                app.surface=None;app.slice_grid=None;app.vertical_grid=None;
+            }
+        },
+        Message::PluginManifestPath(value)=>app.plugin_manifest_path=value,
+        Message::PreviewPlugin=>{
+            app.prepared=None;
+            app.save_preview=None;
+            let filename=PathBuf::from(app.plugin_manifest_path.trim());
+            let result=(||->Result<Preview,String>{
+                let key=app.current_key().ok_or("Select an original world/dimension")?;
+                app.current_session(key)?.prepare_plugin_file(&filename)
+                    .map_err(|e|e.to_string())
+            })();
+            match result{
+                Ok(preview)=>{
+                    app.edit_report=format!("Declarative plugin PREVIEW: {}. Stage using existing Undo-able Apply control; no arbitrary executable is run.",preview.summary());
+                    if let Some((wi,di))=app.current_key(){
+                        app.prepared=Some((wi,di,preview));
+                    }
+                },
+                Err(e)=>app.edit_report=format!("Plugin manifest preflight refused: {e}"),
+            }
+        },
+        Message::ExportOriginalBe=>{
+            let path=PathBuf::from(app.be_snapshot_path.trim());
+            let result=(||->Result<usize,String>{
+                let point=parse_xyz(&app.query_coordinates).map_err(|e|e.to_string())?;
+                let key=app.current_key().ok_or("Select original world/dimension")?;
+                app.current_session(key)?.export_original_be_snapshot(point,&path)
+                    .map_err(|e|e.to_string())
+            })();
+            app.block_result=match result{
+                Ok(size)=>format!("Exported immutable original Block Entity NBT ({} raw bytes) to external snapshot. World untouched.",size),
+                Err(e)=>format!("Opaque BE snapshot export refused: {e}"),
+            };
+        },
+        Message::VerifyOriginalBe=>{
+            let path=PathBuf::from(app.be_snapshot_path.trim());
+            let result=(||->Result<((i32,i32,i32),usize),String>{
+                let key=app.current_key().ok_or("Select original world/dimension")?;
+                app.current_session(key)?.verify_original_be_snapshot(&path)
+                    .map_err(|e|e.to_string())
+            })();
+            app.block_result=match result{
+                Ok((xyz,size))=>format!("Verified {} exact original NBT bytes at XYZ {:?} against the current source chunk; no data imported or modified.",size,xyz),
+                Err(e)=>format!("Opaque BE snapshot verification refused: {e}"),
+            };
+        },
+        Message::BeScalarValue(value)=>{app.be_scalar_value=value;app.be_prepared=None;},
+        Message::PreviewBeScalar=>{
+            app.be_prepared=None;
+            let outcome=(||->Result<_,String>{
+                let point=parse_xyz(&app.query_coordinates).map_err(|e|e.to_string())?;
+                let key=app.current_key().ok_or("Select original world and dimension")?;
+                let field=app.be_scalar_field.clone();
+                let value=app.be_scalar_value.clone();
+                let proposal=app.current_session(key)?.prepare_be_edit(point,&field,&value)
+                    .map_err(|e|e.to_string())?;
+                Ok((key.0,key.1,proposal))
+            })();
+            match outcome{
+                Ok((wi,di,preview))=>{
+                    app.block_result=format!(
+                        "Verified BE scalar proposal: {} NBT bytes, SHA-256 {}. STAGE is memory-only; Region saving blocked while BE edits remain.",
+                        preview.patched_nbt.len(),
+                        preview.sha256()
+                    );
+                    app.be_prepared=Some((wi,di,preview));
+                },
+                Err(e)=>app.block_result=format!("BE preview refused: {e}"),
+            }
+        },
+        Message::StageBeScalar=>{
+            if app.readonly{app.block_result="-view forbids BE staging.".into();}
+            else {
+                let outcome=app.be_prepared.take()
+                    .ok_or("Preview original BE scalar change first".to_owned())
+                    .and_then(|(wi,di,prepared)|{
+                        if app.current_key()!=Some((wi,di)){
+                            return Err("Changed dimension/world since BE preview".into());
+                        }
+                        app.current_session((wi,di))?.commit_be_edit(prepared)
+                            .map_err(|e|e.to_string())
+                    });
+                app.block_result=match outcome{
+                    Ok(())=>"BE NBT staged with separate Undo; Minecraft world unchanged and disk save BLOCKED.".into(),
+                    Err(e)=>format!("BE stage refused: {e}"),
+                };
+                app.save_preview=None;app.surface=None;app.slice_grid=None;app.vertical_grid=None;
+            }
+        },
+        Message::UndoBeScalar=>{
+            app.be_prepared=None;
+            app.save_preview=None;
+            if app.readonly{app.block_result="-view forbids BE Undo.".into();}
+            else{
+                let r=app.current_key().ok_or("Select original world".to_owned())
+                    .and_then(|k|app.current_session(k))
+                    .and_then(|s|s.undo_be_edit().map_err(|e|e.to_string()));
+                app.block_result=match r{
+                    Ok(true)=>"BE scalar Undo completed in memory.".into(),
+                    Ok(false)=>"No BE scalar Undo history.".into(),
+                    Err(e)=>format!("BE Undo refused: {e}"),
+                };
+                app.surface=None;app.slice_grid=None;app.vertical_grid=None;
+            }
+        },
+        Message::RedoBeScalar=>{
+            app.be_prepared=None;
+            app.save_preview=None;
+            if app.readonly{app.block_result="-view forbids BE Redo.".into();}
+            else{
+                let r=app.current_key().ok_or("Select original world".to_owned())
+                    .and_then(|k|app.current_session(k))
+                    .and_then(|s|s.redo_be_edit().map_err(|e|e.to_string()));
+                app.block_result=match r{
+                    Ok(true)=>"BE scalar Redo completed in memory.".into(),
+                    Ok(false)=>"No BE scalar Redo history.".into(),
+                    Err(e)=>format!("BE Redo refused: {e}"),
+                };
+                app.surface=None;app.slice_grid=None;app.vertical_grid=None;
+            }
+        },
+        Message::PreviewBeRegion=>{
+            app.save_preview=None;
+            let result=app.current_key().ok_or_else(||"Select original world".to_string()).and_then(|key|
+                app.current_session(key)
+            ).and_then(|editor|editor.preview_be_region_candidates(0).map_err(|e|e.to_string()));
+            app.edit_report=match result{
+                Ok(regions)=>format!("BE-AUTHENTICATED IN-MEMORY Region preview: {} affected Region files; {} total bytes in candidates. Disk saving requires the separate fresh SAVE_BE_NBT transaction and backup confirmation.",regions.len(),
+                    regions.iter().map(|r|r.planned_bytes).sum::<usize>()),
+                Err(e)=>format!("BE-aware Region preview refused: {e}"),
+            };
+        },
+        Message::InspectStagedBe=>{
+            let r=(||->Result<String,String>{
+                let p=parse_xyz(&app.query_coordinates).map_err(|e|e.to_string())?;
+                let k=app.current_key().ok_or("Select original world")?;
+                Ok(app.current_session(k)?.inspect_staged_be(p)
+                    .map_err(|e|e.to_string())?.map_or_else(
+                        ||"No original/staged BE found.".into(),|be|be.report()))
+            })();
+            app.block_result=r.unwrap_or_else(|e|format!("BE inspection refused: {e}"));
+        },
+        Message::InspectBeTree=>{
+            let result=(||->Result<String,String>{
+                let pos=parse_xyz(&app.query_coordinates).map_err(|e|e.to_string())?;
+                let key=app.current_key().ok_or("Select an original world")?;
+                let tree=app.current_session(key)?.inspect_original_be_tree(pos)
+                    .map_err(|e|e.to_string())?;
+                if tree.is_empty(){return Ok("No original BE NBT at this XYZ.".into());}
+                let mut message=format!("Original modded BE tree: {} visible nested paths (read only). Safely editable scalar paths marked EDIT; no arrays/list elements are edited.\n",tree.len());
+                for item in tree{
+                    message.push_str(&format!(
+                        "{} kind={} bytes={} children={} [{}]\n",
+                        item.path,item.kind,item.payload_bytes,item.immediate_children,
+                        if item.safely_editable_scalar{"EDIT"}else{"READ ONLY"}
+                    ));
+                }
+                Ok(message)
+            })();
+            app.block_result=result.unwrap_or_else(|e|format!("BE tree refused: {e}"));
         },
         Message::InspectOriginalBlockEntity=>{
             let result=(||->Result<String,String>{
@@ -837,6 +1290,7 @@ fn update(app:&mut App,message:Message){
             };
         },
         Message::ImportPatch=>{
+            app.surface=None;
             app.save_preview=None;
             app.slice_grid=None;
             app.vertical_grid=None;
@@ -869,6 +1323,9 @@ fn update(app:&mut App,message:Message){
         Message::UndoEdit=>app.history(false),
         Message::RedoEdit=>app.history(true),
         Message::DiscardEdits=>{
+            app.be_save_phrase.clear();
+            app.be_prepared=None;
+            app.surface=None;
             app.save_preview=None;
             app.slice_grid=None;
             app.vertical_grid=None;
@@ -881,6 +1338,9 @@ fn update(app:&mut App,message:Message){
             app.edit_report="Discarded all staged edits for this world/dimension; original disk untouched.".into();
         }
         Message::Clear=>{
+            app.be_save_phrase.clear();
+            app.be_prepared=None;
+            app.surface=None;
             app.save_preview=None;
             app.slice_grid=None;
             app.vertical_grid=None;
@@ -950,6 +1410,65 @@ fn view(app:&App)->Element<'_,Message>{
         if !app.block_result.is_empty(){
             body=body.push(text(&app.block_result));
         }
+        body=body.push(row![
+            text_input("3D voxel surface X1,Y1,Z1;X2,Y2,Z2 (16x16x32 max)",
+                &app.surface_area).on_input(Message::SurfaceArea).width(Length::Fill),
+            button("Top-surface 3D").on_press(Message::InspectSurface),
+            button("Exposed multi-layer 3D").on_press(Message::InspectVolume)
+        ].spacing(8));
+        if let Some((wi,di,view))=&app.surface{
+            if app.current_key()==Some((*wi,*di)){
+                body=body.push(button(text(format!("Rotate 3D camera 90° (view {})",app.surface_camera)))
+                    .on_press(Message::RotateSurface));
+                body=body.push(canvas(IsometricSurface{
+                    surface:view.clone(),camera_quarters:app.surface_camera
+                })
+                    .width(Length::Fill).height(Length::Fixed(440.0)));
+            }
+        }
+        if !app.surface_report.is_empty(){
+            body=body.push(text(&app.surface_report));
+        }
+        body=body.push(row![
+            text_input("Existing Block Entity scalar field (not id/x/y/z)",&app.be_scalar_field)
+                .on_input(Message::BeScalarField).width(Length::Fill),
+            text_input("Exact replacement scalar value",&app.be_scalar_value)
+                .on_input(Message::BeScalarValue).width(Length::Fill),
+            button("Preview BE scalar").on_press(Message::PreviewBeScalar),
+            button("Stage BE in memory").on_press(Message::StageBeScalar),
+        ].spacing(8));
+        body=body.push(row![
+            button("Undo BE").on_press(Message::UndoBeScalar),
+            button("Redo BE").on_press(Message::RedoBeScalar),
+            button("Inspect staged BE").on_press(Message::InspectStagedBe),
+            button("Inspect original nested NBT tree").on_press(Message::InspectBeTree),
+            button("Verify BE Region (memory only)").on_press(Message::PreviewBeRegion),
+        ].spacing(8));
+        body=body.push(text("Experimental BE-aware single-Region SAVE — EXACT existing scalar tags only; closed world, backup, pending recovery REQUIRED."));
+        body=body.push(row![
+            button("Preview BE save (single Region)").on_press(Message::PrepareBeSave),
+            text_input("Type SAVE_BE_NBT to write",&app.be_save_phrase)
+                .on_input(Message::BeSavePhrase).width(Length::Fill),
+            button("Confirm BE Region save").on_press(Message::ConfirmBeSave),
+        ].spacing(8));
+        body=body.push(row![
+            text_input("Declarative BE scalar .mcedit2beops.json",&app.be_batch_path)
+                .on_input(Message::BeBatchPath).width(Length::Fill),
+            button("Preview whole BE batch").on_press(Message::PreviewBeBatch),
+            button("Stage all BE edits").on_press(Message::StageBeBatch),
+        ].spacing(8));
+        body=body.push(row![
+            text_input("Outside-world BE edit .mcedit2bejournal.json",&app.be_journal_path)
+                .on_input(Message::BeJournalPath).width(Length::Fill),
+            button("Checkpoint staged BE edits").on_press(Message::ExportBeJournal),
+            button("Restore BE edits (memory)").on_press(Message::ImportBeJournal),
+        ].spacing(8));
+        body=body.push(row![
+            text_input("Outside-world .mcedit2be original NBT snapshot",&app.be_snapshot_path)
+                .on_input(Message::BeSnapshotPath).width(Length::Fill),
+            button("Export exact original BE NBT").on_press(Message::ExportOriginalBe),
+            button("Verify BE source unchanged").on_press(Message::VerifyOriginalBe),
+        ].spacing(8));
         body=body.push(row![
             text_input("2D X/Z map: X1,Y,Z1; X2,Y,Z2",&app.slice_area)
                 .on_input(Message::SliceText).width(Length::Fill),
@@ -1082,6 +1601,18 @@ fn view(app:&App)->Element<'_,Message>{
                 .on_input(Message::SpongePath).width(Length::Fill),
             button("Export selection to Sponge v2").on_press(Message::ExportSpongeV2),
             button("Preview Sponge v2 paste").on_press(Message::PreviewSpongeV2),
+        ].spacing(8));
+        body=body.push(row![
+            text_input("External .mcedit2regionplan.json",&app.region_batch_path)
+                .on_input(Message::RegionBatchPath).width(Length::Fill),
+            button("Preflight all Regions").on_press(Message::PreviewRegionBatch),
+            button("Export Region plan").on_press(Message::ExportRegionBatch),
+            button("Verify plan").on_press(Message::VerifyRegionBatch),
+        ].spacing(8));
+        body=body.push(row![
+            text_input("Declarative .mcedit2plugin.json file",&app.plugin_manifest_path)
+                .on_input(Message::PluginManifestPath).width(Length::Fill),
+            button("Preview safe plugin replacement").on_press(Message::PreviewPlugin),
         ].spacing(8));
         body=body.push(row![
             text_input("External .mcedit2patch path (outside the world)",&app.patch_path)

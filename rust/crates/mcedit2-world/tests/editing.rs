@@ -257,6 +257,16 @@ fn chunk_with_be(state: &str, position: (i32, i32, i32)) -> Vec<u8> {
         tag(3, "y", &position.1.to_be_bytes()),
         tag(3, "z", &position.2.to_be_bytes()),
         tag(8, "UnrecognizedPayload", &nbt_string("KEEP EXACTLY")),
+        tag(5, "MachineHeat", &25.0f32.to_bits().to_be_bytes()),
+        tag(6, "MachinePressure", &1234.5f64.to_bits().to_be_bytes()),
+        tag(10, "ModdedCompound", &compound(vec![
+            tag(4, "CycleCount", &123i64.to_be_bytes()),
+            tag(8, "OwnerNote", &nbt_string("OPAQUE NESTED VALUE")),
+            tag(10, "Inner", &compound(vec![
+                tag(3, "BurnTime", &14i32.to_be_bytes()),
+                tag(8, "UnknownNested", &nbt_string("keep deep sibling")),
+            ])),
+        ])),
     ]));
     let replacement = tag(9, "block_entities", &entries);
     let at = raw.windows(empty.len()).position(|part| part == empty).unwrap();
@@ -996,4 +1006,436 @@ fn legacy_numeric_schematic_export_import_roundtrips_addblocks_and_meta(){
     assert!(editor.export_legacy_schematic(selection,&path).is_err());
     fs::remove_file(path).unwrap();
     assert_eq!(world.bytes_now(),original);
+}
+
+#[test]
+fn bounded_isometric_voxel_surface_uses_original_height_and_overlay_without_world_writes(){
+    let world=NativeWorld::create(true);
+    let original=world.bytes_now();
+    let mut editor=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    assert!(editor.inspect_surface(0,0,-64,-33,16,16).is_ok());
+    assert!(editor.inspect_surface(0,0,-64,-32,16,16).is_err());
+    assert!(editor.inspect_surface(0,0,-64,-33,17,16).is_err());
+    let view=editor.inspect_surface(0,0,-64,-63,2,2).unwrap();
+    assert_eq!(view.voxels.len(),4);
+    assert_eq!(view.missing_columns,0);
+    assert_eq!(view.voxels[0].y,-63);
+    let area=Bounds::new((0,-63,0),(0,-63,0)).unwrap();
+    editor.commit(editor.prepare(area,&parse_state("minecraft:gold_block").unwrap(),None).unwrap()).unwrap();
+    let changed=editor.inspect_surface(0,0,-64,-63,2,2).unwrap();
+    assert_eq!(changed.voxels[0].state.name,"minecraft:gold_block");
+    assert_eq!(world.bytes_now(),original);
+}
+
+#[test]
+fn surgical_be_scalar_candidate_changes_only_target_and_preserves_other_nbt(){
+    use mcedit2_world::sections;
+    let world=NativeWorld::create(true);
+    let original_chunk=chunk_with_be("minecraft:stone",(2,-64,3));
+    overwrite_region(&world,&original_chunk);
+    let original_file=world.bytes_now();
+    let patched=sections::patch_original_block_entity_scalar(
+        &original_chunk,(2,-64,3),"UnrecognizedPayload","KEEP REPLACED EXACTLY"
+    ).unwrap();
+    assert!(patched.windows(b"KEEP REPLACED EXACTLY".len())
+        .any(|x|x==b"KEEP REPLACED EXACTLY"));
+    assert!(!patched.windows(b"KEEP EXACTLY".len())
+        .any(|x|x==b"KEEP EXACTLY"));
+    let original_inspection=sections::inspect_original_block_entity(
+        &original_chunk,(2,-64,3)
+    ).unwrap().unwrap();
+    let updated=sections::inspect_original_block_entity(
+        &patched,(2,-64,3)
+    ).unwrap().unwrap();
+    assert_eq!(updated.raw_id,original_inspection.raw_id);
+    assert_ne!(updated.original_compound_sha256,original_inspection.original_compound_sha256);
+    assert_eq!(updated.original_field_count,original_inspection.original_field_count);
+    assert!(sections::patch_original_block_entity_scalar(
+        &original_chunk,(2,-64,3),"id","mod:replacement"
+    ).is_err());
+    assert!(sections::patch_original_block_entity_scalar(
+        &original_chunk,(2,-64,3),"unknown","any"
+    ).is_err());
+    let editor=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    assert!(editor.prepare_original_be_scalar(
+        (2,-64,3),"UnrecognizedPayload","SECOND"
+    ).is_ok());
+    assert_eq!(editor.pending_cells(),0);
+    assert_eq!(world.bytes_now(),original_file);
+}
+
+#[test]
+fn external_original_be_nbt_snapshot_preserves_modded_compound_and_detects_source_drift(){
+    let world=NativeWorld::create(true);
+    overwrite_region(&world,&chunk_with_be("minecraft:stone",(2,-64,3)));
+    let original=world.bytes_now();
+    let editor=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    let file=std::env::temp_dir().join(format!(
+        "mcedit2-original-be-{}-{}.mcedit2be",
+        std::process::id(),COUNTER.fetch_add(1,Ordering::Relaxed)
+    ));
+    let bytes=editor.export_original_be_snapshot((2,-64,3),&file).unwrap();
+    assert!(bytes>0);
+    let (position,length)=editor.verify_original_be_snapshot(&file).unwrap();
+    assert_eq!(position,(2,-64,3));
+    assert_eq!(length,bytes);
+    assert!(editor.export_original_be_snapshot((2,-64,3),&file).is_err());
+    assert_eq!(world.bytes_now(),original);
+    overwrite_region(&world,&chunk_with_be("minecraft:gold_block",(2,-64,3)));
+    assert!(editor.verify_original_be_snapshot(&file).is_err());
+    fs::remove_file(file).unwrap();
+}
+
+#[test]
+fn declarative_plugin_preview_uses_original_chunk_safety_and_a_single_undo(){
+    let world=NativeWorld::create(true);
+    let before=world.bytes_now();
+    let path=std::env::temp_dir().join(format!(
+        "mcedit2-test-{}-{}.mcedit2plugin.json",
+        std::process::id(),COUNTER.fetch_add(1,Ordering::Relaxed)
+    ));
+    let manifest=serde_json::json!({
+        "schema_version":1,"name":"test original-only 3D replacement",
+        "only_data_version":5125,
+        "only_dimension":"minecraft:overworld",
+        "operation":{
+            "kind":"replace_blocks",
+            "minimum":[0,-64,0],"maximum":[1,-64,1],
+            "with_state":"minecraft:gold_block",
+            "only_if_state":"minecraft:stone"
+        }
+    });
+    fs::write(&path,serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let mut session=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    let preview=session.prepare_plugin_file(&path).unwrap();
+    assert_eq!(preview.changed(),4);
+    assert_eq!(session.pending_cells(),0);
+    session.commit(preview).unwrap();
+    assert_eq!(session.pending_cells(),4);
+    assert!(session.undo().unwrap());
+    assert_eq!(session.pending_cells(),0);
+    assert_eq!(world.bytes_now(),before);
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn native_multilayer_original_exposed_volume_culls_hidden_blocks_and_shows_real_cavities(){
+    use mcedit2_world::surface::{FACE_TOP,FACE_POS_X,FACE_NEG_X};
+    let world=NativeWorld::create(true);
+    let original=world.bytes_now();
+    let mut session=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    let solid=session.inspect_exposed_volume(0,0,-64,-62,3,3).unwrap();
+    assert_eq!(solid.voxels.len(),26);
+    assert!(!solid.voxels.iter().any(|v|(v.x,v.y,v.z)==(1,-63,1)));
+    let hollow=Bounds::new((1,-63,1),(1,-63,1)).unwrap();
+    let change=session.prepare(hollow,&parse_state("minecraft:air").unwrap(),None).unwrap();
+    session.commit(change).unwrap();
+    let exposed=session.inspect_exposed_volume(0,0,-64,-62,3,3).unwrap();
+    assert_eq!(exposed.voxels.len(),26);
+    assert!(exposed.voxels.iter().any(|v|
+        (v.x,v.y,v.z)==(1,-64,1)&&v.faces&FACE_TOP!=0
+    ));
+    assert!(exposed.voxels.iter().any(|v|
+        (v.x,v.y,v.z)==(0,-63,1)&&v.faces&FACE_POS_X!=0
+    ));
+    assert!(exposed.voxels.iter().any(|v|
+        (v.x,v.y,v.z)==(2,-63,1)&&v.faces&FACE_NEG_X!=0
+    ));
+    assert!(session.inspect_exposed_volume(0,0,-64,-32,3,3).is_err());
+    assert_eq!(world.bytes_now(),original);
+}
+
+#[test]
+fn original_be_scalar_memory_staging_is_undoable_and_never_disk_writable(){
+    let world=NativeWorld::create(true);
+    overwrite_region(&world,&chunk_with_be("minecraft:stone",(2,-64,3)));
+    let untouched=world.bytes_now();
+    let mut editor=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    let candidate=editor.prepare_be_edit(
+        (2,-64,3),"UnrecognizedPayload","FIRST STAGED"
+    ).unwrap();
+    editor.commit_be_edit(candidate).unwrap();
+    assert_eq!(editor.pending_be_chunks(),1);
+    assert!(editor.has_pending_changes());
+    assert!(editor.prepare_native_region_candidates(123).is_err());
+    assert!(editor.export_patch(&journal_path()).is_err());
+    assert_ne!(
+        editor.inspect_staged_be((2,-64,3)).unwrap().unwrap().original_compound_sha256,
+        editor.inspect_original_block_entity((2,-64,3)).unwrap().unwrap().original_compound_sha256
+    );
+    assert!(editor.undo_be_edit().unwrap());
+    assert_eq!(editor.pending_be_chunks(),0);
+    assert!(editor.redo_be_edit().unwrap());
+    assert_eq!(editor.pending_be_chunks(),1);
+    editor.discard();
+    assert!(!editor.has_pending_changes());
+    assert_eq!(world.bytes_now(),untouched);
+}
+#[test]
+fn be_scalar_stale_preview_and_changed_disk_are_rejected(){
+    let world=NativeWorld::create(true);
+    overwrite_region(&world,&chunk_with_be("minecraft:stone",(2,-64,3)));
+    let mut editor=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    let first=editor.prepare_be_edit((2,-64,3),"UnrecognizedPayload","ONE").unwrap();
+    editor.commit_be_edit(first).unwrap();
+    let stale=editor.prepare_be_edit((2,-64,3),"UnrecognizedPayload","TWO").unwrap();
+    let next=editor.prepare_be_edit((2,-64,3),"UnrecognizedPayload","THREE").unwrap();
+    editor.commit_be_edit(next).unwrap();
+    assert!(editor.commit_be_edit(stale).is_err());
+    overwrite_region(&world,&chunk_with_be("minecraft:gold_block",(2,-64,3)));
+    assert!(editor.undo_be_edit().is_err());
+    assert_eq!(editor.pending_be_chunks(),1);
+}
+
+#[test]
+fn be_journal_restores_modded_scalar_operations_and_separate_undo_atomically(){
+    let world=NativeWorld::create(true);
+    overwrite_region(&world,&chunk_with_be("minecraft:stone",(2,-64,3)));
+    let original=world.bytes_now();
+    let path=std::env::temp_dir().join(format!(
+        "mcedit2-be-replay-{}-{}.mcedit2bejournal.json",
+        std::process::id(),COUNTER.fetch_add(1,Ordering::Relaxed)
+    ));
+    let mut editor=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    for text in ["FIRST MOD NBT","SECOND MOD NBT"]{
+        let candidate=editor.prepare_be_edit((2,-64,3),"UnrecognizedPayload",text).unwrap();
+        editor.commit_be_edit(candidate).unwrap();
+    }
+    assert_eq!(editor.export_be_journal(&path).unwrap(),2);
+    assert!(editor.export_be_journal(&path).is_err(),"BE journal must be create-new");
+    let mut recovered=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    assert_eq!(recovered.import_be_journal(&path).unwrap(),2);
+    assert_eq!(recovered.pending_be_chunks(),1);
+    assert_eq!(
+        recovered.inspect_staged_be((2,-64,3)).unwrap().unwrap().original_compound_sha256,
+        editor.inspect_staged_be((2,-64,3)).unwrap().unwrap().original_compound_sha256
+    );
+    assert!(recovered.undo_be_edit().unwrap());
+    assert!(recovered.redo_be_edit().unwrap());
+    assert!(recovered.prepare_native_region_candidates(1).is_err());
+    assert_eq!(world.bytes_now(),original);
+    fs::remove_file(path).unwrap();
+}
+#[test]
+fn be_journal_source_drift_and_invalid_entry_are_refused_without_partial_import(){
+    let world=NativeWorld::create(true);
+    overwrite_region(&world,&chunk_with_be("minecraft:stone",(2,-64,3)));
+    let path=std::env::temp_dir().join(format!(
+        "mcedit2-be-tamper-{}-{}.mcedit2bejournal.json",
+        std::process::id(),COUNTER.fetch_add(1,Ordering::Relaxed)
+    ));
+    let mut editor=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    let candidate=editor.prepare_be_edit((2,-64,3),"UnrecognizedPayload","VERIFY").unwrap();
+    editor.commit_be_edit(candidate).unwrap();
+    editor.export_be_journal(&path).unwrap();
+    let original_bytes=fs::read(&path).unwrap();
+    let mut file:serde_json::Value=serde_json::from_slice(&original_bytes).unwrap();
+    file["edits"][0]["resulting_chunk_sha256"]=serde_json::json!("0".repeat(64));
+    fs::write(&path,serde_json::to_vec(&file).unwrap()).unwrap();
+    let mut empty=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    assert!(empty.import_be_journal(&path).is_err());
+    assert_eq!(empty.pending_be_chunks(),0);
+    fs::write(&path,&original_bytes).unwrap();
+    overwrite_region(&world,&chunk_with_be("minecraft:gold_block",(2,-64,3)));
+    assert!(empty.import_be_journal(&path).is_err());
+    assert_eq!(empty.pending_be_chunks(),0);
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn be_only_and_combined_block_be_region_candidates_preserve_opaque_data(){
+    let world=NativeWorld::create(true);
+    overwrite_region(&world,&chunk_with_be("minecraft:stone",(2,-64,3)));
+    let unchanged=world.bytes_now();
+    let mut editor=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    let change=editor.prepare_be_edit(
+        (2,-64,3),"UnrecognizedPayload","BE EXACT REPLAY"
+    ).unwrap();
+    editor.commit_be_edit(change).unwrap();
+    let preview=editor.preview_be_region_candidates(47).unwrap();
+    assert_eq!(preview.len(),1);
+    assert_eq!(preview[0].be_replay.len(),1);
+    assert!(preview[0].image.len()>unchanged.len());
+    assert!(mcedit2_world::region_transaction::apply_single_region(
+        &world.metadata(),"minecraft:overworld",&preview[0]
+    ).is_err(),"BE Region preview remains in-memory only");
+    assert_eq!(world.bytes_now(),unchanged);
+    let area=Bounds::new((0,-64,0),(0,-64,0)).unwrap();
+    editor.commit(editor.prepare(
+        area,&parse_state("minecraft:gold_block").unwrap(),None
+    ).unwrap()).unwrap();
+    let mixed=editor.preview_be_region_candidates(49).unwrap();
+    assert_eq!(mixed.len(),1);
+    assert_eq!(mixed[0].be_replay.len(),1);
+    assert_eq!(world.bytes_now(),unchanged);
+}
+
+#[test]
+fn explicitly_confirmed_existing_be_scalar_region_save_is_recoverable_verbatim(){
+    use mcedit2_world::region_transaction::rollback_pending_region;
+    let world=NativeWorld::create(true);
+    overwrite_region(&world,&chunk_with_be("minecraft:stone",(2,-64,3)));
+    let unchanged=world.bytes_now();
+    let mut editor=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    let be=editor.prepare_be_edit(
+        (2,-64,3),"UnrecognizedPayload","SAVED WITH FULL NBT PROOF"
+    ).unwrap();
+    editor.commit_be_edit(be).unwrap();
+    assert!(editor.apply_authenticated_be_single_region_save(56,"SAVE").is_err());
+    assert_eq!(world.bytes_now(),unchanged);
+    let receipt=editor.apply_authenticated_be_single_region_save(
+        56,"SAVE_BE_NBT"
+    ).unwrap();
+    assert_ne!(world.bytes_now(),unchanged);
+    assert_eq!(fs::read(&receipt.backup_path).unwrap(),unchanged);
+    assert!(receipt.marker_path.is_file());
+    let readback=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    let updated=readback.inspect_original_block_entity((2,-64,3))
+        .unwrap().unwrap();
+    assert_eq!(updated.raw_id.as_deref(),Some("mod:precious_machine"));
+    assert_ne!(updated.original_compound_sha256,
+        mcedit2_world::sections::inspect_original_block_entity(
+            &chunk_with_be("minecraft:stone",(2,-64,3)),(2,-64,3)
+        ).unwrap().unwrap().original_compound_sha256);
+    rollback_pending_region(&world.metadata(),"minecraft:overworld",0,0,"mca").unwrap();
+    assert_eq!(world.bytes_now(),unchanged);
+}
+
+#[test]
+fn opaque_be_float_and_double_scalar_edits_preserve_all_other_modded_nbt(){
+    let source=chunk_with_be("minecraft:stone",(2,-64,3));
+    let baseline=mcedit2_world::sections::inspect_original_block_entity(
+        &source,(2,-64,3)
+    ).unwrap().unwrap();
+    let changed=mcedit2_world::sections::patch_original_block_entity_scalar(
+        &source,(2,-64,3),"MachineHeat","27.5"
+    ).unwrap();
+    let changed=mcedit2_world::sections::patch_original_block_entity_scalar(
+        &changed,(2,-64,3),"MachinePressure","4567.25"
+    ).unwrap();
+    let after=mcedit2_world::sections::inspect_original_block_entity(
+        &changed,(2,-64,3)
+    ).unwrap().unwrap();
+    assert_eq!(after.raw_id,baseline.raw_id);
+    assert_eq!(after.original_field_count,baseline.original_field_count);
+    assert_ne!(after.original_compound_sha256,baseline.original_compound_sha256);
+    for bad in ["NaN","+inf","-inf","1e9999"] {
+        assert!(mcedit2_world::sections::patch_original_block_entity_scalar(
+            &source,(2,-64,3),"MachineHeat",bad
+        ).is_err(),"Accepted invalid Float {bad}");
+    }
+    assert!(mcedit2_world::sections::patch_original_block_entity_scalar(
+        &source,(2,-64,3),"MachineHeat","25.0"
+    ).is_err(),"Identical scalar values cannot produce unnecessary edits");
+}
+
+#[test]
+fn compound_path_scalar_surgery_changes_one_leaf_without_reserializing_siblings(){
+    let source=chunk_with_be("minecraft:stone",(2,-64,3));
+    let changed=mcedit2_world::sections::patch_original_block_entity_scalar(
+        &source,(2,-64,3),"ModdedCompound/Inner/BurnTime","80"
+    ).unwrap();
+    assert!(changed.windows(b"keep deep sibling".len()).any(|v|v==b"keep deep sibling"));
+    assert!(changed.windows(b"OPAQUE NESTED VALUE".len()).any(|v|v==b"OPAQUE NESTED VALUE"));
+    assert!(changed.windows(b"KEEP EXACTLY".len()).any(|v|v==b"KEEP EXACTLY"));
+    assert!(mcedit2_world::sections::patch_original_block_entity_scalar(
+        &source,(2,-64,3),"ModdedCompound/Inner/BurnTime","14"
+    ).is_err());
+    for path in [
+        "ModdedCompound/Inner/UnknownNested/more","ModdedCompound//CycleCount",
+        "ModdedCompound/id","ModdedCompound/Inner/x",
+        "ModdedCompound/NoSuchField","ModdedCompound/Inner/BurnTime/",
+    ]{
+        assert!(mcedit2_world::sections::patch_original_block_entity_scalar(
+            &source,(2,-64,3),path,"100"
+        ).is_err(),"Accepted invalid nested path {path}");
+    }
+}
+
+#[test]
+fn declarative_modded_be_batch_is_all_or_nothing_without_world_writes(){
+    let world=NativeWorld::create(true);
+    overwrite_region(&world,&chunk_with_be("minecraft:stone",(2,-64,3)));
+    let saved=world.bytes_now();
+    let path=std::env::temp_dir().join(format!(
+        "mcedit2-batch-{}-{}.mcedit2beops.json",
+        std::process::id(),COUNTER.fetch_add(1,Ordering::Relaxed)
+    ));
+    let mut session=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    let manifest=|invalid:bool|serde_json::json!({
+        "version":1,"original_world_root":world.metadata().root.to_string_lossy(),
+        "dimension":"minecraft:overworld",
+        "data_version":world.metadata().data_version,
+        "operations":[
+            {"xyz":[2,-64,3],"field":"ModdedCompound/Inner/BurnTime","value":"90"},
+            {"xyz":[2,-64,3],
+                "field":if invalid{"no_such_field"}else{"MachineHeat"},
+                "value":"99.5"}
+        ]
+    });
+    fs::write(&path,serde_json::to_vec(&manifest(true)).unwrap()).unwrap();
+    assert!(session.stage_be_operation_file(&path).is_err());
+    assert_eq!(session.pending_be_chunks(),0);
+    fs::write(&path,serde_json::to_vec(&manifest(false)).unwrap()).unwrap();
+    assert_eq!(session.preview_be_operation_file(&path).unwrap(),(2,1));
+    assert_eq!(session.pending_be_chunks(),0);
+    assert_eq!(session.stage_be_operation_file(&path).unwrap(),2);
+    assert_eq!(session.pending_be_chunks(),1);
+    assert!(session.undo_be_edit().unwrap());
+    assert!(session.undo_be_edit().unwrap());
+    assert_eq!(session.pending_be_chunks(),0);
+    assert_eq!(world.bytes_now(),saved);
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn region_batch_manifest_detects_stale_source_and_unmodified_world(){
+    let world=NativeWorld::create(true);
+    let unchanged=world.bytes_now();
+    let path=std::env::temp_dir().join(format!(
+        "mcedit2-regions-{}-{}.mcedit2regionplan.json",
+        std::process::id(),COUNTER.fetch_add(1,Ordering::Relaxed)
+    ));
+    let mut editor=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    let area=Bounds::new((0,-64,0),(1,-64,1)).unwrap();
+    let preview=editor.prepare(area,&parse_state("minecraft:gold_block").unwrap(),None).unwrap();
+    editor.commit(preview).unwrap();
+    let report=editor.prepare_region_batch_report(99).unwrap();
+    assert_eq!(report.regions.len(),1);
+    assert_eq!(report.regions[0].edited_chunks,1);
+    assert_eq!(editor.export_region_batch_report(99,&path).unwrap(),1);
+    assert_eq!(editor.verify_region_batch_report(&path).unwrap(),1);
+    assert!(editor.export_region_batch_report(99,&path).is_err());
+    assert_eq!(world.bytes_now(),unchanged);
+    // Replace source with genuinely different chunk NBT. Rewriting an
+    // identical stone fixture would NOT constitute external source drift.
+    overwrite_region(&world,&modern_chunk("minecraft:gold_block"));
+    assert_ne!(world.bytes_now(),unchanged);
+    assert!(editor.verify_region_batch_report(&path).is_err());
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn original_modded_be_tree_lists_nested_scalar_paths_without_mutating_data(){
+    let source=chunk_with_be("minecraft:stone",(2,-64,3));
+    let entries=mcedit2_world::sections::inspect_original_be_tree(
+        &source,(2,-64,3)
+    ).unwrap();
+    let leaf=entries.iter().find(|x|
+        x.path=="ModdedCompound/Inner/BurnTime"
+    ).unwrap();
+    assert_eq!(leaf.kind,3);
+    assert!(leaf.safely_editable_scalar);
+    let sibling=entries.iter().find(|x|
+        x.path=="ModdedCompound/Inner/UnknownNested"
+    ).unwrap();
+    assert!(sibling.safely_editable_scalar);
+    assert!(!entries.iter().find(|x|x.path=="id").unwrap()
+        .safely_editable_scalar);
+    assert!(!entries.iter().find(|x|x.path=="ModdedCompound").unwrap()
+        .safely_editable_scalar);
+    let absent=mcedit2_world::sections::inspect_original_be_tree(
+        &source,(4,-64,3)
+    ).unwrap();
+    assert!(absent.is_empty());
 }

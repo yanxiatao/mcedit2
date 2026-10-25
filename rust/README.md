@@ -455,3 +455,200 @@ up to 4096 cells; iced supports export alongside classic import and modern
 Sponge v2. The five feature milestones are complete; the planned next step
 is ONE consolidated Linux/Windows `cargo check` + `cargo test` run, with no
 application binary building or packaging.
+
+## Migration batch 4, round 1/5 — interactive isometric 3D viewport
+
+A native iced 0.14 canvas now paints a real-height, isometric 3D projection
+of existing Java block columns (up to 16x16 footprint and 32 Y layers).
+It uses per-state untextured shaded cube polygons, original BE highlighting,
+negative Y coordinates, exact world XYZ selection and an event-driven mouse
+picker; chunk/Section absence is not silently generated as air. The surface
+is frozen for UI consistency and invalidated whenever sessions change.
+This is the initial interactive 3D editor surface, not yet texture-atlas
+rendering, full occlusion-aware terrain meshing, perspective rotation or
+GPU-optimized chunk rendering. No application builds or CI before 5 rounds.
+
+## Migration batch 4, round 2/5 — surgical existing BE scalar NBT edits (preview only)
+
+An original Block Entity can now have one existing TAG_Byte/Short/Int/Long/
+String scalar edited through a byte-range NBT surgery. The edited field must
+already exist; no unknown fields are removed or normalized. `id`, `x`, `y`,
+`z`, `keepPacked`, nested compounds, arrays and entity identity are protected.
+Full reparse checks every original block state, BE position and unchanged
+sibling field. iced computes a candidate digest without staging or writing
+ANY disk data. Persistent BE changes, BE relocations and BE Undo are NOT
+available yet; the native Region transaction still rejects any opaque NBT
+change not caused by normal block-state edits.
+
+## Migration batch 4, round 3/5 — immutable opaque BE snapshots
+
+Any original Block Entity's full Compound NBT payload can be exported to
+an external `.mcedit2be` provenance-bound snapshot without normalization.
+The file records the exact original world/dimension/XYZ and both complete
+source-chunk and BE-payload SHA-256 digests. Loading it validates source
+content byte-for-byte against the current original world, refusing stale,
+modified or cross-world snapshots. Create-new file semantics prohibit silent
+overwriting; exporting inside the original world is refused. iced exposes
+export and verify commands. This is a lossless evidence/backup primitive,
+NOT a Block Entity insertion, paste, mutation or world write feature.
+
+## Migration batch 4, round 4/5 — four-direction 3D camera
+
+The iced isometric surface camera rotates in quarter-turns around the
+vertical world axis while keeping exact original XYZ selection. Each view
+sorts polygons in its own painter order, and click picking reverses that
+same order so the nearest visible surface wins. The camera never changes
+source NBT or edit positions. Rotated terrain is still an untextured
+highest-block-per-column preview, not a complete interior/hidden-face
+3D mesh renderer.
+
+## Migration batch 4, round 5/5 — declarative plugin compatibility entry
+
+A versioned `.mcedit2plugin.json` manifest can declare a strictly bounded
+replace-blocks operation with exact optional DataVersion, dimension,
+replacement and source-state filter. The operation uses the same original
+NBT checks, BE refusal and single Undo transaction as manual edits; iced
+shows a preview and the user must still choose Apply. Plugin JSON is
+size/type checked and never executes arbitrary Python, shell, DLL, network,
+or native plugin code. This is a minimal extension protocol foundation,
+NOT compatibility with original MCEdit2 Python plugins. Broader plugin
+permissions, signed sandbox runtimes and complete legacy plugin APIs are
+still unimplemented. The five source rounds are now complete; run only
+Linux/Windows `cargo check` and `cargo test`, no build/package actions.
+
+3D CI follow-up: iced 0.14 requires an Element (e.g. `text`) rather than
+a plain `String` as button content. The voxel inspector now reuses the
+already decoded source chunk and overlays staged effective block states
+without re-decompressing NBT for every cell. The isometric Y projection is
+anchored to the top Y level so visible high blocks are on-screen.
+
+## Five-batch migration cycle — Batch 1: multi-layer voxel view
+
+The editor now reads the actual bounded 16x16x32-or-smaller Java volume,
+uses original known air/solid cells and renders all visible top/side faces,
+including exposed underground cavities. Completely surrounded voxels are
+culled. Missing chunks/Sections are UNKNOWN, never synthesized as air.
+Boundary faces indicate selected viewport clipping, not world adjacency.
+The iced isometric canvas has separate highest-column and exposed-volume
+buttons; top and side polygons select the original exact XYZ. This remains
+an untextured bounded view, not a GPU mesh renderer.
+
+Scheduling correction: only run one compile/test-only CI after FIVE FULL
+migration batches. This is batch ONE of the new cycle, not five subrounds.
+No CI/build/package is triggered by this source-only commit.
+
+## Five-batch migration cycle — Batch 2: opaque BE scalar staging
+
+An existing original signed/String scalar can now be preflighted and staged
+in a bounded independent in-memory NBT overlay with separate BE Undo/Redo.
+The original chunk SHA and exact effective source are verified again before
+a byte-identical scalar replay is accepted. Stale previews or changed
+original disk bytes are refused. The editor exposes clear BE-specific
+Stage, Undo, Redo and inspect controls, distinct from block-state Undo.
+All legacy block-only Region disk writes and journal exports are DISABLED
+while any BE NBT remains staged, so unsupported serialization cannot
+silently drop a modded BE edit. No new GitHub CI run (batch TWO of five).
+
+Batch-2 hardening: click-picking any X/Z, vertical or isometric voxel
+invalidates a prepared BE scalar edit; previews display real candidate
+SHA-256 instead of a placeholder. Inspecting staged BE bytes also verifies
+that the complete original chunk has not changed independently.
+
+## Five-batch migration cycle — Batch 3: BE scalar replay checkpoint
+
+BE scalar edits are now exportable as a provenance-bound, create-new
+`.mcedit2bejournal.json` file outside the original Minecraft world.
+Each step records original full-chunk SHA-256, exact original XYZ,
+existing scalar field/value, and the resulting entire-chunk digest. The
+exporter reconstructs EVERY active operation from original source bytes
+and refuses truncated/non-replayable histories. Import checks exact
+world/dimension/DataVersion and all source hashes, replays every operation
+in a cloned temporary Session, and swaps it into place ONLY if all checks
+pass. The restored history supports separate BE Undo/Redo. No block-only
+Region write is enabled while any BE bytes remain staged. This is a
+checkpoint/restore capability, not a Minecraft world writer.
+
+**Cycle: 3 full batches of 5 completed; no CI yet.**
+
+## Five-batch migration cycle — Batch 4: source-replayed BE Region preview
+
+The native Region planner now accepts an explicit ordered proof of original
+BE scalar changes, independently verifying a byte-for-byte reapplication
+against the original chunk's NBT. Both BE-only and mixed block/BE changes
+can produce a complete append-only in-memory Region image. The final
+transaction verifier reconstructs all block edits AND all permitted BE
+tag surgeries from the original decompressed chunk to ensure unknown
+modded NBT, original inventories, positions and neighboring Blocks remain
+unchanged. No proof, a wrong field/value, extra opaque byte changes or a
+nonexistent chunk is rejected. **The disk transaction explicitly refuses
+any candidate containing BE operations**; this stage only validates
+complete save previews, not BE writes. No CI (batch FOUR of five).
+
+## Five-batch migration cycle — Batch 5: explicit verified BE single-Region save
+
+BE-only and combined block/BE modifications now have a distinct protected
+single-Region transaction. The UI requires a fresh full-byte-identical
+Region preview and the exact `SAVE_BE_NBT` typed confirmation, separate
+from the existing block-only `SAVE`. The native Region transaction still
+verifies the entire original file/append-only chunk sectors and replays
+ALL BE scalar changes byte-for-byte. It writes a synced immutable ORIGINAL
+backup, a pending marker, and a synced staged replacement, followed by
+an atomic original Region path replacement. FINALIZE or ROLLBACK remains
+required before re-opening the world; recovery restores ORIGINAL bytes.
+BE move/paste, nested-Compound or inventory editing, and multi-Region
+atomic writing remain unsupported. Use disposable copied worlds until
+all relevant old/new version fixtures are validated.
+
+Five FULL migration batches complete. Now run exactly one consolidated
+Linux/Windows **cargo check/test ONLY** validation, never build/packaging.
+
+## Five-round development cycle — Round 1/5
+
+Expanded strictly byte-local original Block Entity scalar surgery to TAG_Float
+and TAG_Double, encoding IEEE 754 big-endian original NBT payload bytes and
+rejecting NaN/infinities, unchanged scalar values and malformed syntax.
+The existing exact-byte siblings, BE positions and block state verification
+still apply. Added modded machine Float/Double regression fixtures.
+
+## Round 2/5 — nested modded Compound scalar leaf editing
+
+The original byte-level BE editor now accepts slash-separated paths through
+up to eight real existing TAG_Compound ancestors (e.g.
+`ModdedCompound/Inner/BurnTime`). The leaf is changed in place, while
+siblings at every nesting level are verified with their original exact NBT
+bytes. Lists, arrays, unknown leaf types, identity or coordinate fields
+remain protected; paths never create or delete tags. Test fixtures include
+nested opaque mod data and invalid path refusals.
+
+## Round 3/5 — atomic declarative BE NBT scalar batches
+
+An external strict `.mcedit2beops.json` file (<=64KiB) supports 1–24
+existing numeric/String BE scalar replacements with per-world/dimension/
+DataVersion scope. The engine clones the original edit Session and replays
+every operation with original source SHA and byte-preserving NBT checks;
+only on full success does it adopt the new in-memory overlay. A later bad
+operation leaves no partial changes; each accepted edit retains its BE Undo.
+The iced GUI provides separate preview/stage controls. No disk writes.
+
+## Round 4/5 — source-verified multi-Region dry-run manifests
+
+Added strict external `.mcedit2regionplan.json` preflight reports: the
+entire original Region source path/digest, edited chunk count, BE scalar
+proof count, full candidate SHA-256, size and timestamp for every affected
+Region. The planner rereads each original file and refuses symlinks,
+path escapes, duplicates and concurrent mutations. Export is create-new,
+outside the Minecraft world, and verification reconstructs the full plan
+at its stored timestamp. No multi-Region disk commit has been enabled;
+reports make the non-atomic boundary explicit. Regression covers change
+detection and no disk writes.
+
+## Round 5/5 — bounded nested original BE field-tree inspector
+
+Original Block Entities now expose a read-only nested NBT Compound tree,
+including canonical slash paths, tag types, raw payload byte counts and
+immediate child counts. Up to 256 fields and eight Compound ancestor levels
+are inspected; ambiguous or unsafe field names are not marked editable.
+This makes the new nested scalar surgery discoverable in the GUI without
+rewriting original modded arrays, inventories or sibling payloads.
+All five rounds are now complete; one check/test-only Linux/Windows CI
+may run. Packaging and binary builds remain manual only.

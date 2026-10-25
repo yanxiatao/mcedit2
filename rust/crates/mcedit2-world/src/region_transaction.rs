@@ -195,6 +195,28 @@ fn read_pending(region:PathBuf)->Result<(Marker,Paths),WorldError>{
 pub fn apply_single_region(
     world:&WorldSummary,dimension:&str,candidate:&NativeRegionCandidate,
 )->Result<RegionWriteReceipt,WorldError>{
+    apply_region_with_mode(world,dimension,candidate,false)
+}
+/// Explicitly confirmed original-NBT-authenticated BE save route.
+/// This is the ONLY public write path that can accept existing BE scalar
+/// operations, and the candidate still passes full original-byte replay,
+/// immutable backup and pending-marker transaction checks.
+pub fn apply_authenticated_be_single_region(
+    world:&WorldSummary,dimension:&str,candidate:&NativeRegionCandidate,
+    confirmation:&str,
+)->Result<RegionWriteReceipt,WorldError>{
+    if confirmation!="SAVE_BE_NBT"||candidate.be_replay.is_empty(){
+        return Err(refuse("BE save requires an original BE scalar proof and exact SAVE_BE_NBT confirmation"));
+    }
+    apply_region_with_mode(world,dimension,candidate,true)
+}
+fn apply_region_with_mode(
+    world:&WorldSummary,dimension:&str,candidate:&NativeRegionCandidate,
+    allow_be:bool,
+)->Result<RegionWriteReceipt,WorldError>{
+    if !allow_be&&!candidate.be_replay.is_empty(){
+        return Err(refuse("BE-aware Region previews need separate SAVE_BE_NBT confirmation"));
+    }
     let ext=candidate.path.extension().and_then(|s|s.to_str())
         .ok_or_else(||refuse("Region candidate extension is missing"))?;
     let region=expected_region_path(world,dimension,candidate.region_x,
