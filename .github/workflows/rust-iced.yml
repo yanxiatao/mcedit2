@@ -4,6 +4,13 @@ name: Rust iced rewrite compile and tests
 # Explicit manual trigger; local executable builds and packaging are user-managed.
 on:
   workflow_dispatch:
+  # The sentinel changes only after five major compressed feature commits.
+  # Ordinary pushes do NOT invoke the check/test matrix.
+  push:
+    branches:
+      - rust-iced-rewrite
+    paths:
+      - .github/rust-ci-batch.trigger
 
 permissions:
   contents: read

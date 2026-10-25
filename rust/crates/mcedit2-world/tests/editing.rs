@@ -1014,8 +1014,14 @@ fn bounded_isometric_voxel_surface_uses_original_height_and_overlay_without_worl
     let original=world.bytes_now();
     let mut editor=Session::new(world.metadata(),"minecraft:overworld").unwrap();
     assert!(editor.inspect_surface(0,0,-64,-33,16,16).is_ok());
-    assert!(editor.inspect_surface(0,0,-64,-32,16,16).is_err());
-    assert!(editor.inspect_surface(0,0,-64,-33,17,16).is_err());
+    assert!(editor.inspect_surface(0,0,-64,-17,16,16).is_ok());
+    // 64x64x48 is a read-only scene budget; the original world remains byte exact.
+    let wide=editor.inspect_surface(0,0,-64,-17,64,64).unwrap();
+    assert_eq!(wide.source_chunks,16);
+    assert!(wide.source_tiles.len()==16);
+    assert_eq!(wide.source_tiles.iter().map(|t|t.known_columns+t.unknown_columns).sum::<usize>(),4096);
+    assert!(editor.inspect_surface(0,0,-64,-16,16,16).is_err());
+    assert!(editor.inspect_surface(0,0,-64,-17,65,16).is_err());
     let view=editor.inspect_surface(0,0,-64,-63,2,2).unwrap();
     assert_eq!(view.voxels.len(),4);
     assert_eq!(view.missing_columns,0);
@@ -1141,7 +1147,8 @@ fn native_multilayer_original_exposed_volume_culls_hidden_blocks_and_shows_real_
     assert!(exposed.voxels.iter().any(|v|
         (v.x,v.y,v.z)==(2,-63,1)&&v.faces&FACE_NEG_X!=0
     ));
-    assert!(session.inspect_exposed_volume(0,0,-64,-32,3,3).is_err());
+    assert!(session.inspect_exposed_volume(0,0,-64,-16,3,3).is_err());
+    assert!(session.inspect_exposed_volume(0,0,-64,-17,3,3).is_ok());
     assert_eq!(world.bytes_now(),original);
 }
 
@@ -1566,4 +1573,22 @@ fn modern_entities_sidecar_is_inspected_and_snapshotted_without_modded_nbt_loss(
     fs::write(&region,region_bytes(&replacement)).unwrap();
     assert!(session.verify_original_entities(&filename).is_err());
     fs::remove_file(filename).unwrap();
+}
+
+#[test]
+fn displayed_3d_material_and_staged_markers_do_not_write_world_data(){
+    use mcedit2_world::surface::VoxelMaterial;
+    let world=NativeWorld::create(true);
+    let original=world.bytes_now();
+    let mut editor=Session::new(world.metadata(),"minecraft:overworld").unwrap();
+    let area=Bounds::new((0,-64,0),(0,-64,0)).unwrap();
+    editor.commit(editor.prepare(area,&parse_state("minecraft:glass").unwrap(),None).unwrap()).unwrap();
+    let view=editor.inspect_exposed_volume(0,0,-64,-64,2,2).unwrap();
+    let changed=view.voxels.iter().find(|v|(v.x,v.y,v.z)==(0,-64,0)).unwrap();
+    assert_eq!(changed.kind,VoxelMaterial::Transparent);
+    assert!(changed.staged);
+    editor.undo().unwrap();
+    assert!(editor.inspect_exposed_volume(0,0,-64,-64,2,2).unwrap()
+        .voxels.iter().all(|v|!v.staged));
+    assert_eq!(world.bytes_now(),original);
 }

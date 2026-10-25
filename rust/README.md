@@ -68,10 +68,10 @@ The iced desktop now has a **safe in-memory block editing overlay**:
 - Multiple open worlds and dimensions maintain separate edit overlays.
 - Original `-view` prohibits staging even temporary changes.
 
-**No edits are currently saved to disk.** Closing the application discards
-the overlay; it does not modify original Minecraft worlds or modded NBT.
-Safe on-disk block persistence, 2D/3D rendering, entity editing, Bedrock
-LevelDB and full world conversion are still future milestones.
+**On-disk changes require explicit native Region preflight, backups and a
+separate confirmation.** Merely inspecting or loading texture assets never
+writes Minecraft world files. Full vanilla/modded model fidelity, Bedrock
+LevelDB and whole-world conversion remain incomplete.
 
 The intended writer will retain original unknown NBT fields using
 original-byte spans and strict transactions. Do not roundtrip whole
@@ -702,3 +702,476 @@ external create-new `.mcedit2entities` file stores exact original entity
 chunk NBT and full source provenance; verification refuses changed source
 bytes. iced adds entity inspection, export and source verification. No
 entity mutation or hidden BE serialization is enabled.
+
+## Display-first cycle, major 1/5 — visual material categories and staged voxels
+
+The original voxel scene classifies transparent, foliage, liquid and solid
+materials purely as render hints. Exposed voxel faces account for known
+transparent neighbors; unknown source cells are never synthesized as air.
+Original Block Entities and staged edits have separate highlight colors.
+This does not mutate NBT or any world file.
+
+## Display-first cycle, major 2/5 — orthographic 3D camera and face painter
+
+Replaced fixed diamond projection with a real 3D orthographic camera, full
+six-face original voxel geometry, continuous 360-degree yaw and 15–80 degree
+pitch, depth-ordered face drawing and exactly matching world-coordinate
+face picking. UI exposes 15-degree orbit and pitch adjustment controls,
+while preserving zoom/pan and quarter-turn shortcuts. The canvas renderer
+is still CPU-side polygons (not yet textured GPU terrain meshes).
+
+## Display-first cycle, major 3/5 — real canvas mouse navigation
+
+3D Canvas owns button-drag interaction state: right mouse drag orbits
+continuously with fractional movement accumulation, middle drag pans,
+mouse wheel zooms and left click picks exact original XYZ. Hovering reports
+the visible original block ID plus BE/staged markers; mouse exit clears it.
+No synthetic world edits or background writes occur during navigation.
+
+## Display-first cycle, major 4/5 — navigable source regions and live update
+
+3D source-only selections now span 16x16x32 (8192 real voxels), independent
+of the stricter 4096 editable block limit. Paging across negative/positive
+X/Z Region positions, Y bands, and centering on current XYZ are protected
+against overflow. Staging a block edit and Undo/Redo automatically reloads
+the visible scene so overlay materials and geometry track changes. World
+chunks and missing Sections are never created by navigation.
+
+## Display-first cycle, major 5/5 — 3D scene guides, diagnostics and clipping
+
+The original-source 3D viewport now renders its full 3D clipping box and
+color-coded XYZ axes with toggles, original Block Entity/staged/material
+statistics, and exposed-face counts. Polygon faces entirely outside the
+canvas are culled for both draw and picking. The guides are separately
+labeled as viewport boundaries, NEVER generated Minecraft geometry.
+Five large display features completed; now one Linux/Windows cargo check/test
+validation is appropriate. Application binary building/packaging stays manual.
+
+
+## Original-world 3D display migration — five compressed commits (2026-10-24)
+
+This is **not** full MCEdit2 renderer parity and not a textured GPU block
+modeler. The current iced Canvas 3D inspector is read-only with respect to
+display, and saves continue to require explicit native validation. The five
+new large functional batches on rust-iced-rewrite add:
+
+1. Approximate named, legacy-numeric and dyed Java materials; transparent
+   water/glass and deterministic non-registry modded fallback colors.
+2. Material-preserving near/far-rendered hovered/selected face outlines,
+   exact selected face normals and original XYZ face information.
+3. Recomputed original-state, signed-Y top cutaway meshes (not just an
+   invisibility mask), bounded by the inspected source scene.
+4. Two-click-corner 3D edit-box preview, with exact negative coordinates
+   and the existing 4096-cell guard; copying it to edit bounds never stages.
+5. Optional original-world chunk X/Z floor grid and 16-block section Y
+   cross-sections, with floor division across negative coordinates.
+
+The viewport remains a CPU-projected bounded 16x16x32 block rendering,
+not wgpu Minecraft texture atlases / block models, biome shading, or a
+complete 3D entity editor. Mouse picking and guides describe displayed
+source voxels only; missing chunks/sections cannot be treated as air.
+
+CI is compiled/tested only after all five batches: changing the
+\`.github/rust-ci-batch.trigger\` sentinel on the fifth commit starts one
+Linux/Windows check+test-only workflow. Ordinary feature commits carry
+\`[skip ci]\` and do not modify the sentinel. Neither the workflow nor
+these batches invokes \`cargo build\`, release packaging or uploads.
+
+
+## Five-large-batch 3D texture and model migration (2026-10-24)
+
+1. Bounded read-only ZIP/directory block PNG loader with namespaced mod textures,
+   log-axis faces, grass overlays and original blockstate identities.
+2. Depth-ordered texture UV tessellation on existing iced Canvas, adaptive
+   quality budgets and safe color fallback with original XYZ picking.
+3. Vanilla blockstate-aware partial cuboids (slabs, stairs, snow layers,
+   carpets, paths, trapdoors and simple connected fence rail shapes).
+4. Blockstate variant JSON and model parent/#texture-alias parsing with
+   namespace-aware keys and depth/cycle limits.
+5. Explicit desktop pack input (folder, .zip or original client .jar),
+   load/unload/toggle status, dimension guards and original BE/staged outlines.
+
+LIMITATION: This is still CPU/iced Canvas textured geometry, not a full GPU
+mesh renderer, arbitrary multipart JSON element model pipeline, animation,
+or multi-chunk streaming. Minecraft world files are never touched by the
+texture loader. The last commit of each five-large-feature batch updates
+the CI trigger; jobs run cargo check and cargo test only, no packaging.
+
+
+## Five-substantive-commit GPU rendering phase (2026-10-24)
+
+1. Shared bounded source-face tessellator to GPU-ready RGBA triangle vertices.
+2. Native iced 0.14 `shader::Program` and wgpu vertex buffer plus WGSL
+   alpha-blending renderer. Rendering is batched into one draw call per view.
+3. Switchable wgpu underlay and Canvas fallback with transparent interactive
+   Canvas overlay retaining world picking, camera orbit, selection, BE and
+   section/grid guides. GPU mode never writes world or editor data.
+4. Strict unrotated resource-pack JSON model `elements` converted from 0–16
+   Java coordinates to actual partial cuboids, bounded inheritance/element
+   count and safe fallback for unsupported rotation/multipart variants.
+5. Fast/Balanced/Detailed GPU projected-texture quality profiles, bounded
+   draw complexity, shared geometry independent of texture toggle, render
+   diagnostics and read-only Canvas overlay hot-path optimizations.
+
+GPU geometry is real via iced/wgpu; face textures are still CPU-sampled
+into vertices before upload, NOT yet a GPU-sampled texture atlas. Depth is
+currently painter-sorted transparency, not a true GPU depth-buffered 3D
+render pass; multi-chunk streaming and arbitrary mod models are not done.
+The renderer has a capped 16x16x32 original-world window. The PNG/model
+loader cannot modify Java chunks, unknown block entities or other NBT.
+CI is gated by five large commits and only checks/tests, never app builds.
+
+
+## Five-batch native GPU atlas and model-rotation milestone (2026-10-24)
+
+1. Stable, bounded namespaced RGBA texture atlas with one-pixel duplicate
+   gutters and a white fallback. CPU downsamples first animation frames
+   into atlas tiles without modifying pack archives or world NBT.
+2. GPU UV coordinates replace high-cost CPU per-pixel quad tessellation:
+   one quad / two triangles per original visible Minecraft face.
+3. Native wgpu GPU atlas texture upload, WGSL sampling, alpha discard and
+   switchable nearest/linear filtering with atlas reuse between frames.
+4. Correct 90-degree X/Y blockstate variant element rotation, inverse
+   displayed-to-source face texture selection, negative-coordinate-safe
+   original XYZ picking. UV lock, arbitrary rotations and multipart models
+   remain explicit unsupported fallbacks.
+5. Shared GPU/Canvas face budget and status readouts; first-frame animated
+   PNG heights up to 4096px allowed with 512px maximum width/frame size.
+
+Limitations: The viewport still reads at most 16x16x32 original blocks.
+GPU texture atlas is RGBA8Unorm nearest/linear sampled but it is not a
+full Minecraft material/lightmap engine. The previous painter-only renderer
+was replaced by a bounded offscreen opaque Z pass plus translucent pass. Transparent/cutout pixels
+preserve alpha, but complex interpenetrating translucent meshes and model
+elements rotated 22.5/45 degrees remain unsupported. Do not merge until
+representative resource packs and real Minecraft worlds have been checked.
+
+
+## Five large 3D display migration commits (October 24 2026)
+
+1. Read-only original resource-pack PNG alpha classification into opaque,
+   binary cutout and blended (liquid/glass) material modes. The GPU fragment
+   shader tests alpha cutout pixels before blending.
+2. Per-element model JSON face mappings, texture alias lookup, UV crop and
+   explicit 90-degree face UV rotation in the GPU texture atlas.
+3. Conditional multipart model elements with bounded AND/OR property rules,
+   original block-coordinate ownership and the original model element face.
+4. Frame-local exact-state geometry cache and GPU material/UV cache to reduce
+   repeated JSON/texture traversal across repeated source blockstates.
+5. True projected element-face vertices for vanilla 22.5/45-degree
+   element rotations about explicit origins and optional rescale, including
+   variant right-angle rotations; safe fallback on unsupported transforms.
+
+The workspace continues to use a capped 16x16x32 source volume. GPU
+transparency is painter-ordered, not a complete depth-buffer/OIT solution.
+Arbitrary weighted variants, full Java model UV-lock, animated timeline,
+large-volume streaming and screenshots still need development. Neither
+resource loading nor 3D interaction changes original world NBT.
+
+
+## Five-batch bounded cross-chunk rendering migration (October 24, 2026)
+
+1. Read-only original Java scene limit raised to 32×32×48 / 49,152
+   sampled cells per request, while preserving the independent 4,096-cell
+   edit transaction limit, original chunk caching and missing-chunk honesty.
+2. Desktop 16×16×32 and 32×32×48 inspection presets, full coordinate
+   validation, signed-Y scene navigation and unchanged edit confirmations.
+3. Camera-prioritized bounded face selection across large views, replacing
+   chunk-order early truncation. GPU display and Canvas picking use exactly
+   the same nearest retained faces and <=150k polygon budget.
+4. Known vanilla partial occluders (slabs, stairs, fences, panes, snow
+   layers, etc.) no longer incorrectly hide neighboring exposed faces.
+   Unknown and modded neighbors are not inferred as air or partial blocks.
+5. Polygon centroid depth for rotated faces plus stable opaque/transparent
+   painter-order ties, shared by the GPU and original-world selection.
+
+No app build or packaging runs in CI; only cargo check and cargo test.
+A 32×32×48 bounded inspector is NOT general infinite chunk streaming;
+full GPU Z depth/OIT, texture animation and complete models are pending.
+World NBT and BE bytes remain read-only until a separate confirmed save.
+
+
+## Unbuilt, untested source-view rendering batch (October 24, 2026)
+
+Five sizeable feature commits since the preceding successful CI:
+1. Per-pixel barycentric picking for actual rotated triangle depths,
+   matching the GPU triangle split instead of center-depth ordering.
+2. One shared per-view projected-face cache across GPU, Canvas interaction
+   overlay and hit testing, with viewport dimensions as the cache key.
+3. Geometry-derived implicit Java model UVs when face uv is omitted,
+   respecting slab/stair/partial-model face dimensions and inherited textures.
+4. Explicit Java model face presence: absent model faces are not created,
+   and face textures stay tied to the unrotated local model face.
+5. Real source-chunk tile metadata for multi-chunk read-only inspection:
+   source presence, known/unknown columns and exposed voxels; transparent
+   diagnostic grid marks missing chunks red, partial columns amber and
+   fully known tile green, without generating or modifying world blocks.
+
+IMPORTANT: These changes intentionally have not run CI, compilation,
+packaging or executable builds. Run cross-platform cargo check/test ONLY
+after an explicit user request. All commits use [skip ci], and the batch
+CI trigger file is left untouched. UI/graphics behavior remains unverified.
+
+
+## GPU/Canvas parity and source-picking improvements (2026-10-24; no CI)
+
+- Original-block face picking tests projected barycentric depth and the
+  same texture atlas alpha mask as GPU cutout rendering, so fully transparent
+  texture holes are not clickable false solids.
+- Canvas fallback now samples per-element Java JSON cropped/rotated UVs and
+  PNG alpha via the common atlas, rather than a generic full-face texture.
+- Native wgpu upload caches a vertex-buffer fingerprint: unchanged geometry
+  (for example hover/outline changes) no longer requires an identical large
+  GPU queue.write_buffer; buffer growth always forces upload.
+- Cutout textures fill zero-alpha RGB within 3 texels of opaque artwork in
+  the memory-only atlas to reduce black fringes with linear interpolation,
+  without changing PNG pixels, alpha values or saved files.
+- GPU and CPU Canvas use rotated world-space face normals for directional
+  brightness, so tilted 22.5/45-degree model elements have consistent
+  interpolated light without a Minecraft biome/lightmap implementation.
+
+The five commits all use [skip ci]; no GitHub Actions execution, cargo
+check, cargo test, cargo build, packaging or release has been requested.
+Compilation and graphical rendering still require later verification.
+
+
+## Full render-feature history consolidation
+
+The native 3D display, texture atlas, JSON model projection, interactive
+Canvas/GPU rendering, bounded source-volume inspection, and model-face
+culling/UV selection are one feature family and now appear in a single
+functional commit rather than repeated artificial five-commit rounds.
+JSON faces without `cullface` remain visible near solid neighbors;
+explicit `cullface` directions are rotated into original world axes and
+only culled when the actual transformed face reaches the voxel boundary.
+CPU picking still refers to original source block coordinates; unresolved
+or modded blockstate variants never justify destructive source guesses.
+Compilation and GPU runtime appearance after consolidation are UNVERIFIED;
+do not run CI or package unless explicitly requested by the user.
+
+
+## Native offscreen GPU depth migration (no CI requested)
+
+GPU source vertices now preserve the original isometric world-view depth
+and normalize to WebGPU's 0..1 depth range without changing source NBT.
+Each shader frame draws into a bounded offscreen RGBA8Unorm render target
+and Depth24Plus texture (max 4096 pixels per edge):
+
+- Opaque and alpha-tested PNG cutout triangles write a real Z buffer,
+  resolving intersecting cuboids and angled source model elements.
+- Alpha-blended faces depth-test against opaque Z but do not write it;
+  transparent triangles remain depth sorted back-to-front. Transparency
+  accumulation and final iced-window composite use premultiplied alpha.
+- The resulting 2D scene texture is composited into the existing iced
+  shader rectangle; Canvas mouse orbit, picked XYZ, guides, and overlays
+  remain the existing UI owner, not a second window renderer.
+- Viewport dimensions, atlas, sampler quality or mesh byte changes
+  invalidate and rerender the offscreen scene. Unchanged hover-only draws
+  reuse its GPU output without reuploading the original-world triangles.
+
+Known limitations: sorted transparency is NOT order-independent OIT, and
+the Canvas-only fallback still uses the painter's algorithm. This is
+not infinite world chunk streaming or an authentic Minecraft lightmap.
+The new shader and render-pass setup have NOT been compiled, GPU-tested,
+or run in CI; this requires an explicit future user request. Do not
+run an application build or package as part of CI.
+
+
+## Exact zero-thickness Java vegetation planes (no CI requested)
+
+Java resource-pack models may use zero-thickness elements for flower and
+sapling crossed planes (for example vanilla block/cross). This renderer
+now recognizes exactly one collapsed model axis when and only when its
+declared JSON faces actually face that axis. Ordinary full-volume
+Box3 validation remains strict: malformed/degenerate source shapes are
+not guessed or used in world writes. Plane vertices still pass through
+the original model's rotation, rescale and orthographic projection.
+Elements with `shade:false` have full intrinsic directional brightness
+in both the native GPU mesh and Canvas fallback; all block picking retains
+the original Java world XYZ. The resource pack must supply the actual
+model inheritance and transparent PNG for faithful visuals.
+No CI, runtime rendering or build was executed for this feature.
+
+
+## World-border-safe 3D camera coordinates (no CI requested)
+
+Java world X/Z coordinates can reach tens of millions of blocks. The
+orthographic source projection previously rounded absolute i32 positions
+to f32 before subtracting the camera, collapsing neighboring source cells
+at large magnitudes. The projection, source selection wireframes, chunk/
+section guides and source model vertices now use exact f64 world positions
+and subtract the camera origin before converting the bounded, relative
+offset to f32 GPU coordinates. Tests cover opposite +/-30M border views.
+This is a display-only precision improvement; original BE/NBT, source
+coordinates, edit bounds, and disk save safeguards remain unchanged.
+CI, compilation and runtime visual verification have not been requested.
+
+## Progressive very long-distance terrain viewer (source-only, no CI)
+
+The near-field exact inspector now supports **64×64×48** cells, independently
+from its unchanged 4096-cell edit budget. The separate far-terrain
+viewer does **not** allocate all source blocks in a gigantic cube.
+
+- Distant presets are radii of 16, 32, 64, 128 and **256 original Java chunks**.
+  Radius 256 spans 8,208 blocks horizontally (4,096 blocks from center
+  to the edge). This exceeds typical Minecraft normal render distances.
+- A bounded camera-centric ring plan samples near chunks at full horizontal
+  block density, then samples only every 4/8/16 columns in progressively
+  sparser ORIGINAL source chunks. It includes outermost ring coordinates.
+  Maximum planner capacity is 20,000 sampled source chunks; no artificial
+  world generation, entity rendering, ticking or spawning.
+- Streaming reads 12 source chunk patches per asynchronous UI update,
+  builds an original-chunk status record and appends only known terrain
+  samples. Missing chunks/Sections are not invented; authenticated block
+  editing remains independent and never consumes approximate previews.
+- `SurfaceVoxel.span>1` is an explicit approximate LOD preview. The projected
+  X/Z tiles have the corresponding visual width, but mouse picking rejects
+  approximate spans. An exact `span=1` position still reports the ORIGINAL
+  source XYZ, and original BE data is never rewritten.
+- Normal modern world height samples -64..319; older original worlds
+  default to 0..255. The near-field inspection retains adjustable signed Y.
+  The far stream cancels stale generations when users move to another scene.
+- Large view projection uses camera-relative f64 then bounded f32 clip
+  coordinates. Chunk-grid debug outlines are restricted to 256 tiles per
+  frame at these radii. Face and GPU buffer budgets are still enforced.
+
+Important limitations: This is progressively sampled *terrain*, NOT
+Minecraft's exact full-detail 256-chunk simulation. Distant water and
+modded block geometry may be approximated, with far LOD never selectable.
+No user-requested CI run or app build has occurred for this feature;
+Rust compilation, GUI threading and actual GPU drawing remain unverified.
+Do not initiate CI until all 3D display migration is complete and the
+user explicitly requests the final consolidated check/test run.
+
+## Java blockstate UVLock texture-orientation parity (unvalidated)
+
+The JSON blockstate `uvlock:true` flag now computes a complete mapping
+from the four rotated source model-face vertices to the corresponding
+world-facing canonical texture corners. This remaps the atlas's UVs for all
+multiples of 90 degrees on both X and Y, including geometrically mirrored
+corner order: it does not use an incorrect rotation-only shortcut.
+Original model face UV crop and per-face rotation are applied before this
+corner permutation. The same atlas style is used by native wgpu rendering,
+Canvas fallback and alpha-tested original-block picking.
+
+This is a read-only rendering change. Do not execute CI, compile or
+package until the entire 3D display feature is complete.
+
+
+## Extreme read-only terrain view distance (no CI)
+
+The distant-terrain planner offers progressive 16 / 32 / 64 / 128 /
+256 / 512 / 1024 chunk radius presets. The largest radius is 16,384
+world blocks from the center to each horizon edge, excluding unseen or
+unavailable source chunks. To keep memory finite, the center samples
+single source block columns and successive chunk rings use 4/8/16-block
+LOD footprints; beyond 256/512 chunks the planner also skips more of
+the farthest chunks. The largest view plans at most 36,000 source chunk
+requests, processed in existing bounded asynchronous batches, never all
+decoded and retained at once. It does not inspect or render entities.
+Far LOD tiles are never authenticated editable block picks. This is
+**sparse distant terrain** rather than pixel-perfect all-block terrain:
+unloaded or unplanned areas are not fabricated. The GPU projection uses
+camera-relative coordinates and a near-zero minimum scene scale so far
+terrain can fit the view. 1024-chunk inspections may take considerable
+time on very large saves due to disk access and will progress tile by tile.
+CI and executable build are still deferred until the entire 3D display
+migration has been completed, as explicitly requested.
+
+
+## Progressive far-terrain rendering budgets and nonblocking reads (unverified)
+
+For 16–1024-chunk radius read-only scenes, the 150,000-face GPU/Canvas
+budget is now distributed by **actual source LOD**: detailed original
+voxels receive a near-detail allocation, while sampled terrain and the
+outermost 25% of the horizon retain guaranteed face capacity. Empty
+LOD layers return their unused space to populated layers, and source
+picking never treats multi-block LOD samples as authenticated blocks.
+Far sampled-height cells render only their observed top faces; the editor
+does not invent artificial vertical cliffs where neighboring heights
+were not inspected. No entities, lighting simulation or collision data
+are loaded for far terrain.
+
+The desktop viewport now shares the original SurfaceView behind Arc for
+GPU, Canvas and UI draws. Incoming read-only chunk batches use Arc
+copy-on-write only when source samples change, rather than copying all
+previously loaded world voxels on every hover or redraw. An immutable
+Session snapshot is captured once per far view; small batches of 12
+exact near chunks or up to 128 sparse distant chunks execute on bounded
+OS worker threads and report through a one-shot iced future, keeping
+blocking Region I/O off the iced UI executor. Canceled views discard
+outdated responses by nonce and world selection.
+
+This is performance-focused 3D display migration, not a change to the
+4,096-block edit transaction cap or to original NBT/BE bytes. The code
+has NOT been compiled, tested in CI, or visually validated; check/test
+runs remain deferred until the complete 3D display migration is ready
+as requested by the user. No application packaging or builds.
+
+
+## Camera navigation reuse of far source tiles (unverified)
+
+Pan/recenter reuses a bounded cache of real source-chunk patches keyed by
+chunk X/Z and LOD sampling span. The cache keeps up to 4,096 patches and
+90,000 sampled voxels; old patches are evicted FIFO. New camera requests
+hydrate overlapping terrain immediately and schedule only uncached chunks.
+Any staged edit, undo, redo, BE import, region finalization, or direct save
+invalidates the cached Session snapshot. Cancellation and world switching
+still discard late in-flight responses. Cached LOD samples remain read-only.
+The new code has not been compiled or CI tested. No packing/building.
+
+
+## Animated Java resource-pack textures (unverified)
+
+Vertically stacked PNG sprite frames and bounded `.png.mcmeta` animation
+metadata now control texture animation. The parser supports `frametime`,
+per-frame index/time sequences and implicit sequential frames (1–1200 ticks
+per step, 4,096 steps maximum). Invalid/untrusted metadata leaves the static
+first frame visible and adds a warning. UV slots, source block models and
+world NBT remain untouched. All sprite frames obey the existing 48 MiB
+decoded texture-bank limit; metadata is capped at 32 KiB per sprite.
+When an original 3D view is visible, iced's Tokio-backed subscription
+ticks every 50 ms, building a new bounded GPU/Canvas RGBA atlas only when
+a sprite's frame actually changes. The underlying immutable model and
+sprite resources share Arc ownership, avoiding reloading packs on ticks.
+Interpolation between frames is not implemented; discrete animation frames
+are supported. No compilation, CI or application packaging was triggered.
+
+
+## Persistent projected mesh and responsive overlays (unverified)
+
+The exact projected original-world face buffer is now cached across iced's
+reactive UI view rebuilds, rather than only among widgets in one frame.
+Camera changes, source chunk arrivals, world/dimension selection and model
+asset changes invalidate the cache; sprite animation frame changes only
+replace atlas RGBA, and hover/selection outlines are drawn independently
+by Canvas without regenerating the original geometry. Importing a block
+patch also discards distant original-source cache data. This preserves
+original source XYZ picking while reducing CPU projection during orbit/
+hover and 20 TPS animated resource-pack updates.
+No CI, compilation, executable build or packaging has been performed.
+
+
+The fully clip-space-normalized GPU mesh now has its own persistent
+`Arc<Vec<Vertex>>` cache, sized by the 150,000-face view cap. Atlas frame
+changes, hover and selected-block overlays reuse identical vertices and
+source face lists; GPU buffer writes are skipped by a matching hash.
+Toggling source textures, changing camera projection, loading a different
+pack/world or receiving new chunk samples invalidates both projected and
+GPU caches together. CPU and GPU frame selection share one atlas tick.
+This optimization is not yet CI-tested or runtime verified.
+
+
+## Stable weighted Java model variants (unverified)
+
+The Java blockstate renderer now evaluates weighted `variants` arrays
+and weighted multipart `apply` arrays with a stable selection keyed by
+the original integer block X/Y/Z, state and multipart index. No global RNG
+state, random shifts while orbiting, or guessed editable source blocks.
+Selected geometry and its JSON face texture/UV/cullface derive from the
+same variant choice. Both Canvas and GPU texture lookup use position-aware
+variants, while caches deduplicate identical selected model combinations
+rather than generating one independent mesh for every source voxel.
+Weighted counts and array size are bounded, and invalid metadata safely
+falls back to the existing conservative display. Entity and disk world
+operations remain excluded. This work is pending one final CI gate.
