@@ -2,14 +2,14 @@
 //! The surface is NOT an editor selection; distant samples are approximate,
 //! never used as edit targets or NBT provenance. No entity renderer is called.
 use std::collections::BTreeSet;
-use crate::block_lookup::read_world_chunk;
+use crate::block_lookup::ReadOnlyRegionCache;
 use crate::editing::{Bounds,Session};
 use crate::surface::{
     SurfaceView,SurfaceVoxel,SourceChunkTile,ALL_FACES,material,
 };
 use crate::{WorldError};
 
-pub const MAX_DISTANCE_CHUNKS:u16=1024;
+pub const MAX_DISTANCE_CHUNKS:u16=2047;
 pub const FAR_BATCH_CHUNKS:usize=128;
 /// Limit decoded source chunks per batch, but amortize UI refreshes for
 /// distant one-sample LODs. Only one background read batch runs at a time.
@@ -40,7 +40,7 @@ fn validate_height(y_min:i32,y_max:i32)->Result<(),WorldError>{
 }
 fn extrema(center_x:i32,center_z:i32,radius:u16)->Result<(i32,i32,u16),WorldError>{
     if radius==0||radius>MAX_DISTANCE_CHUNKS{
-        return Err(reject("Far preview radius must be 1..1024 source chunks"));
+        return Err(reject("Far preview radius must be 1..2047 source chunks"));
     }
     let span=((radius as i64*2)+1)*16;
     let xmin=(center_x.div_euclid(16) as i64-radius as i64)*16;
@@ -64,9 +64,14 @@ pub fn plan_far_chunks(center_x:i32,center_z:i32,radius:u16)
     let mut seen=BTreeSet::new();
     let mut out=Vec::new();
     for ring in 0..=radius as i32{
+        // The outer 1025..2047 rings are a *very sparse* read-only
+        // panorama, not a full chunk census. Sample only every eighth
+        // source-chunk ring, but always include the requested last edge.
+        if ring>1024&&ring%8!=0&&ring!=radius as i32{continue;}
         let step=if ring<=8{1}else if ring<=16{2}
             else if ring<=48{4}else if ring<=128{8}
-            else if ring<=256{32}else if ring<=512{128}else{512};
+            else if ring<=256{32}else if ring<=512{128}
+            else if ring<=1024{512}else{1024};
         let mut along=Vec::new();
         let mut n=-ring;
         while n<=ring{
@@ -115,6 +120,13 @@ pub fn empty_far_view(center_x:i32,center_z:i32,
 /// passed to editing APIs, nor allowed to masquerade as exact picks.
 pub fn inspect_far_chunk(session:&Session,request:FarChunkRequest,
     y_min:i32,y_max:i32)->Result<FarChunkPatch,WorldError>{
+    let mut cache=ReadOnlyRegionCache::new(session.original_world(),session.dimension())?;
+    inspect_far_chunk_cached(session,&mut cache,request,y_min,y_max)
+}
+/// One verified source chunk using a worker-local Region header index cache.
+/// The cache cannot bypass the original chunk/BE coordinate validators.
+pub fn inspect_far_chunk_cached(session:&Session,cache:&mut ReadOnlyRegionCache<'_>,
+    request:FarChunkRequest,y_min:i32,y_max:i32)->Result<FarChunkPatch,WorldError>{
     validate_height(y_min,y_max)?;
     if !matches!(request.span,1|4|8|16){
         return Err(reject("Far preview LOD must be 1,4,8 or 16"));
@@ -128,8 +140,7 @@ pub fn inspect_far_chunk(session:&Session,request:FarChunkRequest,
     let mut tile=SourceChunkTile{chunk_x:request.cx,chunk_z:request.cz,
         source_present:false,known_columns:0,
         unknown_columns:0,exposed_voxels:0};
-    let Some(chunk)=read_world_chunk(session.original_world(),session.dimension(),
-        request.cx,request.cz)? else {
+    let Some(chunk)=cache.read_chunk(request.cx,request.cz)? else {
         tile.unknown_columns=256/(request.span as usize*request.span as usize);
         return Ok(FarChunkPatch{tile,voxels:Vec::new()});
     };
@@ -226,7 +237,14 @@ mod tests{
         let view=empty_far_view(0,0,-64,255,1024).unwrap();
         assert_eq!(view.width,32784);
         assert_eq!(view.depth,32784);
-        assert!(plan_far_chunks(0,0,1025).is_err());
+        let beyond=plan_far_chunks(0,0,2047).unwrap();
+        assert!(beyond.len()<=MAX_PLANNED_CHUNKS);
+        assert!(beyond.iter().any(|r|r.cx.abs()==2047||r.cz.abs()==2047));
+        assert!(beyond.iter().any(|r|r.cx.abs()==2040||r.cz.abs()==2040));
+        // No u16 wrapping at the very largest legal 2*radius+1 footprint.
+        let panorama=empty_far_view(0,0,-64,319,2047).unwrap();
+        assert_eq!((panorama.width,panorama.depth),(65520,65520));
+        assert!(plan_far_chunks(0,0,2048).is_err());
     }
     #[test]
     fn far_view_negative_coordinates_use_floor_chunk_grid(){

@@ -42,6 +42,7 @@ pub struct IsometricSurface {
     pub(crate) frame_cache:Arc<Mutex<Option<(Size,Arc<Vec<RenderFace>>)>>>,
     /// Fully normalized GPU vertex mesh, shared across Canvas and atlas ticks.
     pub(crate) gpu_frame_cache:Arc<Mutex<Option<(Size,Arc<Vec<crate::gpu_mesh::Vertex>>)>>>,
+    pub(crate) gpu_pending:Arc<Mutex<Option<Size>>>,
 }
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
 pub enum Face{Top,Bottom,PosX,NegX,PosZ,NegZ}
@@ -230,6 +231,61 @@ fn grid_boundaries(first:i32,last:i32)->Vec<i32>{
     if first>=last{return Vec::new();}
     ((first+1)..=last).filter(|v|v.rem_euclid(16)==0).collect()
 }
+/// 3D distant panoramas can cover 4095 source chunks across each axis.
+/// Keep useful negative-coordinate-aligned region/grid guides without
+/// painting thousands of subpixel lines every interactive Canvas frame.
+/// Near worlds retain every source chunk boundary exactly.
+fn adaptive_chunk_grid(first:i32,last:i32)->Vec<i32>{
+    if first>=last{return Vec::new();}
+    const MAX_GUIDES:i64=128;
+    let length=last as i64-first as i64;
+    let chunks=(length+15)/16;
+    // Signed i64 has no next_power_of_two; the source extent is
+    // nonnegative, so perform the bounded power-of-two step on u64.
+    let stride_chunks=(((chunks+MAX_GUIDES-1)/MAX_GUIDES).max(1) as u64)
+        .next_power_of_two() as i64;
+    let step=stride_chunks*16;
+    let mut next=(first as i64).div_euclid(step)*step+step;
+    let mut lines=Vec::new();
+    while next<=last as i64{
+        if next>first as i64{
+            lines.push(next as i32);
+        }
+        next+=step;
+    }
+    lines
+}
+/// Prefer the near source tiles but reserve markers across the entire
+/// progressive panorama. Taking the first N hides distant missing-chunk
+/// status forever when the plan is ordered nearest-first.
+fn sampled_source_tile_indices(total:usize,limit:usize)->Vec<usize>{
+    if total==0||limit==0{return Vec::new();}
+    if total<=limit{return (0..total).collect();}
+    if limit==1{return vec![total-1];}
+    let near=(limit/4).min(total);
+    let remaining=limit-near;
+    let span=total-near-1;
+    let mut result:(Vec<usize>)=(0..near).collect();
+    if remaining==1{result.push(total-1);}
+    else{
+        for index in 0..remaining{
+            result.push(near+index*span/(remaining-1));
+        }
+    }
+    result
+}
+/// Exact conservative rectangle rejection for a projected voxel envelope.
+/// The envelope exceeds vanilla/modded 0..16-element geometry including
+/// accepted 45-degree axis rotations with rescale and extended origins.
+/// Only fully off-screen source voxels are skipped; do not clip near-edge
+/// model elements or classify missing chunks as air.
+fn outside_projected_envelope(point:Point,radius_x:f32,radius_y:f32,
+    size:Size)->bool{
+    if !point.x.is_finite()||!point.y.is_finite()
+        ||!radius_x.is_finite()||!radius_y.is_finite(){return false;}
+    point.x+radius_x<0.0 ||point.x-radius_x>size.width
+        ||point.y+radius_y<0.0||point.y-radius_y>size.height
+}
 fn point_in_face(p:Point,face:&[Point;4])->bool{
     let mut hits=0u8;
     for n in 0..4{
@@ -355,7 +411,10 @@ impl IsometricSurface{
         // Huge distant terrain views must FIT instead of forcing at least
         // three pixels per original block beyond the horizon.
         let minimum=if self.surface.width>64||self.surface.depth>64{
-            0.01
+            // At the maximum 2047-chunk horizon the entire source extent
+            // spans 65,520 blocks. A hard 0.01px/block floor would crop
+            // the edges of the panorama instead of fitting them.
+            0.00001
         }else{3.0};
         natural.clamp(minimum,24.0)*self.zoom.clamp(0.5,3.0)
     }
@@ -426,11 +485,11 @@ impl IsometricSurface{
         };
         if self.show_chunk_grid{
             let color=Color::from_rgba(0.92,0.64,0.18,0.85);
-            for x in grid_boundaries(x0,x1){
+            for x in adaptive_chunk_grid(x0,x1){
                 let x=x as f64-0.5;
                 stroke_line([x,floor_y,min_z],[x,floor_y,max_z],color,1.9,frame);
             }
-            for z in grid_boundaries(z0,z1){
+            for z in adaptive_chunk_grid(z0,z1){
                 let z=z as f64-0.5;
                 stroke_line([min_x,floor_y,z],[max_x,floor_y,z],color,1.9,frame);
             }
@@ -438,8 +497,10 @@ impl IsometricSurface{
         // Distinguish exact missing chunk tiles from merely empty or
         // unknown-section tiles without inventing rendered blocks.
         if self.show_chunk_grid{
-            for tile in self.surface.source_tiles.iter().take(
-                if self.surface.width>64{256}else{usize::MAX}){
+            let tiles=&self.surface.source_tiles;
+            let guide_limit=if self.surface.width>64{256}else{tiles.len()};
+            for index in sampled_source_tile_indices(tiles.len(),guide_limit){
+                let tile=&tiles[index];
                 let tile_min_x=tile.chunk_x*16;
                 let tile_min_z=tile.chunk_z*16;
                 let x0=tile_min_x.max(x0) as f64-0.5;
@@ -521,6 +582,10 @@ impl IsometricSurface{
     pub(crate) fn faces(&self,size:Size)->Vec<RenderFace>{
         let (yaw,pitch)=self.angles();
         let mut out=Vec::new();
+        let scale=self.scale(size);
+        let look=[yaw.sin()*pitch.cos(),pitch.sin(),yaw.cos()*pitch.cos()];
+        let projected_x_factor=yaw.cos().abs()+yaw.sin().abs();
+        let projected_z_factor=projected_x_factor*pitch.sin().abs();
         // Thousands of voxels typically share a few exact palette states.
         // Cache only within one frame; no stale model after pack replacement.
         let mut shape_cache:HashMap<(String,Vec<(String,String)>,u64),
@@ -529,6 +594,20 @@ impl IsometricSurface{
             ((String,Vec<(String,String)>,u64),usize,u8),
             (Option<bool>,Option<Option<Face>>,bool)> =HashMap::new();
         for (voxel_index,voxel) in self.surface.voxels.iter().enumerate(){
+            // Cull whole voxel envelopes BEFORE JSON model resolution or
+            // face projection. Padding 4 blocks covers allowed model-element
+            // rotations/rescale and extends beyond zero-thickness quads.
+            // Far LOD tiles get a real span-based conservative envelope.
+            let radius=voxel.span as f32*0.5+8.0;
+            let center=self.project([
+                voxel.x as f64+(voxel.span as f64-1.0)*0.5,
+                voxel.y as f64,
+                voxel.z as f64+(voxel.span as f64-1.0)*0.5,
+            ],size).0;
+            if outside_projected_envelope(center,
+                radius*projected_x_factor*scale,
+                (radius*projected_z_factor+radius*pitch.cos().abs())*scale,
+                size){continue;}
             let base=material_color(voxel);
             let pos=(voxel.x,voxel.y,voxel.z);
             let variant=if voxel.span>1{0}else{
@@ -554,6 +633,11 @@ impl IsometricSurface{
                 // a full 3D solid column. Their invented vertical walls
                 // create false cliffs and unnecessary triangles at horizons.
                 if voxel.span>1 && face!=Face::Top{continue;}
+                // Skip all back-facing polygons BEFORE querying expensive
+                // JSON model face metadata or per-face texture behavior.
+                let normal=element.normal(face.normal());
+                if normal.iter().zip(look.iter()).map(|(a,b)|a*b)
+                    .sum::<f32>()<=0.00001{continue;}
                 // Reuse exact JSON metadata across thousands of voxels with
                 // the same original state and model element.
                 let descriptor=if voxel.span>1{(None,None,false)}else{
@@ -569,10 +653,6 @@ impl IsometricSurface{
                         })
                 };
                 if descriptor.0==Some(false){continue;}
-                let normal=element.normal(face.normal());
-                let looking=[yaw.sin()*pitch.cos(),pitch.sin(),yaw.cos()*pitch.cos()];
-                if normal.iter().zip(looking.iter()).map(|(a,b)|a*b).sum::<f32>()
-                    <=0.00001{continue;}
                 let (axis,positive)=face.axis_positive();
                 match descriptor.1{
                     Some(Some(cull_dir))=>{
@@ -650,7 +730,12 @@ impl IsometricSurface{
         // Per-pixel projected depth is more accurate than polygon-center
         // painter order when a sloped face intersects an adjacent face.
         // Stable tie handling preserves the previous far->near ordering.
-        self.faces_cached(size).iter().enumerate()
+        (if self.gpu_faces{
+            self.frame_cache.lock().unwrap_or_else(|e|e.into_inner())
+                .as_ref().filter(|(cached,_)|*cached==size)
+                .map(|(_,faces)|Arc::clone(faces))
+                .unwrap_or_else(||Arc::new(Vec::new()))
+        }else{self.faces_cached(size)}).iter().enumerate()
             .filter_map(|(i,face)|{
                 // An aggregated LOD tile is NOT one authenticated source
                 // voxel. Never let it populate the editor selection.
@@ -701,7 +786,14 @@ impl canvas::Program<Message> for IsometricSurface{
     fn draw(&self,_:&CanvasState,renderer:&Renderer,_:&Theme,bounds:Rectangle,
         _cursor:mouse::Cursor)->Vec<canvas::Geometry>{
         let mut frame=Frame::new(renderer,bounds.size());
-        let faces=self.faces_cached(bounds.size());
+        let faces=if self.gpu_faces{
+            // GPU overlay never runs expensive model projection in draw.
+            crate::mesh_async::enqueue(self,bounds.size());
+            self.frame_cache.lock().unwrap_or_else(|e|e.into_inner())
+                .as_ref().filter(|(size,_)|*size==bounds.size())
+                .map(|(_,faces)|Arc::clone(faces))
+                .unwrap_or_else(||Arc::new(Vec::new()))
+        }else{self.faces_cached(bounds.size())};
         let steps=texture_steps(faces.len());
         for face in faces.iter(){
             if !self.gpu_faces{
@@ -846,6 +938,7 @@ mod tests{
             gpu_quality:crate::gpu_mesh::Quality::Balanced,
             frame_cache:Arc::new(Mutex::new(None)),
             gpu_frame_cache:Arc::new(Mutex::new(None)),
+            gpu_pending:Arc::new(Mutex::new(None)),
         }
     }
     #[test]
@@ -942,6 +1035,11 @@ mod tests{
         Arc::make_mut(&mut view.surface).width=8208;
         Arc::make_mut(&mut view.surface).depth=8208;
         assert!(view.scale(Size::new(1000.0,650.0))<1.0);
+        Arc::make_mut(&mut view.surface).width=65520;
+        Arc::make_mut(&mut view.surface).depth=65520;
+        let scale=view.scale(Size::new(1000.0,650.0));
+        assert!(scale>0.0&&scale<0.01);
+        assert!(65520.0*scale<1000.0);
     }
     #[test]
     fn camera_relative_projection_preserves_neighboring_blocks_at_world_border(){
@@ -1198,6 +1296,47 @@ mod tests{
         assert_eq!(texture_steps(100),8);
         assert_eq!(texture_steps(1500),4);
         assert_eq!(texture_steps(15000),1);
+    }
+    #[test]
+    fn extreme_panorama_chunk_grid_is_bounded_and_floor_aligned(){
+        assert_eq!(adaptive_chunk_grid(-33,-1),vec![-32,-16]);
+        assert_eq!(adaptive_chunk_grid(15,16),vec![16]);
+        // Whole signed i32 coordinate range is still bounded in O(128).
+        assert!(adaptive_chunk_grid(i32::MIN+1,i32::MAX-1).len()<=128);
+        let far=adaptive_chunk_grid(-32760,32759);
+        assert!(far.len()<=128);
+        assert!(!far.is_empty());
+        assert!(far.iter().all(|x|x.rem_euclid(16)==0));
+        assert!(far.windows(2).all(|p|p[0]<p[1]));
+        assert!(adaptive_chunk_grid(0,15).is_empty());
+    }
+    #[test]
+    fn panorama_chunk_markers_reach_far_horizon_not_just_first_256(){
+        let chosen=sampled_source_tile_indices(32_017,256);
+        assert_eq!(chosen.len(),256);
+        assert_eq!(chosen[0],0);
+        assert_eq!(chosen[255],32_016);
+        assert!(chosen.iter().any(|&i|i>24_000));
+        assert!(chosen.windows(2).all(|p|p[0]<p[1]));
+        assert_eq!(sampled_source_tile_indices(3,256),vec![0,1,2]);
+        assert_eq!(sampled_source_tile_indices(9,1),vec![8]);
+        assert!(sampled_source_tile_indices(10,0).is_empty());
+    }
+    #[test]
+    fn conservative_projected_envelope_drops_only_definite_offscreen_voxels(){
+        let screen=Size::new(900.0,440.0);
+        assert!(outside_projected_envelope(Point::new(-200.0,220.0),
+            20.0,20.0,screen));
+        assert!(outside_projected_envelope(Point::new(950.0,500.0),
+            20.0,20.0,screen));
+        assert!(!outside_projected_envelope(Point::new(-10.0,220.0),
+            20.0,20.0,screen));
+        assert!(!outside_projected_envelope(Point::new(450.0,450.0),
+            20.0,20.0,screen));
+        // Fail open on NaN: never lose known source geometry for a bad
+        // projected bound that cannot be trusted.
+        assert!(!outside_projected_envelope(Point::new(f32::NAN,0.0),
+            20.0,20.0,screen));
     }
     #[test]
     fn chunk_and_section_boundaries_use_negative_coordinate_floor_grid(){

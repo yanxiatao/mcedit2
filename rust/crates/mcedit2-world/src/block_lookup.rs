@@ -1,7 +1,8 @@
 //! Unified read-only block lookup across original Java save generations.
 //! Alpha individual .dat, MCRegion .mcr, numeric and named Anvil .mca,
 //! modern negative-height worlds and compatible snapshot Section schemas.
-use std::fs;
+use std::{fs,path::Path};
+use std::collections::HashMap;
 use crate::alpha::read_alpha_chunk_bytes;
 use crate::sections::{self,Layout,State};
 use crate::{RegionIndex,WorldError,WorldSummary};
@@ -40,6 +41,19 @@ impl Lookup {
 }
 fn invalid(s:impl Into<String>)->WorldError {WorldError::Invalid(s.into())}
 
+/// Real modded 1.21.1 worlds can contain 0-byte r.X.Z.mca
+/// placeholders for a not-yet-generated region. Refuse malformed nonempty
+/// indexes, but let a genuine *empty regular file* behave like no chunk.
+/// Never chase symlinks or convert an incomplete header to missing terrain.
+fn open_original_region_or_empty(path:&Path)
+    ->Result<Option<RegionIndex>,WorldError>{
+    let metadata=fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink()||!metadata.is_file(){
+        return Err(invalid("Original Region source must be a regular file, not a symlink"));
+    }
+    if metadata.len()==0{return Ok(None);}
+    RegionIndex::open(path).map(Some)
+}
 /// Fetch decompressed original NBT bytes without rewriting any unknown tags.
 /// Consumers must validate the decoded chunk and its original coordinates
 /// before trusting bytes in a patch or write plan.
@@ -62,24 +76,22 @@ pub fn read_world_chunk_bytes(world:&WorldSummary,dimension:&str,cx:i32,cz:i32)
     let path=if anvil.exists(){anvil}
         else if mcr.exists(){mcr}
         else {return Ok(None)};
-    if fs::symlink_metadata(&path)?.file_type().is_symlink(){
-        return Err(invalid("Region file symlinks are not followed"));
+    match open_original_region_or_empty(&path)?{
+        Some(index)=>index.read_chunk_at(cx,cz),
+        None=>Ok(None),
     }
-    let index=RegionIndex::open(&path)?;
-    index.read_chunk(cx.rem_euclid(32) as u8,cz.rem_euclid(32) as u8)
 }
 
 /// Decode a source chunk and verify its storage coordinates and all Block
 /// Entity positions before permitting any original-world edit operation.
-pub fn read_world_chunk(world:&WorldSummary,dimension:&str,cx:i32,cz:i32)
+fn checked_original_chunk(raw:Option<Vec<u8>>,cx:i32,cz:i32)
     ->Result<Option<sections::Chunk>,WorldError>{
-    let chunk=read_world_chunk_bytes(world,dimension,cx,cz)?
-        .map(|raw|sections::decode_sections(&raw)
-            .map_err(|e|invalid(format!("Original chunk NBT refused: {e}"))))
+    let chunk=raw.map(|bytes|sections::decode_sections(&bytes)
+        .map_err(|e|invalid(format!("Original chunk NBT refused: {e}"))))
         .transpose()?;
     if let Some(chunk)=chunk.as_ref(){
         if chunk.block_entities.iter()
-            .any(|&(x, _, z)| x.div_euclid(16)!=cx || z.div_euclid(16)!=cz) {
+            .any(|&(x, _, z)|x.div_euclid(16)!=cx||z.div_euclid(16)!=cz){
             return Err(invalid("Original Block Entity coordinates outside owning chunk"));
         }
         if chunk.x.is_some_and(|v|v!=cx)||chunk.z.is_some_and(|v|v!=cz){
@@ -87,6 +99,57 @@ pub fn read_world_chunk(world:&WorldSummary,dimension:&str,cx:i32,cz:i32)
         }
     }
     Ok(chunk)
+}
+pub fn read_world_chunk(world:&WorldSummary,dimension:&str,cx:i32,cz:i32)
+    ->Result<Option<sections::Chunk>,WorldError>{
+    checked_original_chunk(read_world_chunk_bytes(world,dimension,cx,cz)?,cx,cz)
+}
+
+/// Short-lived, read-only Region header cache for one distant preview worker
+/// batch. Multiple sampled columns from the same 32x32 source region reuse
+/// its validated 8 KiB index; actual chunks are still opened, decompressed,
+/// coordinate-checked and BE-checked on every request. No world writes,
+/// persistent cache, or absent-chunk synthesis is performed.
+pub struct ReadOnlyRegionCache<'a>{
+    world:&'a WorldSummary,
+    dimension:&'a str,
+    source:&'a crate::DimensionSummary,
+    regions:HashMap<(i32,i32),Option<RegionIndex>>,
+}
+impl<'a> ReadOnlyRegionCache<'a>{
+    pub fn new(world:&'a WorldSummary,dimension:&'a str)->Result<Self,WorldError>{
+        let source=world.dimensions.iter().find(|d|d.name==dimension)
+            .ok_or_else(||invalid(format!("Unknown original dimension {dimension}")))?;
+        Ok(Self{world,dimension,source,regions:HashMap::new()})
+    }
+    pub fn read_chunk(&mut self,cx:i32,cz:i32)
+        ->Result<Option<sections::Chunk>,WorldError>{
+        // Alpha saves store one individual file per chunk, not Region headers.
+        if self.source.extension.contains("c.x.z.dat"){
+            return read_world_chunk(self.world,self.dimension,cx,cz);
+        }
+        let key=(cx.div_euclid(32),cz.div_euclid(32));
+        if !self.regions.contains_key(&key){
+            let basename=format!("r.{}.{}",key.0,key.1);
+            let mca=self.source.region_dir.join(format!("{basename}.mca"));
+            let mcr=self.source.region_dir.join(format!("{basename}.mcr"));
+            if mca.exists()&&mcr.exists(){
+                return Err(invalid("Both original .mca and .mcr exist for one region position"));
+            }
+            let candidate=if mca.exists(){Some(mca)}
+                else if mcr.exists(){Some(mcr)}else{None};
+            let region=candidate.map(|path|
+                open_original_region_or_empty(&path)).transpose()?.flatten();
+            // Keep each background worker's header footprint below ~256 KiB.
+            if self.regions.len()>=32{self.regions.clear();}
+            self.regions.insert(key,region);
+        }
+        let raw=match self.regions.get(&key).and_then(Option::as_ref){
+            Some(region)=>region.read_chunk_at(cx,cz)?,
+            None=>None,
+        };
+        checked_original_chunk(raw,cx,cz)
+    }
 }
 
 /// Read ONE actual block, reusing native indexed chunk decoding.
@@ -121,6 +184,39 @@ pub fn parse_xyz(s:&str)->Result<(i32,i32,i32),WorldError>{
 mod tests {
     use super::*;
     #[test]
+    fn true_zero_byte_placeholder_is_absent_but_truncated_region_is_corrupt(){
+        let dir=std::env::temp_dir().join(format!(
+            "mcedit2-empty-original-region-{}",std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let region=dir.join("r.-1.-2.mca");
+        std::fs::write(&region,[]).unwrap();
+        let world=WorldSummary{
+            root:dir.clone(),level_name:None,data_version:Some(3955),
+            storage_format:Some(19133),version_name:Some("1.21.1".into()),
+            dimensions:vec![crate::DimensionSummary{
+                name:"minecraft:overworld".into(),region_dir:dir.clone(),
+                regions:1,chunks:0,extension:"mca".into(),
+            }],warnings:vec![],
+        };
+        // Both direct and 3D/2D cached source paths agree that a real
+        // zero-byte file is not an NBT Section or generated air.
+        assert!(read_world_chunk_bytes(&world,"minecraft:overworld",
+            -32,-64).unwrap().is_none());
+        assert!(read_world_block(&world,"minecraft:overworld",
+            -512,64,-1024).unwrap()==Lookup::NoChunk);
+        let mut cache=ReadOnlyRegionCache::new(&world,"minecraft:overworld").unwrap();
+        assert!(cache.read_chunk(-32,-64).unwrap().is_none());
+        assert_eq!(std::fs::metadata(&region).unwrap().len(),0);
+        // A nonempty partial header is corruption, not a placeholder.
+        std::fs::write(&region,[0u8;4096]).unwrap();
+        assert!(read_world_chunk_bytes(&world,"minecraft:overworld",
+            -32,-64).is_err());
+        let mut fresh=ReadOnlyRegionCache::new(&world,"minecraft:overworld").unwrap();
+        assert!(fresh.read_chunk(-32,-64).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
     fn exact_signed_xyz_parsing_and_error_paths(){
         assert_eq!(parse_xyz("-255, -64, 400").unwrap(),(-255,-64,400));
         for bad in ["1,2","1,2,3,4","3.5,0,0","nan,0,0","2147483648,0,0"]{
@@ -142,6 +238,11 @@ mod tests {
         };
         assert_eq!(read_world_block(&world,"minecraft:overworld",-1,-64,0).unwrap(),
                    Lookup::NoChunk);
+        let mut cache=ReadOnlyRegionCache::new(&world,"minecraft:overworld").unwrap();
+        for (cx,cz) in [(-2,-2),(-1,0),(0,0),(31,31)]{
+            assert!(cache.read_chunk(cx,cz).unwrap().is_none());
+        }
+        assert!(ReadOnlyRegionCache::new(&world,"minecraft:not-real").is_err());
         assert!(read_world_block(&world,"minecraft:not-real",0,0,0).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }

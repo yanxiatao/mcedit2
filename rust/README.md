@@ -1061,27 +1061,32 @@ package until the entire 3D display feature is complete.
 ## Extreme read-only terrain view distance (no CI)
 
 The distant-terrain planner offers progressive 16 / 32 / 64 / 128 /
-256 / 512 / 1024 chunk radius presets. The largest radius is 16,384
-world blocks from the center to each horizon edge, excluding unseen or
-unavailable source chunks. To keep memory finite, the center samples
+256 / 512 / 1024 / 1536 / 2047 chunk radius presets. The largest
+radius is 32,752 world blocks from the center to each horizon edge,
+excluding unseen or unavailable source chunks. To keep memory finite, the center samples
 single source block columns and successive chunk rings use 4/8/16-block
 LOD footprints; beyond 256/512 chunks the planner also skips more of
-the farthest chunks. The largest view plans at most 36,000 source chunk
-requests, processed in existing bounded asynchronous batches, never all
-decoded and retained at once. It does not inspect or render entities.
+the farthest chunks. Past the 1024-chunk radius, only every eighth
+outer ring is sampled, with a coarser angular step; the final source
+radius is always represented. A view plans at most 36,000 source chunk
+requests, processed in bounded asynchronous batches. Each batch reuses
+up to 32 validated read-only Region indexes, avoiding repeated 8 KiB
+header parsing for adjacent original chunks while retaining per-chunk
+NBT and Block Entity coordinate checks. Nothing is written. It does not inspect or render entities.
 Far LOD tiles are never authenticated editable block picks. This is
 **sparse distant terrain** rather than pixel-perfect all-block terrain:
 unloaded or unplanned areas are not fabricated. The GPU projection uses
 camera-relative coordinates and a near-zero minimum scene scale so far
-terrain can fit the view. 1024-chunk inspections may take considerable
-time on very large saves due to disk access and will progress tile by tile.
+terrain can fit the view. 1024–2047-chunk inspections can take
+considerable time on very large saves; a 2047-chunk panorama is highly
+sparse and is NOT a promise of continuous terrain coverage.
 CI and executable build are still deferred until the entire 3D display
 migration has been completed, as explicitly requested.
 
 
 ## Progressive far-terrain rendering budgets and nonblocking reads (unverified)
 
-For 16–1024-chunk radius read-only scenes, the 150,000-face GPU/Canvas
+For 16–2047-chunk radius read-only scenes, the 150,000-face GPU/Canvas
 budget is now distributed by **actual source LOD**: detailed original
 voxels receive a near-detail allocation, while sampled terrain and the
 outermost 25% of the horizon retain guaranteed face capacity. Empty
@@ -1175,3 +1180,217 @@ rather than generating one independent mesh for every source voxel.
 Weighted counts and array size are bounded, and invalid metadata safely
 falls back to the existing conservative display. Entity and disk world
 operations remain excluded. This work is pending one final CI gate.
+
+## Read-only oversized Java chunk sidecars (.mcc)
+
+The native original-world reader now supports the vanilla external-stream
+flag and neighboring `c.X.Z.mcc` files for GZip, zlib and uncompressed NBT.
+An exact owning Region and original absolute chunk position are mandatory;
+symlink and non-regular sidecars are refused. Compressed input is limited
+to 32 MiB and expanded NBT to 64 MiB. An absent or malformed sidecar is
+never treated as air. The existing on-disk Region preflight still refuses
+saving external chunks; read support does not imply write support. LZ4 and
+custom compression remain unsupported. No CI, compilation or packaging was
+requested or run for this change.
+
+## Full-resolution interactive 2D source slices
+
+Horizontal X/Z and vertical X/Y or Z/Y native slices now display **all
+64×64 source cells** in an iced Canvas rather than a 16×16 wall of buttons
+or unselectable text. The map fits its viewport, colors known original
+block identities (including stable synthetic modded colors), highlights
+Block Entities, and distinguishes known air, missing chunks and absent
+Sections. Clicks map back to exact signed XYZ in the source world. A click
+on an unknown cell is ignored, and even a known cell must use the normal
+preview/confirm path to edit; the 4096-cell edit cap does not change.
+This preview does not fabricate missing source NBT and does not require
+entity computation. Tests cover signed coordinates, 64×64 hit-testing,
+vertical Y ordering and unknown-source color separation. These new tests
+have not been run; CI/build/packaging remain deferred.
+
+## Region index integrity before rendering (read-only)
+
+Every Java .mca/.mcr header now verifies its 1024 sector extents for
+cross-chunk overlaps before source blocks are trusted. Corrupt duplicated
+or partially overlapping slot claims refuse the entire index instead of
+showing potentially unrelated data in the 2D/3D view. Adjacent valid
+allocations remain supported. Validation sorts at most 1024 fixed-size
+ranges, so a sparse/malicious gigantic file cannot cause a sector-sized
+memory allocation. The writer's stricter independent preflight and original
+NBT/Block Entity protections are unchanged. CI, tests and packaging have
+not been run for this migration batch.
+
+## Adaptive 3D far-horizon source guides
+
+Large 1024–2047 chunk panoramas previously drew thousands of 16-block
+chunk-reference lines on every mouse interaction, while showing only the
+first 256 source-chunk status borders. The Canvas now coarsens X/Z guides
+to at most 128 lines per axis, with power-of-two Minecraft-aligned
+spacing and negative-coordinate correctness. It preserves full 16-block
+guides in near scenes. Source tile status markers retain near detail
+and sample across the entire streamed panorama, including the last
+outer-horizon tile; missing original chunks and Sections remain visibly
+distinct. No extra chunk reads, entity computation, model rebuilds or
+NBT changes are introduced. The draw/selection source remains the same.
+This change has not been compiled or CI-tested.
+
+## Resource-pack sampling in 2D slice maps
+
+When original-state resource textures are enabled, both horizontal and
+vertical native 2D maps now sample the already-loaded Java resource-pack
+atlas using the resolved **top-face texture** of each original blockstate.
+The same original XYZ selects deterministic weighted/multipart model
+variants, and the same UV-corner ordering honors texture crop/rotation.
+The preview is a 2D **top-face color/texture guide**, not an exact vertical
+cross-section or a replacement for arbitrary 3D model geometry. Missing,
+transparent, air or unsupported texture cells retain their verified source
+palette appearance. A fixed per-cell sampling cap ensures a 64x64 map draws
+at most 16,384 additional texture squares, without filesystem access,
+entity processing or writes to the world. Tests cover atlas-UV interpolation
+and bounded rasterization; CI/compilation remain unrun.
+
+## Reused verified Region indexes for near 2D and 3D scenes
+
+Single-shot 64x64 horizontal/vertical slices and 64x64x48 near-field
+3D surface/volume inspections now share the existing worker-local
+ReadOnlyRegionCache within each view request. This avoids reopening
+and validating the same original 8 KiB Region index for adjacent chunks
+while preserving exact per-chunk decompression, ownership, Block Entity
+validation and absence reporting. Loaded original chunks are still
+decoded only once per scene. The bounded cache never writes Region data
+or extends the independent 4096-edit budget. Signed, sorted Section Y
+lookup uses a binary search instead of a per-block linear traversal
+through 1.18+ tall-world Sections; missing Y remains absent rather than
+invented air. New negative-Y and missing-Section regression tests are
+included but unrun; CI/build/packaging remain disabled.
+
+## Asynchronous original near-field read dispatch (pending compile verification)
+
+Near-field top-surface/exposed-volume 3D and up-to-64x64 horizontal/vertical
+2D source inspections now dispatch their synchronous Java chunk decoders
+on bounded OS reader workers instead of blocking iced's UI event handler.
+A cloned in-memory Session captures original-world identity plus staged
+block overlay at dispatch; workers NEVER modify world NBT. The UI queue
+tracks a monotonic request nonce, and discards superseded results after
+view changes, current-world/dimension switches or any staging/save action.
+The background result never silently substitutes air for missing chunks
+or missing Sections. Source coordinates, per-chunk BE checks and the
+independent write-preview budget are unchanged. Validation remains pending;
+CI, cargo check, cargo test and packaging have NOT been run.
+
+### Near-field worker backpressure
+
+Near-field source work is serialized to at most **one active worker**.
+Rapid pan/zoom/slice changes replace the queued snapshot with the newest
+request; an obsolete completion releases the slot but cannot publish
+old world data. This bounds source I/O, decoded chunk memory and native
+threads under frequent interactions. Worker errors release the same slot.
+No more than one pending near-field view is retained in memory; far terrain
+maintains its independent bounded progressive reader. No CI was triggered.
+
+## Exact top-surface 3D known-air and occlusion correction
+
+In the earlier near-field heightmap reader a source column containing
+only air was represented by a synthetic-looking air voxel. A known
+all-air column is now recorded as known original source with **no
+renderable cube**. Missing chunks/Sections remain unknown. Top 3D
+sides are culled against verified same-height neighbor solids and kept
+only for genuine view boundaries, lower verified source surfaces, or
+verified air/partial neighbors. Unknown neighbors do not imply source
+air. Exact blockstate and BE provenance remain unchanged; no writes or
+entity rendering. New tests have been added but not executed.
+
+## Nonblocking Java world discovery and Region indexing
+
+The desktop **Inspect world** action now moves Java save discovery,
+level.dat inspection and bounded Region header scanning onto a read-only
+OS indexer rather than blocking iced while a large original world is
+opened. Only one indexer can run at once; rapid repeated opens keep the
+newest pending path, with a generation token that discards completed
+results after switching an existing world, dimension or closing all.
+Indexing errors are displayed without inserting a partially trusted
+world. Startup worlds passed as command-line arguments retain the
+existing synchronous initialization behavior and remain a future
+migration target. No world files are altered. The new desktop tasks
+have not yet been compiled or test-run; CI is still explicitly deferred.
+
+## Reused-source overhead 2D map for near and distant terrain
+
+Toggle **Top-down 2D** in the native source viewport to render the exact
+same original SurfaceView and progressive far-terrain samples without
+re-reading chunks. Near scenes show the highest actual source voxel per
+X/Z cell and support exact signed XYZ selection. Large panoramas coalesce
+sampled source columns into bounded 2px screen bins; unknown/unloaded
+areas are not filled in and approximate LOD terrain cannot be picked or
+edited. Pan/zoom buttons and wheel retain existing read-only navigation.
+Regression tests cover source world-border coordinates and far LOD
+selection refusal. CI, compiler checks and packaging were not run.
+
+## Java 1.20.5+ source Region compression method 4 (LZ4Block)
+
+Original chunks using vanilla Region compression ID 4 now decode the
+**lz4-java LZ4Block stream**, not an incompatible standard LZ4 Frame.
+The bounded native reader supports both compressed and raw blocks,
+checks each declared block length, compares masked xxHash32 checksums,
+requires an exact terminal header and rejects trailing/ambiguous bytes.
+Expanded NBT remains limited to 64 MiB. This also applies to valid
+external .mcc sidecar streams with the method-4 marker. Custom third-party
+compression ID 127 remains unsupported and is refused; native writer
+preflight still refuses rewriting original LZ4 or sidecar chunks.
+Regression tests include raw/compressed blocks, invalid checksums,
+overlong sizes and malformed termination. Cargo dependencies were added
+but neither resolved nor compiled in this turn; CI/build remain deferred.
+
+## Bounded asynchronous original-state GPU mesh generation
+
+The native wgpu shader and its interactive overlay no longer project
+resource models, build face lists or normalize GPU vertices in the iced
+draw handler. A single process-wide worker builds the completed source
+face and triangle cache, with one latest pending request under rapid
+camera movement. Both GPU and exact picking share the same completed
+camera/viewport-size buffer; until ready they render a placeholder and
+do not offer unauthenticated hits. On camera invalidation the cache Arcs
+are replaced, so an old worker cannot overwrite new camera data.
+A 125ms lightweight refresh displays finished meshes after background
+completion or resize. CPU-only Canvas fallback is left independent.
+No original-world writes or entity processing are introduced.
+
+## CPU face-culling optimizations before GPU mesh assembly
+
+The read-only native projection now rejects an entirely off-screen
+**conservative 3D voxel envelope** before invoking JSON model resolution,
+weighted variant lookup, vertex projection or GPU triangle construction.
+Envelopes include the permitted rotated/rescaled vanilla block-model
+extent and actual LOD span, so near-edge elements are not prematurely
+culled. Visible voxels still apply exact polygon-rectangle checks.
+Face normals are tested before expensive resource-pack face metadata.
+Existing source neighbor-mask, partial-model coverage and back-face
+rules remain authoritative; unknown source chunks/Sections never imply
+air, and the same final visible face buffer powers GPU draws and picks.
+
+## Vanilla parent-model fallback for modern Java resource packs
+
+Custom resource-pack JSON children frequently inherit vanilla parent
+models that are absent from the ZIP. The native parser now provides a
+**strict namespace-limited** internal parent-template library for
+minecraft:cube_all, cube, cube_column, cube_column_horizontal,
+cube_bottom_top, orientable and orientable_with_bottom. Original per-face
+cullface, local UV and inherited child texture aliases remain associated
+with verified source blockstates; third-party unknown parent models still
+fail closed instead of being guessed. The vanilla cross/tinted_cross
+fallback uses two double-sided 45-degree flat plant planes rather than
+inventing opaque cubes. Implicit UVs now accept one zero-thickness axis
+only for the correct face normal; other degenerate geometry is refused.
+These changes do not require loading entities or altering source NBT.
+
+## Actual 1.21.1 zero-byte Region placeholders
+
+The user's private original 1.21.1 save includes 72 empty 0-byte
+terrain `.mca` placeholders (plus 5 in POI/dimension POI) alongside
+2,338 generated overworld chunks. A zero-byte **regular** Region file
+is now interpreted as an absent original chunk in both uncached and
+cached source readers, without manufacturing air/NBT. World indexing
+no longer flags those placeholders as damaged Regions. A nonzero
+truncated Region header, overlapping sectors, symlink or malformed
+real chunk is still rejected; writer/backup safety is unchanged.
+The original ZIP is kept local and is NOT uploaded to GitHub.

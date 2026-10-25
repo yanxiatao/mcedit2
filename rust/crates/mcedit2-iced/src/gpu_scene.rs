@@ -122,7 +122,12 @@ impl shader::Program<Message> for GpuScene{
     type Primitive=Primitive;
     fn draw(&self,_:&Self::State,_:mouse::Cursor,bounds:Rectangle)->Primitive{
         let size=bounds.size();
-        let vertices=self.0.gpu_vertices_cached(size);
+        crate::mesh_async::enqueue(&self.0,size);
+        let vertices=self.0.gpu_frame_cache.lock()
+            .unwrap_or_else(|e|e.into_inner())
+            .as_ref().filter(|(cached,_)|*cached==size)
+            .map(|(_,vertices)|Arc::clone(vertices))
+            .unwrap_or_else(||Arc::new(Vec::new()));
         let atlas=self.0.texture_bank.as_ref().and_then(|bank|bank.atlas()).cloned();
         Primitive{vertices,atlas,quality:self.0.gpu_quality}
     }

@@ -12,7 +12,7 @@ use crate::clipboard::{BlockClipboard,HorizontalTransform};
 use crate::region_transaction::{self,RegionWriteReceipt};
 use crate::region_plan::NativeRegionCandidate;
 
-use crate::block_lookup::{parse_xyz, read_world_block, read_world_chunk, Lookup};
+use crate::block_lookup::{parse_xyz, read_world_block, read_world_chunk, ReadOnlyRegionCache, Lookup};
 use crate::sections::{decode_sections,patch_named_growing_palette,patch_original_numeric_arrays,Chunk,InPaletteEdit,Layout,State};
 use crate::block_lookup::read_world_chunk_bytes;
 use sha2::{Digest,Sha256};
@@ -898,6 +898,7 @@ impl Session {
             return Err(refuse("X/Z slice exceeds 64x64 / 4096 cells"));
         }
         let mut chunks: BTreeMap<ChunkPos, Option<Chunk>> = BTreeMap::new();
+        let mut region_reader=ReadOnlyRegionCache::new(&self.world,&self.dimension)?;
         let mut rows = Vec::with_capacity(height);
         let (mut present, mut missing_chunks, mut missing_sections, mut block_entities)=(0,0,0,0);
         let y = bounds.minimum[1];
@@ -906,7 +907,7 @@ impl Session {
             for x in bounds.minimum[0]..=bounds.maximum[0] {
                 let key = (x.div_euclid(16), z.div_euclid(16));
                 if !chunks.contains_key(&key) {
-                    chunks.insert(key, read_world_chunk(&self.world,&self.dimension,key.0,key.1)?);
+                    chunks.insert(key,region_reader.read_chunk(key.0,key.1)?);
                 }
                 let cell = match chunks.get(&key).and_then(Option::as_ref) {
                     None => { missing_chunks += 1; SliceCell::MissingChunk },
@@ -948,6 +949,7 @@ impl Session {
             return Err(refuse("Vertical original plane exceeds 64x64 cells"));
         }
         let mut cache:BTreeMap<ChunkPos,Option<Chunk>>=BTreeMap::new();
+        let mut region_reader=ReadOnlyRegionCache::new(&self.world,&self.dimension)?;
         let (mut be,mut missing_chunks,mut missing_sections)=(0,0,0);
         let mut rows=Vec::with_capacity(height);
         for y in (bounds.minimum[1]..=bounds.maximum[1]).rev(){
@@ -959,9 +961,7 @@ impl Session {
                 };
                 let key=(x.div_euclid(16),z.div_euclid(16));
                 if !cache.contains_key(&key){
-                    cache.insert(key,read_world_chunk(
-                        &self.world,&self.dimension,key.0,key.1
-                    )?);
+                    cache.insert(key,region_reader.read_chunk(key.0,key.1)?);
                 }
                 let cell=match cache.get(&key).and_then(Option::as_ref){
                     None=>{missing_chunks+=1;SliceCell::MissingChunk},

@@ -23,6 +23,7 @@ pub mod region_plan;
 pub mod region_transaction;
 mod patch;
 mod oldnumeric;
+mod lz4_block;
 
 use flate2::read::{GzDecoder, ZlibDecoder};
 use std::fmt;
@@ -88,6 +89,11 @@ impl RegionIndex {
         let mut header = [0u8; HEADER_BYTES];
         file.read_exact(&mut header)?;
         let mut slots = [None; 1024];
+        // A corrupt Region can point multiple chunk slots at overlapping
+        // source sectors. Never trust those ambiguous headers even for
+        // read-only 2D/3D rendering. 1024 small spans are enough; avoid
+        // allocating a bitmap proportional to an attacker-controlled file.
+        let mut occupied:Vec<(u64,u64,usize)>=Vec::new();
         for (index, slot) in slots.iter_mut().enumerate() {
             let start = index * 4;
             let word = u32::from_be_bytes(header[start..start + 4].try_into().unwrap());
@@ -108,7 +114,17 @@ impl RegionIndex {
                     path.display()
                 )));
             }
+            occupied.push((first as u64,first as u64+count as u64,index));
             *slot = Some(ChunkSlot { start_sector: first, sector_count: count });
+        }
+        occupied.sort_unstable_by_key(|span|span.0);
+        for pair in occupied.windows(2){
+            if pair[0].1>pair[1].0{
+                return Err(invalid(format!(
+                    "Original Region source has overlapping chunk allocations: slots {} and {} in {}",
+                    pair[0].2,pair[1].2,path.display()
+                )));
+            }
         }
         Ok(Self { path, slots })
     }
@@ -126,8 +142,30 @@ impl RegionIndex {
     /// Returns the original decompressed chunk NBT without normalizing,
     /// rewriting or recreating its unknown/modded tags.
     /// Compression 1 = GZip, 2 = Zlib, 3 = uncompressed; unsupported
-    /// compressors and out-of-region sidecar references fail closed.
+    /// unknown compressors fail closed. External .mcc streams are read only.
     pub fn read_chunk(&self, local_x: u8, local_z: u8) -> Result<Option<Vec<u8>>> {
+        // Local-only coordinates cannot identify an external c.X.Z.mcc file.
+        self.read_chunk_inner(local_x,local_z,None)
+    }
+
+    /// Exact world chunk position is required for Java external streams.
+    /// This is a read-only data source; the region writer still rejects .mcc.
+    pub fn read_chunk_at(&self,cx:i32,cz:i32)->Result<Option<Vec<u8>>>{
+        let extension=self.path.extension().and_then(|v|v.to_str());
+        let expected=match extension{
+            Some("mca")=>format!("r.{}.{}.mca",cx.div_euclid(32),cz.div_euclid(32)),
+            Some("mcr")=>format!("r.{}.{}.mcr",cx.div_euclid(32),cz.div_euclid(32)),
+            _=>return Err(invalid("Original source is not a Java Region filename")),
+        };
+        if self.path.file_name().and_then(|v|v.to_str())!=Some(expected.as_str()){
+            return Err(invalid("Original chunk is outside this Region file"));
+        }
+        self.read_chunk_inner(cx.rem_euclid(32) as u8,
+            cz.rem_euclid(32) as u8,Some((cx,cz)))
+    }
+
+    fn read_chunk_inner(&self,local_x:u8,local_z:u8,
+        absolute:Option<(i32,i32)>)->Result<Option<Vec<u8>>>{
         let Some(slot) = self.slot(local_x, local_z) else { return Ok(None); };
         let mut file = File::open(&self.path)?;
         file.seek(SeekFrom::Start(slot.start_sector as u64 * SECTOR))?;
@@ -141,12 +179,48 @@ impl RegionIndex {
         }
         let mut compression = [0u8; 1];
         file.read_exact(&mut compression)?;
-        let mut payload = vec![0u8; (length - 1) as usize];
-        file.read_exact(&mut payload)?;
-        let original = match compression[0] {
+        let method=compression[0]&0x7f;
+        let payload=if compression[0]&0x80!=0{
+            // Vanilla's external marker is exactly a five-byte stub in
+            // one region sector. Never guess another source chunk's NBT.
+            if length!=1||slot.sector_count!=1{
+                return Err(invalid("Malformed external Java chunk marker"));
+            }
+            if !matches!(method,1|2|3|4){
+                return Err(invalid(format!(
+                    "Unsupported external compression method {method}"
+                )));
+            }
+            let (cx,cz)=absolute.ok_or_else(||invalid(
+                "An external Java chunk requires absolute X/Z coordinates"
+            ))?;
+            let dir=self.path.parent().ok_or_else(||invalid(
+                "No parent directory for original external chunk"
+            ))?;
+            let sidecar=dir.join(format!("c.{cx}.{cz}.mcc"));
+            let metadata=fs::symlink_metadata(&sidecar)?;
+            if metadata.file_type().is_symlink()||!metadata.is_file(){
+                return Err(invalid("External chunk must be a regular, non-symlink file"));
+            }
+            if metadata.len()>MAX_COMPRESSED{
+                return Err(invalid("External chunk exceeds 32 MiB compressed budget"));
+            }
+            let mut data=Vec::new();
+            File::open(&sidecar)?.take(MAX_COMPRESSED+1).read_to_end(&mut data)?;
+            if data.len() as u64>MAX_COMPRESSED{
+                return Err(invalid("External chunk grew beyond 32 MiB read budget"));
+            }
+            data
+        }else{
+            let mut data=vec![0u8;(length-1) as usize];
+            file.read_exact(&mut data)?;
+            data
+        };
+        let original = match method {
             1 => decompress_bounded(GzDecoder::new(&payload[..]))?,
             2 => decompress_bounded(ZlibDecoder::new(&payload[..]))?,
             3 if payload.len() as u64 <= MAX_NBT => payload,
+            4 => lz4_block::decode(&payload)?,
             3 => return Err(invalid("Uncompressed chunk NBT exceeds safety budget")),
             flag => return Err(invalid(format!(
                 "Unsupported original chunk compression type {flag}; do not modify"
@@ -251,6 +325,11 @@ pub fn inspect_world(path: impl AsRef<Path>) -> Result<WorldSummary> {
         for filename in &region_files {
             let ext = filename.extension().and_then(|s| s.to_str()).unwrap_or("");
             if !formats.contains(&ext) { formats.push(ext); }
+            // Several actual modded 1.21.1 Java worlds create a zero-byte
+            // Region placeholder before generating any source chunk.
+            // Ignore it for chunk counts and warnings, but continue to
+            // flag malformed nonempty headers as corrupt.
+            if filename.metadata()?.len()==0{continue;}
             match RegionIndex::open(filename) {
                 Ok(index) => chunks += index.chunk_count(),
                 Err(error) if warnings.len() < 128 => warnings.push(format!(
@@ -580,6 +659,116 @@ mod tests {
         raw[0..4].copy_from_slice(&((250u32 << 8) | 2).to_be_bytes());
         fs::write(&path, raw).unwrap();
         assert!(RegionIndex::open(path).is_err());
+    }
+    #[test]
+    fn overlapping_original_region_slots_are_rejected_before_rendering(){
+        let temp=Fixture::new();
+        write_fixture_world(&temp);
+        let path=temp.0.join("region/r.0.0.mca");
+        let original=fs::read(&path).unwrap();
+        // Both slots claim the same original physical sector.
+        let mut duplicate=original.clone();
+        duplicate[4..8].copy_from_slice(&((2u32<<8)|1).to_be_bytes());
+        fs::write(&path,&duplicate).unwrap();
+        assert!(RegionIndex::open(&path).unwrap_err().to_string()
+            .contains("overlapping chunk allocations"));
+        // Partial overlap also fails, even when both pointers fit the file.
+        let mut partial=vec![0u8;4*SECTOR as usize];
+        partial[..original.len()].copy_from_slice(&original);
+        partial[0..4].copy_from_slice(&((2u32<<8)|2).to_be_bytes());
+        partial[4..8].copy_from_slice(&((3u32<<8)|1).to_be_bytes());
+        fs::write(&path,&partial).unwrap();
+        assert!(RegionIndex::open(&path).is_err());
+        // Adjacent non-overlapping allocations are valid header structure.
+        partial[0..4].copy_from_slice(&((2u32<<8)|1).to_be_bytes());
+        fs::write(&path,&partial).unwrap();
+        let safe=RegionIndex::open(&path).unwrap();
+        assert_eq!(safe.chunk_count(),2);
+        assert_eq!(safe.slot(1,0).unwrap().start_sector,3);
+        assert_eq!(fs::read(&path).unwrap(),partial);
+    }
+    #[test]
+    fn original_region_method_four_decodes_inline_and_external_lz4(){
+        let temp=Fixture::new();
+        let raw=write_fixture_world(&temp);
+        let path=temp.0.join("region/r.0.0.mca");
+        let mut stream=b"LZ4Block".to_vec();
+        stream.push(0x16); // Java raw LZ4Block
+        stream.extend_from_slice(&(raw.len() as u32).to_le_bytes());
+        stream.extend_from_slice(&(raw.len() as u32).to_le_bytes());
+        let checksum=xxhash_rust::xxh32::xxh32(&raw,0x9747_b28c)
+            &0x0fff_ffff;
+        stream.extend_from_slice(&checksum.to_le_bytes());
+        stream.extend_from_slice(&raw);
+        stream.extend_from_slice(b"LZ4Block");
+        stream.push(0x16);
+        stream.extend_from_slice(&[0u8;12]);
+        let mut bytes=fs::read(&path).unwrap();
+        let at=(2*SECTOR) as usize;
+        assert!(stream.len()+5<SECTOR as usize);
+        bytes[at..at+4].copy_from_slice(&((stream.len()+1) as u32).to_be_bytes());
+        bytes[at+4]=4;
+        bytes[at+5..at+5+stream.len()].copy_from_slice(&stream);
+        fs::write(&path,&bytes).unwrap();
+        assert_eq!(RegionIndex::open(&path).unwrap()
+            .read_chunk_at(0,0).unwrap().unwrap(),raw);
+        bytes[at..at+4].copy_from_slice(&1u32.to_be_bytes());
+        bytes[at+4]=0x84; // external Java method 4
+        fs::write(&path,&bytes).unwrap();
+        let sidecar=temp.0.join("region/c.0.0.mcc");
+        fs::write(&sidecar,&stream).unwrap();
+        assert_eq!(RegionIndex::open(&path).unwrap()
+            .read_chunk_at(0,0).unwrap().unwrap(),raw);
+        assert_eq!(fs::read(&sidecar).unwrap(),stream);
+        assert_eq!(fs::read(&path).unwrap(),bytes);
+    }
+    #[test]
+    fn java_external_mcc_is_read_only_and_rejects_bad_marker(){
+        let temp=Fixture::new();
+        let original=write_fixture_world(&temp);
+        let region=temp.0.join("region/r.0.0.mca");
+        let mut bytes=fs::read(&region).unwrap();
+        let at=(2*SECTOR) as usize;
+        bytes[at..at+4].copy_from_slice(&1u32.to_be_bytes());
+        bytes[at+4]=0x80|2;
+        fs::write(&region,&bytes).unwrap();
+        let mut encoder=ZlibEncoder::new(Vec::new(),Compression::default());
+        encoder.write_all(&original).unwrap();
+        let sidecar=temp.0.join("region/c.0.0.mcc");
+        let compressed=encoder.finish().unwrap();
+        fs::write(&sidecar,&compressed).unwrap();
+        let index=RegionIndex::open(&region).unwrap();
+        assert!(index.read_chunk(0,0).is_err());
+        assert!(index.read_chunk_at(32,0).is_err());
+        assert_eq!(index.read_chunk_at(0,0).unwrap().unwrap(),original);
+        let world=inspect_world(&temp.0).unwrap();
+        assert_eq!(crate::block_lookup::read_world_chunk_bytes(
+            &world,"minecraft:overworld",0,0).unwrap().unwrap(),original);
+        assert_eq!(fs::read(&region).unwrap(),bytes);
+        assert_eq!(fs::read(&sidecar).unwrap(),compressed);
+        fs::remove_file(&sidecar).unwrap();
+        assert!(index.read_chunk_at(0,0).is_err());
+        fs::write(&sidecar,&compressed).unwrap();
+        bytes[at..at+4].copy_from_slice(&2u32.to_be_bytes());
+        fs::write(&region,bytes).unwrap();
+        assert!(RegionIndex::open(&region).unwrap().read_chunk_at(0,0).is_err());
+    }
+    #[test]
+    fn negative_external_mcc_coordinates_are_not_local_slot_names(){
+        let temp=Fixture::new();
+        let region=temp.0.join("region/r.-1.0.mca");
+        let mut bytes=vec![0u8;3*SECTOR as usize];
+        let offset=(7*32+31)*4;
+        bytes[offset..offset+4].copy_from_slice(&((2u32<<8)|1).to_be_bytes());
+        let at=(2*SECTOR) as usize;
+        bytes[at..at+4].copy_from_slice(&1u32.to_be_bytes());
+        bytes[at+4]=0x80|3;
+        fs::write(&region,bytes).unwrap();
+        let payload=example_nbt();
+        fs::write(temp.0.join("region/c.-1.7.mcc"),&payload).unwrap();
+        let index=RegionIndex::open(&region).unwrap();
+        assert_eq!(index.read_chunk_at(-1,7).unwrap().unwrap(),payload);
+        assert!(index.read_chunk_at(31,7).is_err());
     }
     #[test]
     fn region_filename_accepts_negative_positions_and_refuses_suspicious_extensions() {

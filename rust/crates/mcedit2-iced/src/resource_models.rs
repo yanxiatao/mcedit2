@@ -4,6 +4,7 @@
 //! geometry use the ordinary named-texture fallback rather than guessing.
 use std::collections::{BTreeMap,BTreeSet};
 use std::hash::{Hash,Hasher};
+use std::sync::OnceLock;
 use mcedit2_world::sections::State;
 use serde_json::Value;
 use crate::isometric::Face;
@@ -43,6 +44,53 @@ fn normalize_model(value:&str,default_ns:&str)->Option<String>{
     let path=path.strip_prefix("block/").unwrap_or(path);
     if ns.is_empty()||path.is_empty()||path.contains("..")||path.starts_with('/'){return None;}
     Some(format!("model:{ns}:{path}"))
+}
+/// Vanilla's common block parent templates are not bundled in most
+/// resource packs. Resolve only known minecraft: parent IDs to trusted,
+/// bounded model elements, preserving all child texture aliases. Never
+/// synthesize geometry for an absent third-party namespace/parent.
+fn vanilla_parent_elements(id:&str)->Option<&'static Vec<Value>>{
+    static TEMPLATES:OnceLock<BTreeMap<&'static str,Vec<Value>>>=OnceLock::new();
+    let templates=TEMPLATES.get_or_init(||{
+        const DIRS:[&str;6]=["down","up","north","south","west","east"];
+        let mut out=BTreeMap::new();
+        for (name,aliases) in [
+            ("cube_all",["all","all","all","all","all","all"]),
+            ("cube",["down","up","north","south","west","east"]),
+            ("cube_column",["end","end","side","side","side","side"]),
+            ("cube_column_horizontal",["side","side","end","end","side","side"]),
+            ("cube_bottom_top",["bottom","top","side","side","side","side"]),
+            ("orientable",["bottom","top","front","side","side","side"]),
+            ("orientable_with_bottom",["bottom","top","front","side","side","side"]),
+        ]{
+            let mut faces=serde_json::Map::new();
+            for (dir,alias) in DIRS.into_iter().zip(aliases){
+                faces.insert(dir.to_string(),serde_json::json!({
+                    "texture":format!("#{alias}"),"cullface":dir
+                }));
+            }
+            out.insert(name,vec![serde_json::json!({
+                "from":[0,0,0],"to":[16,16,16],"faces":faces
+            })]);
+        }
+        // Crossed plants are two physically flat, double-sided planes.
+        // Unlike a fallback cube they admit transparent holes and accurate
+        // silhouette/picking under a JSON model with no copied parent.
+        let cross=||[45,-45].into_iter().map(|angle|{
+            serde_json::json!({
+                "from":[0,0,8],"to":[16,16,8],
+                "rotation":{"origin":[8,8,8],"axis":"y","angle":angle},
+                "shade":false,
+                "faces":{"north":{"texture":"#cross"},
+                         "south":{"texture":"#cross"}}
+            })
+        }).collect::<Vec<_>>();
+        out.insert("cross",cross());
+        out.insert("tinted_cross",cross());
+        out
+    });
+    let id=id.strip_prefix("model:minecraft:")?;
+    templates.get(id)
 }
 fn normalize_texture(value:&str,default_ns:&str)->Option<String>{
     let (ns,path)=value.split_once(':').unwrap_or((default_ns,value));
@@ -194,7 +242,14 @@ fn implicit_face_uv(element:&Value,face:Face)->Option<[f32;4]>{
     };
     let [x0,y0,z0]=parse("from")?;
     let [x1,y1,z1]=parse("to")?;
-    if x0>=x1||y0>=y1||z0>=z1{return None;}
+    if x0>x1||y0>y1||z0>z1{return None;}
+    let flat=[x0==x1,y0==y1,z0==z1];
+    if flat.iter().filter(|&&v|v).count()>1{return None;}
+    if flat[0]&&!matches!(face,Face::NegX|Face::PosX)
+        ||flat[1]&&!matches!(face,Face::Bottom|Face::Top)
+        ||flat[2]&&!matches!(face,Face::NegZ|Face::PosZ){
+        return None;
+    }
     Some(match face{
         Face::Bottom=>[x0,16.0-z1,x1,16.0-z0],
         Face::Top=>[x0,z0,x1,z1],
@@ -355,7 +410,9 @@ impl ModelBank {
         let mut seen=BTreeSet::new();
         while let Some(id)=current{
             if seen.len()>=16||!seen.insert(id.clone()){return None;}
-            let model=self.files.get(&id)?;
+            let Some(model)=self.files.get(&id)else{
+                return vanilla_parent_elements(&id);
+            };
             if let Some(elements)=model.get("elements"){
                 return elements.as_array();
             }
@@ -743,6 +800,55 @@ mod tests{
         let selected=bank.element_face(&state,Face::PosX,0).unwrap();
         assert_eq!(selected.uv,[1.0,2.0,8.0,14.0]);
         assert_eq!(selected.texture,"test:red");
+    }
+    #[test]fn absent_vanilla_cube_parent_recovers_geometry_and_face_culling(){
+        let mut bank=ModelBank::default();
+        bank.insert("assets/test/blockstates/bricks.json",
+            br#"{"variants":{"":{"model":"test:block/bricks"}}}"#).unwrap();
+        bank.insert("assets/test/models/block/bricks.json",
+            br##"{"parent":"minecraft:block/cube_all",
+                "textures":{"all":"test:block/terracotta"}}"##).unwrap();
+        let st=s("test:bricks",&[]);
+        assert_eq!(bank.parts(&st).unwrap().len(),1);
+        assert_eq!(bank.parts(&st).unwrap()[0].bounds,Box3::FULL);
+        for face in [Face::Top,Face::Bottom,Face::NegX,
+            Face::PosX,Face::NegZ,Face::PosZ]{
+            assert_eq!(bank.face_defined(&st,face,0),Some(true));
+            assert_eq!(bank.face_cull_direction(&st,face,0),Some(Some(face)));
+            assert_eq!(bank.element_face(&st,face,0).unwrap().texture,
+                "test:terracotta");
+        }
+        assert!(vanilla_parent_elements("model:test:cube_all").is_none());
+    }
+    #[test]fn vanilla_cube_column_parent_preserves_end_side_texture_aliases(){
+        let mut bank=ModelBank::default();
+        bank.insert("assets/test/blockstates/log.json",
+            br#"{"variants":{"":{"model":"test:block/log"}}}"#).unwrap();
+        bank.insert("assets/test/models/block/log.json",
+            br##"{"parent":"minecraft:block/cube_column",
+                "textures":{"end":"test:block/cap","side":"test:block/bark"}}"##).unwrap();
+        let st=s("test:log",&[]);
+        assert_eq!(bank.element_face(&st,Face::Top,0).unwrap().texture,"test:cap");
+        assert_eq!(bank.element_face(&st,Face::NegZ,0).unwrap().texture,"test:bark");
+    }
+    #[test]fn vanilla_cross_parent_keeps_two_zero_thickness_quads(){
+        let mut bank=ModelBank::default();
+        bank.insert("assets/test/blockstates/flower.json",
+            br#"{"variants":{"":{"model":"test:block/flower"}}}"#).unwrap();
+        bank.insert("assets/test/models/block/flower.json",
+            br##"{"parent":"minecraft:block/cross",
+                "textures":{"cross":"test:block/flower_png"}}"##).unwrap();
+        let st=s("test:flower",&[]);
+        let parts=bank.parts(&st).unwrap();
+        assert_eq!(parts.len(),2);
+        assert_eq!(parts[0].bounds.min[2],parts[0].bounds.max[2]);
+        assert!(parts.iter().all(|p|p.rotation.is_some()));
+        assert_eq!(bank.face_defined(&st,Face::Top,0),Some(false));
+        assert_eq!(bank.face_defined(&st,Face::NegZ,0),Some(true));
+        assert_eq!(bank.element_face(&st,Face::NegZ,0).unwrap().uv,
+            [0.0,0.0,16.0,16.0]);
+        assert_eq!(bank.element_face(&st,Face::NegZ,1).unwrap().texture,
+            "test:flower_png");
     }
     #[test]fn vanilla_implicit_uv_preserves_partial_element_face_dimensions(){
         let slab:Value=serde_json::from_str(
