@@ -234,6 +234,39 @@ cache, negative-coordinate source seams, exact Arc cache identity and mixed
 transparent/opaque material page routing. These tests must still be compiled
 and exercised against real Java worlds and graphics drivers.
 
+## Persistent boundary indexes and camera-invariant transparency
+
+Cross-chunk face culling no longer rebuilds one world-wide coordinate hash
+from every source voxel on every progressive stream update. Instead, a
+worker-owned `SeamIndexCache` keeps only boundary voxel **offsets** for each
+immutable near-view and original far-chunk `Arc`. New/replaced sources build
+new indexes; unchanged source pointers reuse their original allocation;
+departed far sources are pruned. Sampled-only and empty far tiles share one
+empty index. A small per-snapshot chunk-to-source directory locates
+neighboring original states without copying palette/NBT data. Only verified
+cross-chunk horizontal neighbors can suppress a source face, retaining
+correctness at unknown or unloaded boundaries.
+
+Original face-mask corrections are now copy-on-first-change: unchanged
+source runs never allocate temporary masks or duplicate their voxel array.
+Only a chunk with a real seam difference creates a local corrected copy;
+every other original source buffer remains shared.
+
+Global blended material order remains exact, but the pipeline extracts
+each transparent six-vertex quad and its original four-corner centroid once
+when the mesh generation changes. Camera rotation sorts a cached compact
+quad-index array instead of rescanning every opaque source chunk. Pure
+camera translation changes each transparent depth by the same constant,
+so the previous draw ordering and GPU transparent buffer remain valid:
+only the camera uniform and offscreen image are refreshed. There is no
+heuristic sorting cap or guessed Mod-specific rendering behavior.
+
+The new regression cases check source-index reuse and replacement, cache
+pruning, consistent near/far origin handling, transparent quad sort order,
+and translation-versus-rotation semantics. Tests have not been executed
+with Cargo or a real wgpu adapter; these are source-level changes, not
+claims of compiled or visually verified results.
+
 ## Camera-facing full-ring streaming
 
 The native spectator still schedules **every** actual Java chunk inside the

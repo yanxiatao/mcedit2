@@ -7,8 +7,8 @@ use mcedit2_world::{
     editing::Session,
     far_view::{self, FarChunkPatch, FarChunkRequest},
     surface::{
-        exact_face_exposed_against, SurfaceView, VoxelMaterial, FACE_BOTTOM,
-        FACE_NEG_X, FACE_NEG_Z, FACE_POS_X, FACE_POS_Z, FACE_TOP,
+        exact_face_exposed_against, SurfaceView, VoxelMaterial,
+        FACE_NEG_X, FACE_NEG_Z, FACE_POS_X, FACE_POS_Z,
     },
     WorldError,
 };
@@ -228,49 +228,128 @@ fn not_cancelled(flag: &AtomicBool) -> bool {
 ///
 /// Compute masks before mutating voxel flags so borrowed source states can
 /// be reused without cloning potentially tens of thousands of palettes.
-/// Shared exact-world seam occupancy for independently loaded source slices.
-/// It carries only references to original palette states, not cloned voxels.
+/// A source-local seam index. Only boundary voxel offsets are stored;
+/// the actual palette and state live in their immutable source Arc.
+#[derive(Default)]
+struct SeamIndex {
+    cells: HashMap<(i32, i32, i32), usize>,
+    chunks: HashSet<(i32, i32)>,
+}
+impl SeamIndex {
+    fn build(voxels: &[SurfaceVoxel]) -> Self {
+        let mut result = Self::default();
+        for (index, voxel) in voxels.iter().enumerate() {
+            if voxel.span != 1 || !(
+                matches!(voxel.x.rem_euclid(16), 0 | 15)
+                    || matches!(voxel.z.rem_euclid(16), 0 | 15)
+            ) { continue; }
+            result.cells.insert((voxel.x, voxel.y, voxel.z), index);
+            result.chunks.insert((voxel.x.div_euclid(16), voxel.z.div_euclid(16)));
+        }
+        result
+    }
+}
+/// Reuse boundary indexes across successive streamed snapshots. The index
+/// stores integer offsets only, never borrowed references into expired data.
+#[derive(Default)]
+pub(crate) struct SeamIndexCache {
+    near: Option<(Arc<SurfaceView>, Arc<SeamIndex>)>,
+    patches: HashMap<usize, (Arc<FarChunkPatch>, Arc<SeamIndex>)>,
+    /// Empty or sampled-only far patches share this index; no per-patch
+    /// allocation of an empty hash table is needed at extreme view radii.
+    empty: Arc<SeamIndex>,
+}
+impl SeamIndexCache {
+    fn indexed(&mut self, near: &Arc<SurfaceView>,
+        patches: &[Arc<FarChunkPatch>]) -> Vec<Arc<SeamIndex>>
+    {
+        let near_index = match &self.near {
+            Some((previous, index)) if Arc::ptr_eq(previous, near) => Arc::clone(index),
+            _ => {
+                let index = Arc::new(SeamIndex::build(&near.voxels));
+                self.near = Some((Arc::clone(near), Arc::clone(&index)));
+                index
+            }
+        };
+        let mut indexes = Vec::with_capacity(patches.len() + 1);
+        indexes.push(near_index);
+        let mut current = HashSet::with_capacity(patches.len());
+        for patch in patches {
+            let key = Arc::as_ptr(patch) as usize;
+            current.insert(key);
+            let index = match self.patches.get(&key) {
+                Some((old, index)) if Arc::ptr_eq(old, patch) => Arc::clone(index),
+                _ => {
+                    let candidate = SeamIndex::build(&patch.voxels);
+                    let index = if candidate.cells.is_empty() {
+                        Arc::clone(&self.empty)
+                    } else {
+                        Arc::new(candidate)
+                    };
+                    self.patches.insert(key, (Arc::clone(patch), Arc::clone(&index)));
+                    index
+                }
+            };
+            indexes.push(index);
+        }
+        self.patches.retain(|key, _| current.contains(key));
+        indexes
+    }
+}
+/// Read-only original chunk-boundary lookup. Horizontal edge candidates are
+/// resolved using immutable per-source indexes; unchanged sources never
+/// have to rehash all their visible voxels on every streamed publication.
 pub(crate) struct ExactNeighbors<'a> {
-    occupied: HashMap<(i32, i32, i32), (&'a mcedit2_world::sections::State, VoxelMaterial)>,
+    sources: Vec<&'a [SurfaceVoxel]>,
+    indexed: Vec<Arc<SeamIndex>>,
+    by_chunk: HashMap<(i32, i32), Vec<usize>>,
 }
 impl<'a> ExactNeighbors<'a> {
-    pub(crate) fn new(sources: &[&'a [SurfaceVoxel]]) -> Self {
-        let occupied = sources.iter().flat_map(|source| (*source).iter())
-            // Only original horizontal chunk seams require cross-source
-            // reconciliation; within each chunk original face masks have
-            // already been verified by the Java world reader.
-            .filter(|v| v.span == 1 && (
-                matches!(v.x.rem_euclid(16), 0 | 15)
-                    || matches!(v.z.rem_euclid(16), 0 | 15)
-            ))
-            .map(|v| ((v.x, v.y, v.z), (&v.state, v.kind)))
-            .collect();
-        Self { occupied }
-    }
-    /// Return only faces supported by the actual original neighbor state.
-    /// A missing source patch, uncertain Mod model, or sampled distant tile
-    /// cannot invent an occluding block at a chunk boundary.
-    pub(crate) fn faces(&self, voxel: &SurfaceVoxel) -> u8 {
-        if voxel.span != 1
-            || (!matches!(voxel.x.rem_euclid(16), 0 | 15)
-                && !matches!(voxel.z.rem_euclid(16), 0 | 15))
-        {
-            return voxel.faces;
+    fn from_indexed(sources: Vec<&'a [SurfaceVoxel]>,
+        indexed: Vec<Arc<SeamIndex>>) -> Self
+    {
+        let mut by_chunk: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
+        for (index, source) in indexed.iter().enumerate() {
+            for chunk in &source.chunks {
+                by_chunk.entry(*chunk).or_default().push(index);
+            }
         }
+        Self { sources, indexed, by_chunk }
+    }
+    #[cfg(test)]
+    pub(crate) fn new(sources: &[&'a [SurfaceVoxel]]) -> Self {
+        let indexed = sources.iter()
+            .map(|source| Arc::new(SeamIndex::build(source))).collect();
+        Self::from_indexed(sources.to_vec(), indexed)
+    }
+    pub(crate) fn faces(&self, voxel: &SurfaceVoxel) -> u8 {
+        if voxel.span != 1 { return voxel.faces; }
         let mut faces = voxel.faces;
-        for (dx, dy, dz, face) in [
-            (0, 1, 0, FACE_TOP), (0, -1, 0, FACE_BOTTOM),
-            (1, 0, 0, FACE_POS_X), (-1, 0, 0, FACE_NEG_X),
-            (0, 0, 1, FACE_POS_Z), (0, 0, -1, FACE_NEG_Z),
+        let source_chunk = (voxel.x.div_euclid(16), voxel.z.div_euclid(16));
+        for (dx, dz, face) in [
+            (1, 0, FACE_POS_X), (-1, 0, FACE_NEG_X),
+            (0, 1, FACE_POS_Z), (0, -1, FACE_NEG_Z),
         ] {
             if faces & face == 0 { continue; }
-            let (Some(x), Some(y), Some(z)) = (
-                voxel.x.checked_add(dx), voxel.y.checked_add(dy),
-                voxel.z.checked_add(dz),
-            ) else { continue };
-            if let Some(&(state, kind)) = self.occupied.get(&(x, y, z)) {
-                if !exact_face_exposed_against(&voxel.state, voxel.kind, Some((state, kind))) {
-                    faces &= !face;
+            let (Some(x), Some(z)) =
+                (voxel.x.checked_add(dx), voxel.z.checked_add(dz))
+            else { continue };
+            let other_chunk = (x.div_euclid(16), z.div_euclid(16));
+            if other_chunk == source_chunk { continue; }
+            if let Some(candidates) = self.by_chunk.get(&other_chunk) {
+                for &index in candidates {
+                    if let Some(&position) =
+                        self.indexed[index].cells.get(&(x, voxel.y, z))
+                    {
+                        let neighbor = &self.sources[index][position];
+                        if !exact_face_exposed_against(
+                            &voxel.state, voxel.kind,
+                            Some((&neighbor.state, neighbor.kind)))
+                        {
+                            faces &= !face;
+                        }
+                        break;
+                    }
                 }
             }
         }
@@ -287,11 +366,6 @@ fn reconcile_exact_seams(view: &mut SurfaceView) {
         voxel.faces = faces;
     }
 }
-/// Immutable incremental scene publication: the near view is shared and
-/// unchanged distant chunks are Arc-referenced, not copied on the UI thread.
-/// A mesh worker materializes an exact face-seam snapshot only when it needs
-/// to rebuild geometry, leaving the previous complete GPU frame visible.
-#[derive(Clone)]
 /// Source and immediate-neighbor identities needed to reuse a distant
 /// LOD mesh. Comparing the actual Arcs avoids hash collisions and does not
 /// copy any terrain. A patch's cliffs depend on neighboring LOD samples and
@@ -315,9 +389,12 @@ impl LodContext {
             }
     }
 }
+/// Immutable source patch view; ready is committed only after mesh completion.
+#[derive(Clone)]
 pub(crate) struct SceneSnapshot {
     near: Arc<SurfaceView>,
     patches: Vec<Arc<FarChunkPatch>>,
+    seam_cache: Arc<Mutex<SeamIndexCache>>,
     /// The complete immutable chunk mesh generation is committed by the
     /// worker only after every source part finishes successfully.
     pub(crate) ready: Arc<Mutex<Option<Arc<crate::spectator::StreamMesh>>>>,
@@ -333,6 +410,12 @@ impl SceneSnapshot {
         [self.near.x, self.near.y_min, self.near.z]
     }
     pub(crate) fn y_max(&self) -> i32 { self.near.y_max }
+    pub(crate) fn exact_neighbors(&self) -> ExactNeighbors<'_> {
+        let indexed = self.seam_cache.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .indexed(&self.near, &self.patches);
+        ExactNeighbors::from_indexed(self.sources().collect(), indexed)
+    }
     /// Build an O(N) world-coordinate lookup once per scene publication.
     /// Calling a linear scan per patch would scale quadratically for a
     /// 128-chunk-radius world (tens of thousands of loaded patches).
@@ -399,6 +482,7 @@ pub(crate) struct Stream {
     wanted: Vec<FarChunkRequest>,
     pending: VecDeque<FarChunkRequest>,
     cache: BTreeMap<Key, Arc<FarChunkPatch>>,
+    seam_cache: Arc<Mutex<SeamIndexCache>>,
     cached_voxels: usize,
     pub dirty: bool,
 }
@@ -444,6 +528,7 @@ impl Stream {
             wanted: Vec::new(),
             pending: VecDeque::new(),
             cache: BTreeMap::new(),
+            seam_cache: Arc::new(Mutex::new(SeamIndexCache::default())),
             cached_voxels: 0,
             dirty: true,
         };
@@ -681,6 +766,7 @@ impl Stream {
             }
         }
         SceneSnapshot { near, patches,
+            seam_cache: Arc::clone(&self.seam_cache),
             ready: Arc::new(Mutex::new(None)),
         }
     }
@@ -703,6 +789,48 @@ impl Drop for Stream {
 mod tests {
     use super::*;
     use mcedit2_world::surface::SurfaceVoxel;
+    #[test]
+    fn seam_indexes_are_reused_for_unchanged_sources_and_retired_on_replacement() {
+        use mcedit2_world::surface::SourceChunkTile;
+        let near = Arc::new(SurfaceView {
+            x: 0, z: 0, y_min: 64, y_max: 95, width: 16, depth: 16,
+            voxels: Vec::new(), source_tiles: Vec::new(),
+            source_chunks: 0, missing_columns: 0,
+        });
+        let patch = || Arc::new(FarChunkPatch {
+            tile: SourceChunkTile {
+                chunk_x: 1, chunk_z: 0, source_present: true,
+                known_columns: 256, unknown_columns: 0, exposed_voxels: 1,
+            },
+            voxels: vec![SurfaceVoxel {
+                x: 16, y: 70, z: 0, span: 1,
+                state: mcedit2_world::sections::State {
+                    name: "minecraft:stone".into(), properties: Vec::new(),
+                },
+                biome: None, kind: VoxelMaterial::Solid, staged: false,
+                original_block_entity: false,
+                faces: mcedit2_world::surface::FACE_TOP,
+            }],
+        });
+        let original = patch();
+        let mut cache = SeamIndexCache::default();
+        let first = cache.indexed(&near, &[Arc::clone(&original)]);
+        let same = cache.indexed(&near, &[Arc::clone(&original)]);
+        assert!(Arc::ptr_eq(&first[0], &same[0]));
+        assert!(Arc::ptr_eq(&first[1], &same[1]));
+        assert_eq!(cache.patches.len(), 1);
+        let replacement = patch();
+        let changed = cache.indexed(&near, &[replacement]);
+        assert!(Arc::ptr_eq(&first[0], &changed[0]));
+        assert!(!Arc::ptr_eq(&first[1], &changed[1]));
+        assert_eq!(cache.patches.len(), 1);
+        let no_far = cache.indexed(&near, &[]);
+        assert!(Arc::ptr_eq(&first[0], &no_far[0]));
+        assert!(cache.patches.is_empty());
+        let moved = Arc::new((*near).clone());
+        let new_near = cache.indexed(&moved, &[]);
+        assert!(!Arc::ptr_eq(&no_far[0], &new_near[0]));
+    }
     #[test]
     fn direct_chunk_meshing_culls_original_seams_and_reuses_unchanged_parts() {
         use mcedit2_world::{
@@ -729,6 +857,7 @@ mod tests {
         });
         let snapshot = SceneSnapshot {
             near: Arc::clone(&near), patches: vec![Arc::clone(&patch)],
+            seam_cache: Arc::new(Mutex::new(SeamIndexCache::default())),
             ready: Arc::new(Mutex::new(None)),
         };
         let sources = snapshot.sources().collect::<Vec<_>>();
@@ -762,6 +891,7 @@ mod tests {
         let without_neighbor = SceneSnapshot {
             near: Arc::clone(&near),
             patches: Vec::new(),
+            seam_cache: Arc::new(Mutex::new(SeamIndexCache::default())),
             ready: Arc::new(Mutex::new(None)),
         };
         let after = crate::spectator::build_stream_cancellable(
@@ -797,6 +927,7 @@ mod tests {
         let adjacent = patch(5);
         let snapshot = |patches: Vec<Arc<FarChunkPatch>>| SceneSnapshot {
             near: Arc::clone(&near), patches,
+            seam_cache: Arc::new(Mutex::new(SeamIndexCache::default())),
             ready: Arc::new(Mutex::new(None)),
         };
         let scene = crate::spectator::SpectatorScene {
@@ -832,6 +963,7 @@ mod tests {
         moved.y_max += 1;
         let fourth_scene = SceneSnapshot {
             near: Arc::new(moved), patches: vec![Arc::clone(&target)],
+            seam_cache: Arc::new(Mutex::new(SeamIndexCache::default())),
             ready: Arc::new(Mutex::new(None)),
         };
         let fourth = crate::spectator::build_stream_cancellable(
@@ -856,6 +988,7 @@ mod tests {
         let snapshot = SceneSnapshot {
             near: Arc::clone(&near),
             patches: vec![Arc::clone(&patch)],
+            seam_cache: Arc::new(Mutex::new(SeamIndexCache::default())),
             ready: Arc::new(Mutex::new(None)),
         };
         let cloned = snapshot.clone();

@@ -253,7 +253,9 @@ pub(crate) fn build_stream_cancellable(
     cancelled: &impl Fn() -> bool,
 ) -> Option<StreamMesh> {
     let sources = snapshot.sources().collect::<Vec<_>>();
-    let neighbors = crate::spectator_stream::ExactNeighbors::new(&sources);
+    // Per-source seam indexes are cached across streamed generations;
+    // only newly arrived or replaced source patches need indexing.
+    let neighbors = snapshot.exact_neighbors();
     let contexts = snapshot.lod_contexts();
     let chunks = build_sources(view, &sources, snapshot.origin(),
         snapshot.y_max(), Some(&neighbors), Some(&contexts), cancelled)?;
@@ -332,16 +334,21 @@ fn build_sources(
         // Keep original source arrays immutable; only rewrite a chunk's
         // affected face flags if exact neighboring chunks prove occlusion.
         let corrected = neighbors.and_then(|index| {
-            // Resolve each original face mask once. The previous any()+map()
-            // walked up to six spatial neighbors twice for changed chunks.
-            let masks = original.iter().map(|voxel| index.faces(voxel))
-                .collect::<Vec<_>>();
-            masks.iter().zip(original).any(|(mask, voxel)| *mask != voxel.faces)
-                .then(|| original.iter().zip(masks).map(|(voxel, faces)| {
-                    let mut corrected = voxel.clone();
-                    corrected.faces = faces;
-                    corrected
-                }).collect::<Vec<_>>())
+            // Most source runs have unchanged original face masks. Avoid
+            // allocating a masks Vec for every loaded chunk: copy the run
+            // only after the first actual seam correction is found.
+            let mut corrected: Option<Vec<SurfaceVoxel>> = None;
+            for (offset, voxel) in original.iter().enumerate() {
+                let faces = index.faces(voxel);
+                if let Some(patched) = corrected.as_mut() {
+                    patched[offset].faces = faces;
+                } else if faces != voxel.faces {
+                    let mut patched = original.to_vec();
+                    patched[offset].faces = faces;
+                    corrected = Some(patched);
+                }
+            }
+            corrected
         });
         let run = corrected.as_deref().unwrap_or(original);
         let chunk = source_chunk_group(&run[0]);

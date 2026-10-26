@@ -306,6 +306,8 @@ pub(crate) struct Pipeline {
     /// Immutable for a given source-mesh Arc; a camera move should not scan
     /// every opaque face just to rediscover whether sorting is necessary.
     has_transparent_world_faces: bool,
+    transparent_faces: Vec<TransparentQuad>,
+    transparent_order: Vec<usize>,
     atlas: Option<Arc<TextureAtlas>>,
     atlas_texture: wgpu::Texture,
     /// Independent page textures and bind groups. No texture-array layers are
@@ -356,6 +358,50 @@ struct GpuStreamChunk {
     /// Blended faces have a globally sorted dynamic pass.
     buffers: Vec<(wgpu::Buffer, u32)>,
     spans: Vec<Vec<DrawSpan>>,
+}
+#[derive(Clone)]
+struct TransparentQuad {
+    vertices: [Vertex; 6],
+    center: [f32; 3],
+}
+fn collect_transparent_quads<'a>(
+    meshes: impl IntoIterator<Item = &'a [Vertex]>,
+) -> Vec<TransparentQuad> {
+    meshes.into_iter().flat_map(|mesh| mesh.chunks_exact(6))
+        .filter(|quad| quad.iter().all(|vertex|
+            (vertex.mode & 3) == 2 && vertex.world_mode == 1))
+        .map(|quad| {
+            let vertices = std::array::from_fn(|index| quad[index]);
+            let center = std::array::from_fn(|axis| {
+                (quad[0].xyz[axis] + quad[1].xyz[axis]
+                    + quad[2].xyz[axis] + quad[5].xyz[axis]) * 0.25
+            });
+            TransparentQuad { vertices, center }
+        }).collect()
+}
+fn sorted_transparent_quads(
+    faces: &[TransparentQuad],
+    order: &mut Vec<usize>,
+    camera: Option<&crate::spectator::CameraUniform>,
+) -> Vec<Vertex> {
+    if order.len() != faces.len() {
+        *order = (0..faces.len()).collect();
+    }
+    if let Some(camera) = camera {
+        let depths = faces.iter().map(|face| (0..3)
+            .map(|axis| (face.center[axis] - camera.position[axis])
+                * camera.forward[axis])
+            .sum::<f32>()).collect::<Vec<_>>();
+        order.sort_unstable_by(|a, b| depths[*b].total_cmp(&depths[*a])
+            .then_with(|| a.cmp(b)));
+    } else {
+        order.sort_unstable();
+    }
+    let mut result = Vec::with_capacity(faces.len().saturating_mul(6));
+    for &index in order.iter() {
+        result.extend_from_slice(&faces[index].vertices);
+    }
+    result
 }
 fn opaque_chunk_faces(vertices: &[Vertex]) -> Cow<'_, [Vertex]> {
     // Fast path: no duplicated allocation for non-blended original chunks.
@@ -855,6 +901,8 @@ impl shader::Pipeline for Pipeline {
             last_source_mesh: None,
             last_source_stream: None,
             has_transparent_world_faces: false,
+            transparent_faces: Vec::new(),
+            transparent_order: Vec::new(),
             atlas: None,
             atlas_texture,
             atlas_pages: Vec::new(),
@@ -903,8 +951,15 @@ impl shader::Primitive for Primitive {
                 self.vertices.iter().any(|v| (v.mode & 3) == 2 && v.world_mode == 1)
             };
         }
+        // Translating the camera adds the SAME constant depth offset to
+        // every world-space translucent quad. Relative depth order changes
+        // only when the look vector changes or mesh content is replaced.
+        let changed_direction = match (&pipeline.last_camera, &self.camera) {
+            (Some(previous), Some(current)) => previous.forward != current.forward,
+            _ => changed_camera,
+        };
         let resort = self.camera.is_some() && pipeline.has_transparent_world_faces
-            && (changed_camera || mesh_identity_changed);
+            && (changed_direction || mesh_identity_changed);
         let mut changed_mesh = false;
         if let Some(origin) = self.source_origin {
             if let Some(stream) = &self.stream_mesh {
@@ -986,23 +1041,18 @@ impl shader::Primitive for Primitive {
             // faces in the dynamic vertex buffer, never reupload opaque chunks
             // when the camera rotates.
             if mesh_identity_changed || resort {
-                let translucent_only = if let Some(stream) = &self.stream_mesh {
-                    stream.chunks.iter()
-                        .flat_map(|part| part.vertices.chunks_exact(6))
-                        .filter(|quad| quad.iter()
-                            .all(|v| (v.mode & 3) == 2 && v.world_mode == 1))
-                        .flat_map(|quad| quad.iter().copied()).collect::<Vec<_>>()
-                } else {
-                    self.vertices.chunks_exact(6)
-                        .filter(|quad| quad.iter()
-                            .all(|v| (v.mode & 3) == 2 && v.world_mode == 1))
-                        .flat_map(|quad| quad.iter().copied()).collect::<Vec<_>>()
-                };
-                let transparent = if let Some(camera) = &self.camera {
-                    ordered_transparent_vertices(&translucent_only, camera)
-                } else {
-                    translucent_only
-                };
+                if mesh_identity_changed {
+                    pipeline.transparent_faces = if let Some(stream) = &self.stream_mesh {
+                        collect_transparent_quads(stream.chunks.iter()
+                            .map(|part| part.vertices.as_slice()))
+                    } else {
+                        collect_transparent_quads(std::iter::once(self.vertices.as_slice()))
+                    };
+                    pipeline.transparent_order.clear();
+                }
+                let transparent = sorted_transparent_quads(
+                    &pipeline.transparent_faces, &mut pipeline.transparent_order,
+                    self.camera.as_ref());
                 let needed = transparent.len() as u64
                     * std::mem::size_of::<Vertex>() as u64;
                 let max_buffer = device.limits().max_buffer_size;
@@ -1468,6 +1518,45 @@ mod tests {
             world_mode,
             atlas_page: id as u32,
         })
+    }
+    #[test]
+    fn camera_translation_preserves_depth_order_but_rotation_changes_it() {
+        let forward = test_camera([0.0, 0.0, 1.0]);
+        let mut moved = forward;
+        moved.position = [128.0, 42.0, -7.0, 0.0];
+        assert_eq!(forward.forward, moved.forward);
+        assert_ne!(forward, moved);
+        let rotated = test_camera([1.0, 0.0, 0.0]);
+        assert_ne!(forward.forward, rotated.forward);
+        let near = test_quad(1.0, 2.0, 2, 1);
+        let far = test_quad(2.0, 8.0, 2, 1);
+        let faces = collect_transparent_quads([near.as_slice(), far.as_slice()]);
+        let mut order = Vec::new();
+        let initial = sorted_transparent_quads(&faces, &mut order, Some(&forward));
+        let translated = sorted_transparent_quads(&faces, &mut order, Some(&moved));
+        assert_eq!(translated, initial);
+    }
+    #[test]
+    fn extracted_translucent_faces_match_original_global_quad_sort() {
+        let mut first = Vec::new();
+        first.extend(test_quad(1.0, 1.0, 0, 1));
+        first.extend(test_quad(2.0, 10.0, 2, 1));
+        let mut second = Vec::new();
+        second.extend(test_quad(3.0, 3.0, 2, 1));
+        second.extend(test_quad(4.0, 0.0, 1, 1));
+        let cached = collect_transparent_quads([first.as_slice(), second.as_slice()]);
+        assert_eq!(cached.len(), 2);
+        let mut order = Vec::new();
+        let camera = test_camera([0.0, 0.0, 1.0]);
+        let sorted = sorted_transparent_quads(&cached, &mut order, Some(&camera));
+        assert_eq!(sorted.len(), 12);
+        assert_eq!(sorted[0].atlas_page, 2);
+        assert_eq!(sorted[6].atlas_page, 3);
+        let reversed = test_camera([0.0, 0.0, -1.0]);
+        let resorted = sorted_transparent_quads(&cached, &mut order, Some(&reversed));
+        assert_eq!(resorted[0].atlas_page, 3);
+        assert_eq!(resorted[6].atlas_page, 2);
+        assert_eq!(sorted_transparent_quads(&cached, &mut order, Some(&reversed)), resorted);
     }
     #[test]
     fn transparent_quads_sort_as_whole_original_model_faces() {
