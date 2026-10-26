@@ -388,3 +388,30 @@ This fixes empty-frame mesh handoff artifacts; it does not claim full
 Minecraft client rendering fidelity from distant sampled LOD, nor does it
 invent PNG textures when none have been supplied. Full 3D visual validation
 against a real world, client resource JAR, and GPU remains a separate task.
+
+## Advanced tools: bilingual grouped interface and native file pickers
+
+The advanced editor is now organized into six selectable tool areas rather
+than showing every operation in one continuously stacked form: world/block
+inspection, GPU/texture/3D scene controls, block entity NBT/entities,
+2D/vertical maps, staged block editing, and file exchange/Region recovery.
+The active area is explicit and the navigation, buttons, descriptive
+instructions, file-path placeholders and safety notices support both
+Chinese and English with the existing language toggle. Source world and
+dimension selection remains visible at the top.
+
+All ten advanced import/export file-path families now have a native
+**Browse** action; the eight file families that export data also offer
+**Save as**. Covered paths include BE batches/journals/snapshots, entity
+snapshots, clipboard, MCEdit/Sponge schematics, Region plans, plugin
+manifests and edit journals. Existing-world and resource-pack pickers are
+also exposed in the advanced interface. Dialogs use `rfd` on separate
+threads, with conservative filename-extension filters. Cancelling a
+dialog never changes the current value, and manual path typing is still
+supported. File selection alone never triggers world modification;
+the original explicit preview/stage/save confirmations remain mandatory.
+
+Rust offline regressions exercise Chinese/English tab states and bounded
+file-picker extensions. UI navigation does not reset selection, staging,
+undo/redo, loaded worlds or source NBT. This changes UI and path entry, not
+the behavior or safety requirements of any editor operation.

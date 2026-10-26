@@ -364,6 +364,7 @@ struct App {
     path: String,
     language: Language,
     show_advanced: bool,
+    advanced_section: AdvancedSection,
     surface_area: String,
     surface_exposed: bool,
     surface_cut_top: Option<i32>,
@@ -471,6 +472,49 @@ struct App {
     verbosity: u8,
     readonly: bool,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum AdvancedSection {
+    #[default]
+    Overview,
+    Viewer,
+    BlockEntities,
+    Maps,
+    Editing,
+    Files,
+}
+impl AdvancedSection {
+    fn label(self, language: Language, active: AdvancedSection) -> String {
+        let (zh, en) = match self {
+            Self::Overview => ("存档与方块", "World & blocks"),
+            Self::Viewer => ("3D 观察与材质", "3D & textures"),
+            Self::BlockEntities => ("NBT 与实体", "NBT & entities"),
+            Self::Maps => ("二维与纵向切片", "2D & vertical maps"),
+            Self::Editing => ("方块编辑", "Block editing"),
+            Self::Files => ("导入导出与保存", "Files & recovery"),
+        };
+        let label = language.pick(zh, en);
+        if self == active { format!("● {label}") } else { label.to_owned() }
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdvancedFile {
+    BeBatch, BeJournal, EntitySnapshot, BeSnapshot, Clipboard,
+    Schematic, Sponge, RegionPlan, PluginManifest, Patch,
+}
+impl AdvancedFile {
+    fn filter(self) -> (&'static str, &'static [&'static str]) {
+        match self {
+            Self::BeBatch | Self::BeJournal | Self::RegionPlan | Self::PluginManifest =>
+                ("JSON", &["json"]),
+            Self::EntitySnapshot => ("Entity snapshot", &["mcedit2entities"]),
+            Self::BeSnapshot => ("Block entity snapshot", &["mcedit2be"]),
+            Self::Clipboard => ("MCEdit2 clipboard", &["mcedit2clip"]),
+            Self::Schematic => ("MCEdit schematic", &["schematic"]),
+            Self::Sponge => ("Sponge schematic", &["schem"]),
+            Self::Patch => ("MCEdit2 journal", &["mcedit2patch"]),
+        }
+    }
+}
 #[derive(Debug, Clone)]
 enum Message {
     Path(String),
@@ -483,6 +527,9 @@ enum Message {
     TextureChosen(Option<PathBuf>),
     ToggleLanguage,
     ToggleAdvanced,
+    AdvancedSection(AdvancedSection),
+    ChooseAdvancedFile(AdvancedFile, bool),
+    AdvancedFileChosen(AdvancedFile, Option<PathBuf>),
     Select(usize),
     Coordinates(String),
     Dimension(usize),
@@ -2096,6 +2143,27 @@ fn update_impl(app: &mut App, message: Message) -> iced::Task<Message> {
     match message {
         Message::Path(x) => app.path = x,
         Message::TexturePath(x) => app.texture_path = x,
+        Message::AdvancedSection(tab) => app.advanced_section = tab,
+        Message::ChooseAdvancedFile(kind, save) => {
+            return dialogs::advanced_file(kind, save, app.language);
+        }
+        Message::AdvancedFileChosen(kind, result) => {
+            if let Some(path) = result {
+                let value = path.to_string_lossy().into_owned();
+                match kind {
+                    AdvancedFile::BeBatch => app.be_batch_path = value,
+                    AdvancedFile::BeJournal => app.be_journal_path = value,
+                    AdvancedFile::EntitySnapshot => app.entity_snapshot_path = value,
+                    AdvancedFile::BeSnapshot => app.be_snapshot_path = value,
+                    AdvancedFile::Clipboard => app.clipboard_path = value,
+                    AdvancedFile::Schematic => app.schematic_path = value,
+                    AdvancedFile::Sponge => app.sponge_path = value,
+                    AdvancedFile::RegionPlan => app.region_batch_path = value,
+                    AdvancedFile::PluginManifest => app.plugin_manifest_path = value,
+                    AdvancedFile::Patch => app.patch_path = value,
+                }
+            }
+        },
         Message::ToggleTextures => app.show_textures = !app.show_textures,
         Message::MeshWake => {} // redraw to collect completed GPU mesh
         Message::ToggleGpu => {
@@ -3711,18 +3779,20 @@ fn view(app: &App) -> Element<'_, Message> {
     if !app.show_advanced {
         return workspace_view(app);
     }
+    let l = app.language;
     let controls = row![
-        text_input("Java world folder, level.dat, or level.dat_old", &app.path)
+        text_input(l.pick("世界目录或 level.dat 路径", "World folder or level.dat path"), &app.path)
             .on_input(Message::Path)
             .on_submit(Message::Open)
             .width(Length::Fill),
+        button(l.pick("打开世界目录…", "Choose world…")).on_press(Message::PickWorld),
         button(if app.open_busy {
-            "Indexing world…"
+            l.pick("正在索引…", "Indexing world…")
         } else {
-            "Inspect world"
+            l.pick("打开并分析", "Inspect world")
         })
         .on_press(Message::Open),
-        button("Close all (discard staged)").on_press(Message::Clear)
+        button(l.pick("关闭所有存档（放弃暂存）", "Close all (discard staged)")).on_press(Message::Clear)
     ]
     .spacing(10);
     let mut body=column![
@@ -3733,9 +3803,10 @@ fn view(app: &App) -> Element<'_, Message> {
             button(app.language.pick("English","简体中文"))
                 .on_press(Message::ToggleLanguage),
         ].spacing(12),
-        text("Original Java, Anvil, MCRegion, modern and snapshot world inspection"),
+        text(l.pick("Java 世界与区块格式：Anvil / MCRegion / 快照", "Java world formats: Anvil / MCRegion / snapshots")),
         controls,
-        text("Edits are staged IN MEMORY. Experimental, manually confirmed single-Region saves require immutable backups and unresolved transactions must be finalized or rolled back.")
+        text(l.pick("编辑默认仅暂存在内存。实验性写盘必须先备份，并完成事务确认或回滚。",
+                    "Edits stay in memory. Experimental disk saves require a backup and explicit recovery confirmation."))
     ].spacing(14);
     if app.debug || app.log || app.verbosity > 0 || app.readonly {
         body = body.push(text(format!(
@@ -3781,13 +3852,39 @@ fn view(app: &App) -> Element<'_, Message> {
             );
         }
         body = body.push(dimensions);
+        body = body.push(
+            container(column![
+                text(l.pick("高级工具 / 功能导航", "Advanced tools / Navigation")).size(21),
+                row![
+                    button(text(AdvancedSection::Overview.label(l, app.advanced_section)))
+                        .on_press(Message::AdvancedSection(AdvancedSection::Overview)),
+                    button(text(AdvancedSection::Viewer.label(l, app.advanced_section)))
+                        .on_press(Message::AdvancedSection(AdvancedSection::Viewer)),
+                    button(text(AdvancedSection::BlockEntities.label(l, app.advanced_section)))
+                        .on_press(Message::AdvancedSection(AdvancedSection::BlockEntities)),
+                ].spacing(8),
+                row![
+                    button(text(AdvancedSection::Maps.label(l, app.advanced_section)))
+                        .on_press(Message::AdvancedSection(AdvancedSection::Maps)),
+                    button(text(AdvancedSection::Editing.label(l, app.advanced_section)))
+                        .on_press(Message::AdvancedSection(AdvancedSection::Editing)),
+                    button(text(AdvancedSection::Files.label(l, app.advanced_section)))
+                        .on_press(Message::AdvancedSection(AdvancedSection::Files)),
+                ].spacing(8),
+            ].spacing(9))
+                .padding(12)
+                .width(Length::Fill)
+                .style(iced::widget::container::rounded_box),
+        );
+        if app.advanced_section == AdvancedSection::Overview {
+            body = body.push(text(l.pick("方块查询与原始 NBT", "Block lookup and source NBT")).size(22));
         let lookup = row![
-            text_input("X, Y, Z e.g. -32, -64, 16", &app.query_coordinates)
+            text_input(l.pick("X, Y, Z，例如 -32, -64, 16", "X, Y, Z e.g. -32, -64, 16"), &app.query_coordinates)
                 .on_input(Message::Coordinates)
                 .on_submit(Message::InspectBlock)
                 .width(Length::Fill),
-            button("Inspect exact block (read-only)").on_press(Message::InspectBlock),
-            button("Inspect original BE NBT (read-only)")
+            button(l.pick("查看方块（只读）", "Inspect exact block (read-only)")).on_press(Message::InspectBlock),
+            button(l.pick("查看原始方块实体 NBT（只读）", "Inspect original BE NBT (read-only)"))
                 .on_press(Message::InspectOriginalBlockEntity)
         ]
         .spacing(12);
@@ -3795,27 +3892,36 @@ fn view(app: &App) -> Element<'_, Message> {
         if !app.block_result.is_empty() {
             body = body.push(text(&app.block_result));
         }
+        }
+        if app.advanced_section == AdvancedSection::Viewer {
+            body = body.push(text(l.pick("材质与 GPU", "Texture resources & GPU")).size(22));
+            body = body.push(text(l.pick("原版贴图需加载客户端 JAR 或资源包；可叠加多个资源包。",
+                "Load a matching client JAR or resource pack for real textures; multiple overlays supported.")));
         body = body.push(
             row![
                 text_input(
-                    "Packs low -> high priority; separate .zip/.jar/folders with ;",
+                    l.pick("资源包低→高优先级，多个路径用 ; 隔开", "Packs low -> high priority; separate .zip/.jar/folders with ;"),
                     &app.texture_path
                 )
                 .on_input(Message::TexturePath)
                 .on_submit(Message::LoadTextures)
                 .width(Length::Fill),
-                button("Load textures").on_press(Message::LoadTextures),
-                button("Unload").on_press(Message::UnloadTextures),
+                button(l.pick("选 ZIP/JAR", "Select ZIP/JAR"))
+                    .on_press(Message::ChooseTextureFile),
+                button(l.pick("选资源目录", "Select folder"))
+                    .on_press(Message::ChooseTextureDirectory),
+                button(l.pick("加载材质", "Load textures")).on_press(Message::LoadTextures),
+                button(l.pick("卸载", "Unload")).on_press(Message::UnloadTextures),
                 button(if app.show_textures {
-                    "Palette only"
+                    l.pick("仅显示纯色", "Palette only")
                 } else {
-                    "Show textures"
+                    l.pick("显示贴图", "Show textures")
                 })
                 .on_press(Message::ToggleTextures),
                 button(if app.use_gpu {
-                    "Use Canvas fallback"
+                    l.pick("使用 Canvas 预览", "Use Canvas fallback")
                 } else {
-                    "Use wgpu renderer"
+                    l.pick("使用 wgpu 渲染器", "Use wgpu renderer")
                 })
                 .on_press(Message::ToggleGpu),
                 button(text(format!("GPU detail: {}", app.gpu_quality.label())))
@@ -3829,44 +3935,45 @@ fn view(app: &App) -> Element<'_, Message> {
         body = body.push(
             row![
                 text_input(
-                    "Read-only 3D XYZ window (max 64x64x48; edit limit stays 4096)",
+                    l.pick("只读 3D 范围 XYZ（最多 64×64×48）", "Read-only 3D XYZ window (max 64x64x48; edit limit stays 4096)"),
                     &app.surface_area
                 )
                 .on_input(Message::SurfaceArea)
                 .width(Length::Fill),
-                button("Top-surface 3D").on_press(Message::InspectSurface),
-                button("Exposed multi-layer 3D").on_press(Message::InspectVolume)
+                button(l.pick("3D 地表", "Top-surface 3D")).on_press(Message::InspectSurface),
+                button(l.pick("3D 多层可见面", "Exposed multi-layer 3D")).on_press(Message::InspectVolume)
             ]
             .spacing(8),
         );
         body = body.push(
             row![
-                button("16×16×32 inspect").on_press(Message::ScenePreset(16)),
-                button("32×32×48 inspect").on_press(Message::ScenePreset(32)),
-                button("64×64×48 inspect").on_press(Message::ScenePreset(64)),
-                text("Exact near-field preview; edit limit remains 4096.")
+                button(l.pick("检查 16×16×32", "16×16×32 inspect")).on_press(Message::ScenePreset(16)),
+                button(l.pick("检查 32×32×48", "32×32×48 inspect")).on_press(Message::ScenePreset(32)),
+                button(l.pick("检查 64×64×48", "64×64×48 inspect")).on_press(Message::ScenePreset(64)),
+                text(l.pick("精确近景预览，编辑操作上限为 4096。", "Exact near-field preview; edit limit remains 4096."))
             ]
             .spacing(8),
         );
+        body = body.push(text(l.pick("远景与区块流式加载", "Distant terrain and chunk streaming")).size(18));
         body = body.push(
             row![
-                text("Progressive distant terrain:"),
-                button("16 chunks").on_press(Message::StartFarView(16)),
-                button("32 chunks").on_press(Message::StartFarView(32)),
-                button("64 chunks").on_press(Message::StartFarView(64)),
-                button("128 chunks").on_press(Message::StartFarView(128)),
-                button("256 chunks").on_press(Message::StartFarView(256)),
-                button("512 chunks").on_press(Message::StartFarView(512)),
-                button("1024 chunks").on_press(Message::StartFarView(1024)),
+                text(l.pick("渐进式远景：", "Progressive distant terrain:")),
+                button(l.pick("16 区块", "16 chunks")).on_press(Message::StartFarView(16)),
+                button(l.pick("32 区块", "32 chunks")).on_press(Message::StartFarView(32)),
+                button(l.pick("64 区块", "64 chunks")).on_press(Message::StartFarView(64)),
+                button(l.pick("128 区块", "128 chunks")).on_press(Message::StartFarView(128)),
+                button(l.pick("256 区块", "256 chunks")).on_press(Message::StartFarView(256)),
+                button(l.pick("512 区块", "512 chunks")).on_press(Message::StartFarView(512)),
+                button(l.pick("1024 区块", "1024 chunks")).on_press(Message::StartFarView(1024)),
             ]
             .spacing(6),
         );
         body = body.push(
             row![
-                text("Very sparse panorama (source chunks only):"),
-                button("1536 chunks").on_press(Message::StartFarView(1536)),
-                button("2047 chunks").on_press(Message::StartFarView(2047)),
-                text("Maximum span 65,520 blocks across; only verified columns are shown."),
+                text(l.pick("稀疏全景（仅现有区块）：", "Very sparse panorama (source chunks only):")),
+                button(l.pick("1536 区块", "1536 chunks")).on_press(Message::StartFarView(1536)),
+                button(l.pick("2047 区块", "2047 chunks")).on_press(Message::StartFarView(2047)),
+                text(l.pick("最大跨度 65,520 格，仅显示已验证的区块列。", "Maximum span 65,520 blocks across; only verified columns are shown.")),
             ]
             .spacing(6),
         );
@@ -3895,7 +4002,7 @@ fn view(app: &App) -> Element<'_, Message> {
                 button("Z +16").on_press(Message::Shift3D(0, 0, 16)),
                 button("Y -16").on_press(Message::Shift3D(0, -16, 0)),
                 button("Y +16").on_press(Message::Shift3D(0, 16, 0)),
-                button("Center on XYZ").on_press(Message::Center3DOnPicked),
+                button(l.pick("按 XYZ 居中", "Center on XYZ")).on_press(Message::Center3DOnPicked),
             ]
             .spacing(5),
         );
@@ -3906,18 +4013,18 @@ fn view(app: &App) -> Element<'_, Message> {
                         button(text(format!("Rotate 90° ({})", app.surface_camera)))
                             .on_press(Message::RotateSurface),
                         button(if app.show_top_down {
-                            "Switch to 3D"
+                            l.pick("切换到 3D", "Switch to 3D")
                         } else {
-                            "Top-down 2D"
+                            l.pick("俯视 2D", "Top-down 2D")
                         })
                         .on_press(Message::ToggleTopDown),
-                        button("Zoom +").on_press(Message::ZoomSurface(1)),
-                        button("Zoom -").on_press(Message::ZoomSurface(-1)),
-                        button("Pan ←").on_press(Message::PanSurface(-40, 0)),
-                        button("Pan →").on_press(Message::PanSurface(40, 0)),
-                        button("Pan ↑").on_press(Message::PanSurface(0, -40)),
-                        button("Pan ↓").on_press(Message::PanSurface(0, 40)),
-                        button("Reset camera").on_press(Message::ResetSurfaceCamera),
+                        button(l.pick("放大", "Zoom +")).on_press(Message::ZoomSurface(1)),
+                        button(l.pick("缩小", "Zoom -")).on_press(Message::ZoomSurface(-1)),
+                        button(l.pick("左移", "Pan ←")).on_press(Message::PanSurface(-40, 0)),
+                        button(l.pick("右移", "Pan →")).on_press(Message::PanSurface(40, 0)),
+                        button(l.pick("上移", "Pan ↑")).on_press(Message::PanSurface(0, -40)),
+                        button(l.pick("下移", "Pan ↓")).on_press(Message::PanSurface(0, 40)),
+                        button(l.pick("重置相机", "Reset camera")).on_press(Message::ResetSurfaceCamera),
                     ]
                     .spacing(5),
                 );
@@ -3955,10 +4062,10 @@ fn view(app: &App) -> Element<'_, Message> {
                 ].spacing(6));
                 body = body.push(
                     row![
-                        button("Corner A from picked").on_press(Message::Set3DCornerA),
-                        button("Corner B from picked").on_press(Message::Set3DCornerB),
-                        button("Use 3D box as edit selection").on_press(Message::Use3DBox),
-                        button("Clear 3D box").on_press(Message::Clear3DBox),
+                        button(l.pick("所选方块设为顶点 A", "Corner A from picked")).on_press(Message::Set3DCornerA),
+                        button(l.pick("所选方块设为顶点 B", "Corner B from picked")).on_press(Message::Set3DCornerB),
+                        button(l.pick("使用 3D 框选范围", "Use 3D box as edit selection")).on_press(Message::Use3DBox),
+                        button(l.pick("清除 3D 框选", "Clear 3D box")).on_press(Message::Clear3DBox),
                         text(format!("A={:?} / B={:?}", app.corner_a, app.corner_b)),
                     ]
                     .spacing(5),
@@ -3975,7 +4082,7 @@ fn view(app: &App) -> Element<'_, Message> {
                             button("Cut Y -1").on_press(Message::Cut3DTop(-1)),
                             button("Cut Y +1").on_press(Message::Cut3DTop(1)),
                             button("Cut Y +8").on_press(Message::Cut3DTop(8)),
-                            button("Restore full height").on_press(Message::Reset3DCut)
+                            button(l.pick("恢复完整高度", "Restore full height")).on_press(Message::Reset3DCut)
                         ]
                         .spacing(5),
                     );
@@ -4002,7 +4109,7 @@ fn view(app: &App) -> Element<'_, Message> {
                         }
                     }
                 }
-                body=body.push(text("3D controls: right-drag orbit, middle-drag pan, mouse wheel zoom, left-click select. Mouse hover reads original voxel data only."));
+                body=body.push(text(l.pick("3D 操作：右键拖拽旋转、中键拖拽平移、滚轮缩放、左键选择；悬停仅查看原始数据。", "3D controls: right-drag orbit, middle-drag pan, mouse wheel zoom, left-click select. Mouse hover reads original voxel data only.")));
                 if let Some((hx, hy, hz)) = app.surface_hover {
                     if let Some(voxel) =
                         view.voxels.iter().find(|v| (v.x, v.y, v.z) == (hx, hy, hz))
@@ -4016,10 +4123,10 @@ fn view(app: &App) -> Element<'_, Message> {
                 }
                 body = body.push(
                     row![
-                        button("Orbit -15°").on_press(Message::OrbitSurface(-15)),
-                        button("Orbit +15°").on_press(Message::OrbitSurface(15)),
-                        button("Look lower").on_press(Message::PitchSurface(-10)),
-                        button("Look higher").on_press(Message::PitchSurface(10)),
+                        button(l.pick("视角左转 15°", "Orbit -15°")).on_press(Message::OrbitSurface(-15)),
+                        button(l.pick("视角右转 15°", "Orbit +15°")).on_press(Message::OrbitSurface(15)),
+                        button(l.pick("向下看", "Look lower")).on_press(Message::PitchSurface(-10)),
+                        button(l.pick("向上看", "Look higher")).on_press(Message::PitchSurface(10)),
                         text(format!(
                             "yaw {}° / pitch {}° / zoom {:.2}x",
                             (app.surface_camera as i32 * 90 + app.surface_yaw).rem_euclid(360),
@@ -4035,102 +4142,124 @@ fn view(app: &App) -> Element<'_, Message> {
         if !app.surface_report.is_empty() {
             body = body.push(text(&app.surface_report));
         }
+        }
+        if app.advanced_section == AdvancedSection::BlockEntities {
+            body = body.push(text(l.pick("方块实体 NBT 与实体快照", "Block entity NBT & entity snapshots")).size(22));
+            body = body.push(text(l.pick("默认只读，预览与暂存操作不会直接写入世界。",
+                "Read-only by default. Previews and staged changes never write world files.")));
         body = body.push(
             row![
                 text_input(
-                    "Existing Block Entity scalar field (not id/x/y/z)",
+                    l.pick("现有 NBT 字段（不可修改 id/x/y/z）", "Existing Block Entity scalar field (not id/x/y/z)"),
                     &app.be_scalar_field
                 )
                 .on_input(Message::BeScalarField)
                 .width(Length::Fill),
-                text_input("Exact replacement scalar value", &app.be_scalar_value)
+                text_input(l.pick("替换值（保持原类型）", "Exact replacement scalar value"), &app.be_scalar_value)
                     .on_input(Message::BeScalarValue)
                     .width(Length::Fill),
-                button("Preview BE scalar").on_press(Message::PreviewBeScalar),
-                button("Stage BE in memory").on_press(Message::StageBeScalar),
+                button(l.pick("预览 NBT 字段", "Preview BE scalar")).on_press(Message::PreviewBeScalar),
+                button(l.pick("暂存 NBT 修改", "Stage BE in memory")).on_press(Message::StageBeScalar),
             ]
             .spacing(8),
         );
         body = body.push(
             row![
-                button("Undo BE").on_press(Message::UndoBeScalar),
-                button("Redo BE").on_press(Message::RedoBeScalar),
-                button("Inspect staged BE").on_press(Message::InspectStagedBe),
-                button("Inspect original nested NBT tree").on_press(Message::InspectBeTree),
-                button("Verify BE Region (memory only)").on_press(Message::PreviewBeRegion),
+                button(l.pick("撤销 NBT", "Undo BE")).on_press(Message::UndoBeScalar),
+                button(l.pick("重做 NBT", "Redo BE")).on_press(Message::RedoBeScalar),
+                button(l.pick("检查已暂存 NBT", "Inspect staged BE")).on_press(Message::InspectStagedBe),
+                button(l.pick("浏览原始 NBT 树", "Inspect original nested NBT tree")).on_press(Message::InspectBeTree),
+                button(l.pick("校验 NBT 区域（内存）", "Verify BE Region (memory only)")).on_press(Message::PreviewBeRegion),
             ]
             .spacing(8),
         );
-        body=body.push(text("Experimental BE-aware single-Region SAVE — EXACT existing scalar tags only; closed world, backup, pending recovery REQUIRED."));
+        body=body.push(text(l.pick("实验性单 Region NBT 保存：仅现有标量字段，须关闭游戏并备份存档。", "Experimental BE-aware single-Region SAVE — EXACT existing scalar tags only; closed world, backup, pending recovery REQUIRED.")));
         body = body.push(
             row![
-                button("Preview BE save (single Region)").on_press(Message::PrepareBeSave),
-                text_input("Type SAVE_BE_NBT to write", &app.be_save_phrase)
+                button(l.pick("预览 NBT 区域保存", "Preview BE save (single Region)")).on_press(Message::PrepareBeSave),
+                text_input(l.pick("输入 SAVE_BE_NBT 确认写盘", "Type SAVE_BE_NBT to write"), &app.be_save_phrase)
                     .on_input(Message::BeSavePhrase)
                     .width(Length::Fill),
-                button("Confirm BE Region save").on_press(Message::ConfirmBeSave),
+                button(l.pick("确认写入 NBT 区域", "Confirm BE Region save")).on_press(Message::ConfirmBeSave),
             ]
             .spacing(8),
         );
         body = body.push(
             row![
                 text_input(
-                    "Declarative BE scalar .mcedit2beops.json",
+                    l.pick("批量 NBT 修改配置（JSON）", "Declarative BE scalar .mcedit2beops.json"),
                     &app.be_batch_path
                 )
                 .on_input(Message::BeBatchPath)
                 .width(Length::Fill),
-                button("Preview whole BE batch").on_press(Message::PreviewBeBatch),
-                button("Stage all BE edits").on_press(Message::StageBeBatch),
+                button(l.pick("浏览…", "Browse…"))
+            .on_press(Message::ChooseAdvancedFile(AdvancedFile::BeBatch, false)),
+            button(l.pick("预览批量 NBT", "Preview whole BE batch")).on_press(Message::PreviewBeBatch),
+                button(l.pick("暂存全部 NBT", "Stage all BE edits")).on_press(Message::StageBeBatch),
             ]
             .spacing(8),
         );
         body = body.push(
             row![
                 text_input(
-                    "Outside-world BE edit .mcedit2bejournal.json",
+                    l.pick("世界外部的 NBT 编辑日志路径", "Outside-world BE edit .mcedit2bejournal.json"),
                     &app.be_journal_path
                 )
                 .on_input(Message::BeJournalPath)
                 .width(Length::Fill),
-                button("Checkpoint staged BE edits").on_press(Message::ExportBeJournal),
-                button("Restore BE edits (memory)").on_press(Message::ImportBeJournal),
+                button(l.pick("浏览…", "Browse…"))
+            .on_press(Message::ChooseAdvancedFile(AdvancedFile::BeJournal, false)),
+            button(l.pick("另存为…", "Save as…"))
+            .on_press(Message::ChooseAdvancedFile(AdvancedFile::BeJournal, true)),
+            button(l.pick("导出 NBT 编辑检查点", "Checkpoint staged BE edits")).on_press(Message::ExportBeJournal),
+                button(l.pick("导入 NBT 编辑（内存）", "Restore BE edits (memory)")).on_press(Message::ImportBeJournal),
             ]
             .spacing(8),
         );
         body = body.push(
             row![
                 text_input(
-                    "External .mcedit2entities original source snapshot",
+                    l.pick("原始实体快照路径", "External .mcedit2entities original source snapshot"),
                     &app.entity_snapshot_path
                 )
                 .on_input(Message::EntitySnapshotPath)
                 .width(Length::Fill),
-                button("Inspect original entities").on_press(Message::InspectEntities),
-                button("Export entity NBT").on_press(Message::ExportEntities),
-                button("Verify entity source").on_press(Message::VerifyEntities),
+                button(l.pick("浏览…", "Browse…"))
+            .on_press(Message::ChooseAdvancedFile(AdvancedFile::EntitySnapshot, false)),
+            button(l.pick("另存为…", "Save as…"))
+            .on_press(Message::ChooseAdvancedFile(AdvancedFile::EntitySnapshot, true)),
+            button(l.pick("查看原始实体", "Inspect original entities")).on_press(Message::InspectEntities),
+                button(l.pick("导出实体 NBT", "Export entity NBT")).on_press(Message::ExportEntities),
+                button(l.pick("验证实体来源", "Verify entity source")).on_press(Message::VerifyEntities),
             ]
             .spacing(8),
         );
         body = body.push(
             row![
                 text_input(
-                    "Outside-world .mcedit2be original NBT snapshot",
+                    l.pick("原始方块实体 NBT 快照路径", "Outside-world .mcedit2be original NBT snapshot"),
                     &app.be_snapshot_path
                 )
                 .on_input(Message::BeSnapshotPath)
                 .width(Length::Fill),
-                button("Export exact original BE NBT").on_press(Message::ExportOriginalBe),
-                button("Verify BE source unchanged").on_press(Message::VerifyOriginalBe),
+                button(l.pick("浏览…", "Browse…"))
+            .on_press(Message::ChooseAdvancedFile(AdvancedFile::BeSnapshot, false)),
+            button(l.pick("另存为…", "Save as…"))
+            .on_press(Message::ChooseAdvancedFile(AdvancedFile::BeSnapshot, true)),
+            button(l.pick("导出原始 NBT 快照", "Export exact original BE NBT")).on_press(Message::ExportOriginalBe),
+                button(l.pick("验证 NBT 未变更", "Verify BE source unchanged")).on_press(Message::VerifyOriginalBe),
             ]
             .spacing(8),
         );
+        }
+        if app.advanced_section == AdvancedSection::Maps {
+            body = body.push(text(l.pick("二维与纵向切片", "2D and vertical source slices")).size(22));
         body = body.push(
             row![
-                text_input("2D X/Z map: X1,Y,Z1; X2,Y,Z2", &app.slice_area)
+                text_input(l.pick("二维 X/Z 地图：X1,Y,Z1; X2,Y,Z2", "2D X/Z map: X1,Y,Z1; X2,Y,Z2"), &app.slice_area)
                     .on_input(Message::SliceText)
                     .width(Length::Fill),
-                button("Inspect 2D slice").on_press(Message::InspectSlice)
+                button(l.pick("查看二维切片", "Inspect 2D slice")).on_press(Message::InspectSlice)
             ]
             .spacing(8),
         );
@@ -4168,12 +4297,12 @@ fn view(app: &App) -> Element<'_, Message> {
         body = body.push(
             row![
                 text_input(
-                    "Vertical X/Y or Z/Y plane: X1,Y1,Z1; X2,Y2,Z2",
+                    l.pick("纵向 X/Y 或 Z/Y 切片：X1,Y1,Z1; X2,Y2,Z2", "Vertical X/Y or Z/Y plane: X1,Y1,Z1; X2,Y2,Z2"),
                     &app.vertical_area
                 )
                 .on_input(Message::VerticalText)
                 .width(Length::Fill),
-                button("Inspect vertical plane").on_press(Message::InspectVertical)
+                button(l.pick("查看纵向切片", "Inspect vertical plane")).on_press(Message::InspectVertical)
             ]
             .spacing(8),
         );
@@ -4197,18 +4326,23 @@ fn view(app: &App) -> Element<'_, Message> {
         if !app.vertical_report.is_empty() {
             body = body.push(text(&app.vertical_report).font(iced::Font::MONOSPACE));
         }
+        }
+        if app.advanced_section == AdvancedSection::Editing {
+            body = body.push(text(l.pick("方块编辑与操作预览", "Block editing and previews")).size(22));
+            body = body.push(text(l.pick("先预览，再暂存；可撤销或重做。",
+                "Preview before staging; Undo and Redo are available.")));
         let editing_inputs = column![
-            text("3D block edit overlay — preview, stage and Undo/Redo (NOT SAVED)").size(19),
-            text_input("X1,Y1,Z1; X2,Y2,Z2", &app.edit_area).on_input(Message::SelectionText),
+            text(l.pick("3D 方块编辑：预览、暂存、撤销/重做（尚未写盘）", "3D block edit overlay — preview, stage and Undo/Redo (NOT SAVED)")).size(19),
+            text_input(l.pick("选区 X1,Y1,Z1; X2,Y2,Z2", "X1,Y1,Z1; X2,Y2,Z2"), &app.edit_area).on_input(Message::SelectionText),
             row![
                 text_input(
-                    "Target minecraft:stone or numeric:5[data=2]",
+                    l.pick("目标方块 minecraft:stone 或 numeric:5[data=2]", "Target minecraft:stone or numeric:5[data=2]"),
                     &app.edit_target
                 )
                 .on_input(Message::TargetText)
                 .width(Length::Fill),
                 text_input(
-                    "Optional original state filter (blank means all)",
+                    l.pick("原始方块过滤条件（留空表示全部）", "Optional original state filter (blank means all)"),
                     &app.edit_filter
                 )
                 .on_input(Message::FilterText)
@@ -4220,73 +4354,83 @@ fn view(app: &App) -> Element<'_, Message> {
         body = body.push(editing_inputs);
         body = body.push(
             row![
-                text_input("Clone target minimum X,Y,Z", &app.clone_destination)
+                text_input(l.pick("复制目标最小坐标 X,Y,Z", "Clone target minimum X,Y,Z"), &app.clone_destination)
                     .on_input(Message::CloneDestination)
                     .width(Length::Fill),
-                button("Preview block-only clone").on_press(Message::PreviewClone),
-                button("Preview block-only MOVE").on_press(Message::PreviewMove)
+                button(l.pick("预览仅方块复制", "Preview block-only clone")).on_press(Message::PreviewClone),
+                button(l.pick("预览仅方块移动", "Preview block-only MOVE")).on_press(Message::PreviewMove)
             ]
             .spacing(8),
         );
         body = body.push(
             row![
-                text_input("Flood-fill seed X,Y,Z inside selection", &app.fill_seed)
+                text_input(l.pick("连通填充起点 X,Y,Z", "Flood-fill seed X,Y,Z inside selection"), &app.fill_seed)
                     .on_input(Message::FillSeed)
                     .width(Length::Fill),
-                button("Preview connected 3D fill").on_press(Message::PreviewFill)
+                button(l.pick("预览连通填充", "Preview connected 3D fill")).on_press(Message::PreviewFill)
             ]
             .spacing(8),
         );
         body = body.push(
             row![
-                button("Hollow box").on_press(Message::PreviewBrush(BrushShape::HollowBox)),
-                button("Ellipsoid").on_press(Message::PreviewBrush(BrushShape::Ellipsoid)),
-                button("Ellipsoid shell")
+                button(l.pick("空心盒", "Hollow box")).on_press(Message::PreviewBrush(BrushShape::HollowBox)),
+                button(l.pick("椭球", "Ellipsoid")).on_press(Message::PreviewBrush(BrushShape::Ellipsoid)),
+                button(l.pick("椭球外壳", "Ellipsoid shell"))
                     .on_press(Message::PreviewBrush(BrushShape::EllipsoidShell)),
-                button("Cylinder Y").on_press(Message::PreviewBrush(BrushShape::CylinderY)),
-                button("Cylinder shell Y")
+                button(l.pick("Y 轴圆柱", "Cylinder Y")).on_press(Message::PreviewBrush(BrushShape::CylinderY)),
+                button(l.pick("Y 轴圆柱壳", "Cylinder shell Y"))
                     .on_press(Message::PreviewBrush(BrushShape::CylinderShellY)),
             ]
             .spacing(6),
         );
         let apply = if app.prepared.is_some() && !app.readonly {
-            button("Stage approved preview (memory)").on_press(Message::ApplyEdit)
+            button(l.pick("暂存已审核修改", "Stage approved preview (memory)")).on_press(Message::ApplyEdit)
         } else {
-            button("Stage approved preview (memory)")
+            button(l.pick("暂存已审核修改", "Stage approved preview (memory)"))
         };
         body = body.push(
             row![
-                button("Preview full 3D edit").on_press(Message::PreviewEdit),
+                button(l.pick("预览完整 3D 修改", "Preview full 3D edit")).on_press(Message::PreviewEdit),
                 apply,
-                button("Undo").on_press(Message::UndoEdit),
-                button("Redo").on_press(Message::RedoEdit),
-                button("Discard edits").on_press(Message::DiscardEdits)
+                button(l.pick("撤销", "Undo")).on_press(Message::UndoEdit),
+                button(l.pick("重做", "Redo")).on_press(Message::RedoEdit),
+                button(l.pick("放弃修改", "Discard edits")).on_press(Message::DiscardEdits)
             ]
             .spacing(8),
         );
         body = body.push(
             row![
-                button("Analyze lossless native NBT preview").on_press(Message::AnalyzeNativePatch),
-                button("Analyze append-only Region save plan").on_press(Message::AnalyzeRegionPlan)
+                button(l.pick("分析无损 NBT 修改", "Analyze lossless native NBT preview")).on_press(Message::AnalyzeNativePatch),
+                button(l.pick("分析 Region 追加保存计划", "Analyze append-only Region save plan")).on_press(Message::AnalyzeRegionPlan)
             ]
             .spacing(8),
         );
-        body=body.push(text("Block-only clipboard (same original world/dimension; will not copy machines, BE NBT or entities)"));
+        }
+        if app.advanced_section == AdvancedSection::Files {
+            body = body.push(text(l.pick("文件、结构与插件", "Files, structures and plugins")).size(22));
+            body = body.push(text(l.pick("浏览现有文件或选择导出位置；所有路径均可手动输入。",
+                "Browse existing files or choose an export destination; manual paths still work.")));
+        body=body.push(text(l.pick("仅方块剪贴板：同存档/维度，不复制方块实体或实体 NBT。", "Block-only clipboard (same original world/dimension; will not copy machines, BE NBT or entities)")));
+        body = body.push(text(l.pick("剪贴板与变换", "Clipboard and transforms")).size(18));
         body = body.push(
             row![
-                text_input("External .mcedit2clip file", &app.clipboard_path)
+                text_input(l.pick("外部剪贴板 .mcedit2clip 文件路径", "External .mcedit2clip file"), &app.clipboard_path)
                     .on_input(Message::ClipboardPath)
                     .width(Length::Fill),
-                button("Copy selection to clipboard file").on_press(Message::ExportClipboard)
+                button(l.pick("浏览…", "Browse…"))
+            .on_press(Message::ChooseAdvancedFile(AdvancedFile::Clipboard, false)),
+            button(l.pick("另存为…", "Save as…"))
+            .on_press(Message::ChooseAdvancedFile(AdvancedFile::Clipboard, true)),
+            button(l.pick("导出选区剪贴板", "Copy selection to clipboard file")).on_press(Message::ExportClipboard)
             ]
             .spacing(8),
         );
         body = body.push(
             row![
-                text_input("Paste destination X,Y,Z", &app.clipboard_destination)
+                text_input(l.pick("粘贴目标坐标 X,Y,Z", "Paste destination X,Y,Z"), &app.clipboard_destination)
                     .on_input(Message::ClipboardDestination)
                     .width(Length::Fill),
-                button("Preview clipboard paste").on_press(Message::PreviewPasteClipboard)
+                button(l.pick("预览剪贴板粘贴", "Preview clipboard paste")).on_press(Message::PreviewPasteClipboard)
             ]
             .spacing(8),
         );
@@ -4301,82 +4445,102 @@ fn view(app: &App) -> Element<'_, Message> {
                 button("Rotate 270°").on_press(Message::PreviewTransformedClipboard(
                     HorizontalTransform::Rotate270
                 )),
-                button("Mirror X").on_press(Message::PreviewTransformedClipboard(
+                button(l.pick("沿 X 镜像", "Mirror X")).on_press(Message::PreviewTransformedClipboard(
                     HorizontalTransform::MirrorX
                 )),
-                button("Mirror Z").on_press(Message::PreviewTransformedClipboard(
+                button(l.pick("沿 Z 镜像", "Mirror Z")).on_press(Message::PreviewTransformedClipboard(
                     HorizontalTransform::MirrorZ
                 )),
             ]
             .spacing(6),
         );
+        body = body.push(text(l.pick("结构文件", "Schematic formats")).size(18));
         body = body.push(
             row![
-                text_input("Original MCEdit .schematic path", &app.schematic_path)
+                text_input(l.pick("旧式 MCEdit .schematic 文件路径", "Original MCEdit .schematic path"), &app.schematic_path)
                     .on_input(Message::SchematicPath)
                     .width(Length::Fill),
-                button("Preview numeric schematic import")
+                button(l.pick("浏览…", "Browse…"))
+            .on_press(Message::ChooseAdvancedFile(AdvancedFile::Schematic, false)),
+            button(l.pick("另存为…", "Save as…"))
+            .on_press(Message::ChooseAdvancedFile(AdvancedFile::Schematic, true)),
+            button(l.pick("预览旧式结构导入", "Preview numeric schematic import"))
                     .on_press(Message::PreviewLegacySchematic),
-                button("Export numeric schematic").on_press(Message::ExportLegacySchematic)
+                button(l.pick("导出旧式结构", "Export numeric schematic")).on_press(Message::ExportLegacySchematic)
             ]
             .spacing(8),
         );
         body = body.push(
             row![
-                text_input("Modern Sponge v2 .schem file", &app.sponge_path)
+                text_input(l.pick("Sponge .schem 文件路径", "Modern Sponge v2 .schem file"), &app.sponge_path)
                     .on_input(Message::SpongePath)
                     .width(Length::Fill),
-                button("Export selection to Sponge v2").on_press(Message::ExportSpongeV2),
-                button("Preview Sponge v2 paste").on_press(Message::PreviewSpongeV2),
-                button("Export Sponge v3").on_press(Message::ExportSpongeV3),
-                button("Preview Sponge v3 paste").on_press(Message::PreviewSpongeV3),
+                button(l.pick("浏览…", "Browse…"))
+            .on_press(Message::ChooseAdvancedFile(AdvancedFile::Sponge, false)),
+            button(l.pick("另存为…", "Save as…"))
+            .on_press(Message::ChooseAdvancedFile(AdvancedFile::Sponge, true)),
+            button(l.pick("导出 Sponge v2", "Export selection to Sponge v2")).on_press(Message::ExportSpongeV2),
+                button(l.pick("预览 Sponge v2 粘贴", "Preview Sponge v2 paste")).on_press(Message::PreviewSpongeV2),
+                button(l.pick("导出 Sponge v3", "Export Sponge v3")).on_press(Message::ExportSpongeV3),
+                button(l.pick("预览 Sponge v3 粘贴", "Preview Sponge v3 paste")).on_press(Message::PreviewSpongeV3),
             ]
             .spacing(8),
         );
+        body = body.push(text(l.pick("计划、插件与编辑日志", "Plans, plugins and journals")).size(18));
         body = body.push(
             row![
-                text_input("External .mcedit2regionplan.json", &app.region_batch_path)
+                text_input(l.pick("Region 保存计划 JSON 路径", "External .mcedit2regionplan.json"), &app.region_batch_path)
                     .on_input(Message::RegionBatchPath)
                     .width(Length::Fill),
-                button("Preflight all Regions").on_press(Message::PreviewRegionBatch),
-                button("Export Region plan").on_press(Message::ExportRegionBatch),
-                button("Verify plan").on_press(Message::VerifyRegionBatch),
+                button(l.pick("浏览…", "Browse…"))
+            .on_press(Message::ChooseAdvancedFile(AdvancedFile::RegionPlan, false)),
+            button(l.pick("另存为…", "Save as…"))
+            .on_press(Message::ChooseAdvancedFile(AdvancedFile::RegionPlan, true)),
+            button(l.pick("预检全部 Region", "Preflight all Regions")).on_press(Message::PreviewRegionBatch),
+                button(l.pick("导出 Region 计划", "Export Region plan")).on_press(Message::ExportRegionBatch),
+                button(l.pick("验证保存计划", "Verify plan")).on_press(Message::VerifyRegionBatch),
             ]
             .spacing(8),
         );
         body = body.push(
             row![
                 text_input(
-                    "Declarative .mcedit2plugin.json file",
+                    l.pick("声明式插件 JSON 路径", "Declarative .mcedit2plugin.json file"),
                     &app.plugin_manifest_path
                 )
                 .on_input(Message::PluginManifestPath)
                 .width(Length::Fill),
-                button("Preview safe plugin replacement").on_press(Message::PreviewPlugin),
+                button(l.pick("浏览…", "Browse…"))
+            .on_press(Message::ChooseAdvancedFile(AdvancedFile::PluginManifest, false)),
+            button(l.pick("预览安全插件替换", "Preview safe plugin replacement")).on_press(Message::PreviewPlugin),
             ]
             .spacing(8),
         );
         body = body.push(
             row![
                 text_input(
-                    "External .mcedit2patch path (outside the world)",
+                    l.pick("外部编辑日志 .mcedit2patch 路径", "External .mcedit2patch path (outside the world)"),
                     &app.patch_path
                 )
                 .on_input(Message::PatchPath)
                 .width(Length::Fill),
-                button("Export edit journal").on_press(Message::ExportPatch),
+                button(l.pick("浏览…", "Browse…"))
+            .on_press(Message::ChooseAdvancedFile(AdvancedFile::Patch, false)),
+            button(l.pick("另存为…", "Save as…"))
+            .on_press(Message::ChooseAdvancedFile(AdvancedFile::Patch, true)),
+            button(l.pick("导出编辑日志", "Export edit journal")).on_press(Message::ExportPatch),
                 if !app.readonly {
-                    button("Import verified journal").on_press(Message::ImportPatch)
+                    button(l.pick("导入已验证日志", "Import verified journal")).on_press(Message::ImportPatch)
                 } else {
-                    button("Import verified journal")
+                    button(l.pick("导入已验证日志", "Import verified journal"))
                 }
             ]
             .spacing(8),
         );
         if !app.readonly {
-            body=body.push(text("EXPERIMENTAL SINGLE-REGION DISK SAVE — make a separate world copy first. Minecraft must be closed.").size(16));
+            body=body.push(text(l.pick("实验性单 Region 写盘：先复制并备份存档，必须关闭 Minecraft。", "EXPERIMENTAL SINGLE-REGION DISK SAVE — make a separate world copy first. Minecraft must be closed.")).size(16));
             body = body.push(
-                button("Prepare one-Region disk-save preview").on_press(Message::PrepareWorldSave),
+                button(l.pick("预览单 Region 写盘", "Prepare one-Region disk-save preview")).on_press(Message::PrepareWorldSave),
             );
             if let Some(intent) = app.save_preview.as_ref() {
                 body = body.push(text(format!(
@@ -4390,28 +4554,28 @@ fn view(app: &App) -> Element<'_, Message> {
                 body = body.push(
                     row![
                         text_input(
-                            "Type SAVE to write a verified single Region",
+                            l.pick("输入 SAVE 确认写入 Region", "Type SAVE to write a verified single Region"),
                             &app.save_phrase
                         )
                         .on_input(Message::SavePhrase)
                         .width(Length::Fill),
                         if app.save_phrase == "SAVE" {
-                            button("Replace Region and keep backup")
+                            button(l.pick("替换 Region 并保留备份", "Replace Region and keep backup"))
                                 .on_press(Message::ConfirmWorldSave)
                         } else {
-                            button("Replace Region and keep backup")
+                            button(l.pick("替换 Region 并保留备份", "Replace Region and keep backup"))
                         }
                     ]
                     .spacing(8),
                 );
             }
-            body=body.push(text("Transaction recovery: for a pending Region, enter its exact filename (e.g. r.-1.0.mca) and type FINALIZE or ROLLBACK. Backups are retained."));
+            body=body.push(text(l.pick("事务恢复：填写待处理 Region 文件名（如 r.-1.0.mca），再输入 FINALIZE 或 ROLLBACK。不会删除备份。", "Transaction recovery: for a pending Region, enter its exact filename (e.g. r.-1.0.mca) and type FINALIZE or ROLLBACK. Backups are retained.")));
             body = body.push(
                 row![
-                    text_input("Pending r.X.Z.mca or r.X.Z.mcr", &app.recover_region)
+                    text_input(l.pick("待恢复文件 r.X.Z.mca / r.X.Z.mcr", "Pending r.X.Z.mca or r.X.Z.mcr"), &app.recover_region)
                         .on_input(Message::RecoverRegion)
                         .width(Length::Fill),
-                    text_input("FINALIZE or ROLLBACK", &app.recovery_phrase)
+                    text_input(l.pick("输入 FINALIZE 或 ROLLBACK", "FINALIZE or ROLLBACK"), &app.recovery_phrase)
                         .on_input(Message::RecoveryPhrase)
                         .width(Length::Fill),
                 ]
@@ -4420,18 +4584,19 @@ fn view(app: &App) -> Element<'_, Message> {
             body = body.push(
                 row![
                     if app.recovery_phrase == "FINALIZE" {
-                        button("Finalize verified Region").on_press(Message::FinalizeRegion)
+                        button(l.pick("完成 Region 事务", "Finalize verified Region")).on_press(Message::FinalizeRegion)
                     } else {
-                        button("Finalize verified Region")
+                        button(l.pick("完成 Region 事务", "Finalize verified Region"))
                     },
                     if app.recovery_phrase == "ROLLBACK" {
-                        button("Restore original Region").on_press(Message::RollbackRegion)
+                        button(l.pick("恢复原始 Region", "Restore original Region")).on_press(Message::RollbackRegion)
                     } else {
-                        button("Restore original Region")
+                        button(l.pick("恢复原始 Region", "Restore original Region"))
                     }
                 ]
                 .spacing(8),
             );
+        }
         }
         let stats = app.current_key().and_then(|key| app.sessions.get(&key));
         if let Some(session) = stats {
@@ -4515,6 +4680,30 @@ fn main() -> iced::Result {
 
 #[cfg(test)]
 mod tests {
+    use super::{AdvancedFile, AdvancedSection};
+    use crate::language::Language;
+    #[test]
+    fn advanced_tools_tabs_are_localized_and_selection_specific() {
+        assert_eq!(AdvancedSection::Viewer.label(Language::Chinese, AdvancedSection::Viewer), "● 3D 观察与材质");
+        assert_eq!(AdvancedSection::Viewer.label(Language::English, AdvancedSection::Viewer), "● 3D & textures");
+        assert_eq!(AdvancedSection::Files.label(Language::Chinese, AdvancedSection::Viewer), "导入导出与保存");
+    }
+    #[test]
+    fn advanced_file_dialog_filters_are_bounded_and_do_not_accept_executables() {
+        let all = [AdvancedFile::BeBatch, AdvancedFile::BeJournal,
+            AdvancedFile::EntitySnapshot, AdvancedFile::BeSnapshot,
+            AdvancedFile::Clipboard, AdvancedFile::Schematic,
+            AdvancedFile::Sponge, AdvancedFile::RegionPlan,
+            AdvancedFile::PluginManifest, AdvancedFile::Patch];
+        for kind in all {
+            let (name, extensions) = kind.filter();
+            assert!(!name.is_empty());
+            assert!(!extensions.is_empty());
+            assert!(extensions.iter().all(|ext| ext.chars().all(|ch|
+                ch.is_ascii_lowercase() || ch.is_ascii_digit())));
+            assert!(!extensions.contains(&"exe"));
+        }
+    }
     use super::{
         parse_region_name, parse_scene_window, shifted_scene, shifted_slice, slice_cell_label,
     };
