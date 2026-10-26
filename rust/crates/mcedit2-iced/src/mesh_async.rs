@@ -103,8 +103,19 @@ fn queue() -> &'static Queue {
                         let _ = view.gpu_vertices_cancellable(*size, &cancelled);
                     }
                     MeshRequest::Spectator { view, .. } => {
+                        // Arc-backed chunk snapshots are materialized only
+                        // by this mesh worker, never while iced builds a UI
+                        // frame. The patch data and near scene remain intact
+                        // and independently shareable across publications.
+                        let mut resolved = view.clone();
+                        if let Some(snapshot) = &view.snapshot {
+                            if !cancelled() {
+                                resolved.surface = Arc::new(snapshot.materialize());
+                                resolved.snapshot = None;
+                            }
+                        }
                         if let Some(vertices) =
-                            crate::spectator::build_cancellable(view, &cancelled)
+                            crate::spectator::build_cancellable(&resolved, &cancelled)
                         {
                             let mut cache = view.cache.lock().unwrap_or_else(|e| e.into_inner());
                             if !cancelled() {
@@ -235,6 +246,7 @@ mod tests {
             cache: Arc::new(Mutex::new(None)),
             pending: Arc::new(Mutex::new(false)),
             fallback: None,
+            snapshot: None,
             chunk_cache: Arc::new(Mutex::new(crate::chunk_mesh_cache::ChunkMeshCache::default())),
         };
         let old_token = Arc::new(AtomicBool::new(false));
@@ -269,6 +281,7 @@ mod tests {
             cache: Arc::new(Mutex::new(None)),
             pending: Arc::new(Mutex::new(false)),
             fallback: None,
+            snapshot: None,
             chunk_cache: Arc::new(Mutex::new(crate::chunk_mesh_cache::ChunkMeshCache::default())),
         };
         let active = Arc::new(AtomicBool::new(false));

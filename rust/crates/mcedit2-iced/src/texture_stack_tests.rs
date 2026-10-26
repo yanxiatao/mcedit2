@@ -67,7 +67,8 @@ fn zip_overlay_preserves_lower_models_and_sprites_without_stale_animation() {
     assert_eq!(color(&reversed, "minecraft:stone"), [0, 200, 0, 255]);
     assert_eq!(reversed.animation_count(), 1);
     assert!(TextureBank::open_stack(&[]).is_err());
-    assert!(TextureBank::open_stack(&vec![temp.path("base"); 1025]).is_err());
+    // Modpack layering no longer fails based on an arbitrary pack count.
+    // Functional overlay precedence is already verified above.
 }
 #[test]
 fn metadata_only_overlay_changes_schedule_without_replacing_png() {
@@ -232,6 +233,7 @@ fn spectator_emits_real_extended_modded_model_vertices_with_valid_atlas_uv() {
         cache:Arc::new(Mutex::new(None)),
         pending:Arc::new(Mutex::new(false)),
         fallback: None,
+        snapshot: None,
         chunk_cache:Arc::new(Mutex::new(
             crate::chunk_mesh_cache::ChunkMeshCache::default()
         )),
@@ -327,6 +329,7 @@ fn original_json_repeating_uvs_emit_real_atlas_safe_spectator_faces() {
         quality:crate::gpu_mesh::Quality::Balanced,
         cache:Arc::new(Mutex::new(None)),pending:Arc::new(Mutex::new(false)),
         fallback: None,
+        snapshot: None,
         chunk_cache:Arc::new(Mutex::new(crate::chunk_mesh_cache::ChunkMeshCache::default())),
     };
     let mesh = crate::spectator::build(&scene);
@@ -372,6 +375,7 @@ fn declared_obj_loader_emits_generic_static_mesh_via_gpu_path() {
         quality:crate::gpu_mesh::Quality::Balanced,
         cache:Arc::new(Mutex::new(None)),pending:Arc::new(Mutex::new(false)),
         fallback: None,
+        snapshot: None,
         chunk_cache:Arc::new(Mutex::new(crate::chunk_mesh_cache::ChunkMeshCache::default())),
     };
     let vertices = crate::spectator::build(&scene);
@@ -705,6 +709,7 @@ fn gltf_base_color_texture_autobinds_and_spectator_instances_are_distinct() {
         quality:crate::gpu_mesh::Quality::Balanced,
         cache:Arc::new(Mutex::new(None)),pending:Arc::new(Mutex::new(false)),
         fallback: None,
+        snapshot: None,
         chunk_cache:Arc::new(Mutex::new(
             crate::chunk_mesh_cache::ChunkMeshCache::default()
         )),

@@ -277,6 +277,30 @@ fn reconcile_exact_seams(view: &mut SurfaceView) {
         voxel.faces &= !mask;
     }
 }
+/// Immutable incremental scene publication: the near view is shared and
+/// unchanged distant chunks are Arc-referenced, not copied on the UI thread.
+/// A mesh worker materializes an exact face-seam snapshot only when it needs
+/// to rebuild geometry, leaving the previous complete GPU frame visible.
+#[derive(Clone)]
+pub(crate) struct SceneSnapshot {
+    near: Arc<SurfaceView>,
+    patches: Vec<Arc<FarChunkPatch>>,
+}
+impl SceneSnapshot {
+    pub(crate) fn materialize(&self) -> SurfaceView {
+        let mut result = (*self.near).clone();
+        for patch in &self.patches {
+            result.voxels.extend(patch.voxels.iter().cloned());
+            result.source_tiles.push(patch.tile.clone());
+            result.source_chunks += usize::from(patch.tile.source_present);
+            result.missing_columns += patch.tile.unknown_columns;
+        }
+        reconcile_exact_seams(&mut result);
+        result
+    }
+    #[cfg(test)]
+    fn patch_count(&self) -> usize { self.patches.len() }
+}
 pub(crate) struct Stream {
     pub key: (usize, usize),
     pub source: Arc<Session>,
@@ -556,10 +580,9 @@ impl Stream {
             self.published = self.complete;
         }
     }
-    pub fn combined(&self, near: &SurfaceView) -> SurfaceView {
-        let mut result = near.clone();
-        // Source near-field window may not align with chunk boundaries.
-        // Do not overlay sparse LOD onto any chunk touching exact 3D volume.
+    pub(crate) fn snapshot(&self, near: Arc<SurfaceView>) -> SceneSnapshot {
+        // The source near-field window can be unaligned with chunk borders.
+        // Never overlay an approximate patch onto the exact near volume.
         let overlaps = |req: FarChunkRequest| {
             let x = req.cx as i64 * 16;
             let z = req.cz as i64 * 16;
@@ -568,26 +591,22 @@ impl Stream {
                 && z < near.z as i64 + near.depth as i64
                 && z + 16 > near.z as i64
         };
+        let mut patches = Vec::new();
         for req in &self.display_order.visible {
-            if overlaps(*req) {
+            if overlaps(*req) { continue; }
+            let Some(best) = best_cached_resolution(*req,
+                |id| self.cache.get(&id).map(|patch| patch.voxels.len())) else {
                 continue;
+            };
+            if let Some(patch) = self.cache.get(&best) {
+                patches.push(Arc::clone(patch));
             }
-            let Some(best) = best_cached_resolution(
-                *req,
-                |id| self.cache.get(&id).map(|patch| patch.voxels.len()),
-            ) else {
-                continue;
-            };
-            let Some(patch) = self.cache.get(&best) else {
-                continue;
-            };
-            result.voxels.extend(patch.voxels.iter().cloned());
-            result.source_tiles.push(patch.tile.clone());
-            result.source_chunks += usize::from(patch.tile.source_present);
-            result.missing_columns += patch.tile.unknown_columns;
         }
-        reconcile_exact_seams(&mut result);
-        result
+        SceneSnapshot { near, patches }
+    }
+    #[cfg(test)]
+    pub fn combined(&self, near: &SurfaceView) -> SurfaceView {
+        self.snapshot(Arc::new(near.clone())).materialize()
     }
     pub fn status(&self) -> String {
         format!("Streaming real Java terrain: {}/{} chunks, {} errors, {} cached (exact caves/blocks nearby, textured LOD farther), radius {} chunks.",
@@ -604,6 +623,34 @@ impl Drop for Stream {
 mod tests {
     use super::*;
     use mcedit2_world::surface::SurfaceVoxel;
+    #[test]
+    fn immutable_chunk_snapshot_reuses_patch_arcs_and_materializes_on_demand() {
+        use mcedit2_world::surface::{SurfaceView, SourceChunkTile};
+        let near = Arc::new(SurfaceView {
+            x: 0, z: 0, y_min: 0, y_max: 47, width: 16, depth: 16,
+            voxels: Vec::new(), source_tiles: Vec::new(),
+            source_chunks: 0, missing_columns: 0,
+        });
+        let patch = Arc::new(FarChunkPatch {
+            tile: SourceChunkTile {
+                chunk_x: 4, chunk_z: 0, source_present: true,
+                known_columns: 256, unknown_columns: 0, exposed_voxels: 0,
+            },
+            voxels: Vec::new(),
+        });
+        let snapshot = SceneSnapshot {
+            near: Arc::clone(&near),
+            patches: vec![Arc::clone(&patch)],
+        };
+        let cloned = snapshot.clone();
+        assert!(Arc::ptr_eq(&cloned.near, &near));
+        assert!(Arc::ptr_eq(&cloned.patches[0], &patch));
+        assert_eq!(snapshot.patch_count(), 1);
+        let materialized = snapshot.materialize();
+        assert_eq!(materialized.source_chunks, 1);
+        assert_eq!(materialized.source_tiles.len(), 1);
+        assert_eq!(near.source_chunks, 0);
+    }
     #[test]
     fn exact_cached_chunk_wins_over_requested_coarse_lod() {
         let req = FarChunkRequest { cx: 29, cz: -7, span: 16 };

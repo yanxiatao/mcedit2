@@ -262,8 +262,8 @@ pub(crate) struct AtlasPage {
     pub height: u32,
     pub rgba: Vec<u8>,
 }
-const MAX_PAGE_LAYERS: u32 = 256;
-const MAX_ATLAS_GPU_BYTES: u64 = 768 * 1024 * 1024;
+// Atlas pages are uploaded as independent GPU textures; a hardware texture
+// array's layer count no longer imposes a limit on the complete resource pack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SlotPlacement {
     page: usize,
@@ -290,7 +290,7 @@ fn mixed_layout(tiles: &BTreeMap<String, Tile>) -> Result<MixedLayout, String> {
                 .min(MAX_ATLAS_CELL)
         }))
         .collect::<Vec<_>>();
-    for factor in [1u32, 2, 4, 8, 16, 32, 64, 128, 256] {
+    for factor in [1u32] {
         let sizes = cells
             .iter()
             .map(|c| (*c / factor).max(16))
@@ -300,14 +300,13 @@ fn mixed_layout(tiles: &BTreeMap<String, Tile>) -> Result<MixedLayout, String> {
             .iter()
             .try_fold(0u64, |acc, c| acc.checked_add((*c as u64 + 2).pow(2)))
             .ok_or("Atlas area overflow")?;
-        let max_edge = if max_cell > 2048 { 8192 } else { 2048 };
-        let edge = if max_cell > 2048 {
-            8192
-        } else {
-            (sum as f64).sqrt().ceil().max(64.0) as u32
-        }
-        .next_power_of_two()
-        .clamp(64, max_edge);
+        // NPOT atlas pages are valid in wgpu. A single 4096px sprite
+        // needs ~4100px with padding, not an 8192px allocation wasting
+        // hundreds of MiB. Round only to a modest 64px alignment.
+        let max_edge = if max_cell + 2 > 2048 { 8192 } else { 2048 };
+        let minimum = (sum as f64).sqrt().ceil().max((max_cell + 2) as f64)
+            .max(64.0) as u32;
+        let edge = minimum.min(max_edge).div_ceil(64) * 64;
         let mut order = (0..sizes.len()).collect::<Vec<_>>();
         order.sort_by_key(|&i| (std::cmp::Reverse(sizes[i]), i));
         let mut shelves: Vec<Vec<(u32, u32, u32)>> = vec![Vec::new()];
@@ -353,10 +352,6 @@ fn mixed_layout(tiles: &BTreeMap<String, Tile>) -> Result<MixedLayout, String> {
             }
             let mut page = next_y.iter().position(|&y| edge - y >= stride);
             if page.is_none() {
-                if shelves.len() >= MAX_PAGE_LAYERS as usize {
-                    valid = false;
-                    break;
-                }
                 shelves.push(Vec::new());
                 next_y.push(0);
                 page = Some(shelves.len() - 1);
@@ -373,10 +368,7 @@ fn mixed_layout(tiles: &BTreeMap<String, Tile>) -> Result<MixedLayout, String> {
             };
         }
         let pages = shelves.len();
-        if valid
-            && pages <= MAX_PAGE_LAYERS as usize
-            && edge as u64 * edge as u64 * 4 * pages as u64 <= MAX_ATLAS_GPU_BYTES
-        {
+        if valid {
             return Ok(MixedLayout {
                 edge,
                 slots,
@@ -385,7 +377,7 @@ fn mixed_layout(tiles: &BTreeMap<String, Tile>) -> Result<MixedLayout, String> {
             });
         }
     }
-    Err("Mixed-resolution texture atlas exceeds GPU page/memory budget".into())
+    Err("Texture atlas sprite dimensions exceed the supported page geometry".into())
 }
 #[cfg(test)]
 #[derive(Debug, Clone, Copy)]
@@ -414,15 +406,8 @@ fn page_plan(slots: usize, cell: u32) -> Result<PagePlan, String> {
     let rows = (slots.div_ceil(columns as usize) as u32).clamp(1, max_cols);
     let capacity = columns as usize * rows as usize;
     let pages = slots.div_ceil(capacity);
-    if pages > MAX_PAGE_LAYERS as usize {
-        return Err("Resource atlas exceeds 256 portable GPU array layers".into());
-    }
     let width = columns * stride;
     let height = rows * stride;
-    let bytes = width as u64 * height as u64 * 4 * pages as u64;
-    if bytes > MAX_ATLAS_GPU_BYTES {
-        return Err("Resource atlas exceeds 768 MiB GPU memory budget".into());
-    }
     Ok(PagePlan {
         columns,
         rows,
@@ -1258,12 +1243,6 @@ impl TextureBank {
     ) -> Result<Self, String> {
         if paths.is_empty() || paths.iter().any(|p| p.as_os_str().is_empty()) {
             return Err("Select at least one resource-pack directory or ZIP".into());
-        }
-        // Large Prism/NeoForge modpacks may contain hundreds of active mod
-        // archives. The atlas has separate decoded-RGBA and GPU memory caps;
-        // the former 32-pack ceiling incorrectly excluded most mod assets.
-        if paths.len() > 1024 {
-            return Err("Resource-pack stack exceeds 1024 layers".into());
         }
         let mut out = Self {
             #[cfg(test)]
@@ -2390,8 +2369,10 @@ mod tests {
         }
     }
     #[test]
-    fn hd_resolution_falls_back_only_when_page_memory_budget_requires() {
-        assert!(page_plan(100, 4096).is_err());
+    fn independent_atlas_pages_do_not_impose_fixed_total_gpu_budget() {
+        let large = page_plan(100, 4096).unwrap();
+        assert_eq!(large.pages, 100);
+        assert_eq!(large.cell, 4096);
         assert!(page_plan(100, 1024).is_ok());
     }
     #[test]

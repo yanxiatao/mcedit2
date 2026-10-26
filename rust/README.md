@@ -143,6 +143,47 @@ No GitHub Actions/CI or Windows packaging runs were initiated for this
 change; offline source inspection and regression test additions are not a
 substitute for running `cargo check`, the tests and real-save GPU validation.
 
+## Chunk-resident GPU geometry and immutable render generations
+
+The spectator GPU renderer no longer uploads a single monolithic opaque
+world buffer. It groups original six-vertex faces by source chunk coordinates
+and atlas page and keeps **independent wgpu vertex buffers** for each group.
+When a chunk changes, unchanged groups reuse their byte-identical buffers;
+inserting terrain in one chunk does not shift the GPU offsets of another.
+The separate global translucent stream remains sorted back-to-front across
+chunk and texture boundaries so glass and water do not lose painter order.
+
+The atlas uploader now uses **one independently allocated one-layer texture
+array per occupied atlas page** and switches bindings at ordered face runs.
+This removes the former 256-array-layer and 768 MiB total-atlas caps and
+avoids reserving unused GPU layers. Updated pages can be uploaded without
+recreating unchanged page textures. The PNG loader's per-asset decompression
+guards and existing CPU decoded-image memory protection remain in place;
+hardware resource exhaustion must still be tested on actual devices.
+Non-power-of-two atlas page dimensions avoid allocating an 8192px square
+just to fit a single 4096px sprite with edge padding.
+
+For streaming scene publications, the UI now stores **immutable Arc-backed
+near views and chunk patch references**. The background mesh thread performs
+the exact seam reconciliation and materializes the flattened voxel view
+needed by the existing geometry builder; the UI itself no longer clones
+every far patch on each incremental update. This is an intermediate
+architecture: it removes UI-thread scene copies, but the worker still
+materializes a complete view when generating a new mesh. Future true
+zero-copy mesh generation can operate directly on the same source patches.
+
+A previous completed frame comprises its vertex buffer, original coordinate
+basis and the exact atlas that produced its UVs. During a texture-pack or
+scene refresh the old complete generation remains visible until a replacement
+mesh is ready; GPU page bindings and mesh draws are updated in the same render
+preparation cycle. World switches and mutations still revoke stale frames.
+
+**Validation:** the code includes regression coverage for atlas page draw
+order, negative chunk coordinates, frame handoff and Arc-backed snapshots.
+The revision has not been compiled with Cargo, run with a GPU, or compared
+against a real Minecraft modpack; rendering correctness and large-pack memory
+behavior remain unverified. CI and Windows packaging remain user-triggered.
+
 ## Camera-facing full-ring streaming
 
 The native spectator still schedules **every** actual Java chunk inside the
@@ -466,7 +507,7 @@ patch remains visible as a temporary bridge. Each source chunk contributes
 only one chosen patch to a rendered frame, and patches overlapping the
 exact near-source viewport remain excluded. This does not synthesize
 missing source chunks, add any editable LOD data or imply full exact
-64-chunk-radius rendering. The far horizon remains a sampled,
+128-chunk-radius rendering. The far horizon remains a sampled,
 non-editable visualization; source chunk completeness is recorded.
 
 Regression coverage includes safe glTF image URI traversal, material

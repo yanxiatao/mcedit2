@@ -61,7 +61,9 @@ struct VOutput {
 @group(0) @binding(0) var block_atlas:texture_2d_array<f32>;
 @group(0) @binding(1) var block_sampler:sampler;
 fn shade(input:VOutput)->vec4<f32>{
-    return textureSample(block_atlas,block_sampler,input.uv,i32(input.atlas_page))*input.rgba;
+    // Each atlas page is a separately bound one-layer texture array. The
+    // CPU selects its page before each draw range; no global layer cap.
+    return textureSample(block_atlas,block_sampler,input.uv,0)*input.rgba;
 }
 // This is Minecraft-style fullbright: texture * authored tint, no light
 // intensity attenuation, specular PBR highlights, shadows or time-of-day.
@@ -126,6 +128,7 @@ pub(crate) struct Primitive {
     atlas: Option<Arc<TextureAtlas>>,
     quality: Quality,
     camera: Option<crate::spectator::CameraUniform>,
+    source_origin: Option<[i32; 3]>,
 }
 /// WebGPU depth runs 0 (nearest) to 1 (farthest); the isometric
 /// projector uses larger camera-space depth for nearer source blocks.
@@ -202,14 +205,23 @@ impl IsometricSurface {
 fn choose_spectator_mesh(
     current: Option<Arc<Vec<Vertex>>>,
     current_surface: &Arc<mcedit2_world::surface::SurfaceView>,
-    fallback: Option<&(Arc<Vec<Vertex>>, Arc<mcedit2_world::surface::SurfaceView>)>,
-) -> (Arc<Vec<Vertex>>, Arc<mcedit2_world::surface::SurfaceView>) {
+    current_atlas: Option<Arc<TextureAtlas>>,
+    fallback: Option<&crate::spectator::CompletedFrame>,
+) -> crate::spectator::CompletedFrame {
     if let Some(vertices) = current {
-        (vertices, Arc::clone(current_surface))
-    } else if let Some((vertices, original_surface)) = fallback {
-        (Arc::clone(vertices), Arc::clone(original_surface))
+        crate::spectator::CompletedFrame {
+            vertices,
+            surface: Arc::clone(current_surface),
+            atlas: current_atlas,
+        }
+    } else if let Some(last) = fallback {
+        last.clone()
     } else {
-        (Arc::new(Vec::new()), Arc::clone(current_surface))
+        crate::spectator::CompletedFrame {
+            vertices: Arc::new(Vec::new()),
+            surface: Arc::clone(current_surface),
+            atlas: current_atlas,
+        }
     }
 }
 impl shader::Program<Message> for GpuScene {
@@ -233,19 +245,24 @@ impl shader::Program<Message> for GpuScene {
                     atlas: scene.texture_bank.as_ref().and_then(|b| b.atlas()).cloned(),
                     quality: scene.gpu_quality,
                     camera: None,
+                    source_origin: None,
                 }
             }
             SceneSource::Spectator(scene) => {
                 crate::mesh_async::enqueue_spectator(scene);
                 let ready = scene.cache.lock()
                     .unwrap_or_else(|e| e.into_inner()).as_ref().cloned();
-                let (vertices, source) = choose_spectator_mesh(
-                    ready, &scene.surface, scene.fallback.as_ref());
+                let committed = choose_spectator_mesh(
+                    ready, &scene.surface,
+                    scene.texture_bank.as_ref().and_then(|b| b.atlas()).cloned(),
+                    scene.fallback.as_ref());
                 Primitive {
-                    vertices,
-                    atlas: scene.texture_bank.as_ref().and_then(|b| b.atlas()).cloned(),
+                    vertices: committed.vertices,
+                    atlas: committed.atlas,
                     quality: scene.quality,
-                    camera: Some(scene.camera.uniform(source.as_ref(), size)),
+                    camera: Some(scene.camera.uniform(committed.surface.as_ref(), size)),
+                    source_origin: Some([committed.surface.x, committed.surface.y_min,
+                        committed.surface.z]),
                 }
             }
         }
@@ -273,10 +290,19 @@ pub(crate) struct Pipeline {
     has_transparent_world_faces: bool,
     atlas: Option<Arc<TextureAtlas>>,
     atlas_texture: wgpu::Texture,
+    /// Independent page textures and bind groups. No texture-array layers are
+    /// reserved for unused pages, and changed pages are uploaded separately.
+    atlas_pages: Vec<(wgpu::Texture, wgpu::BindGroup)>,
     atlas_layout: wgpu::BindGroupLayout,
     nearest: wgpu::Sampler,
     linear: wgpu::Sampler,
     atlas_bind_group: wgpu::BindGroup,
+    /// GPU-side resident meshes keyed by source chunk X/Z and atlas page.
+    /// Unchanged chunks reuse their existing buffers even when other chunks
+    /// are inserted, removed or remeshed.
+    chunks: std::collections::BTreeMap<(i32, i32, u32), GpuChunk>,
+    draw_spans: Vec<DrawSpan>,
+    segment_spans: Vec<Vec<DrawSpan>>,
     quality: Quality,
     offscreen_color: wgpu::Texture,
     offscreen_depth: wgpu::Texture,
@@ -291,6 +317,64 @@ pub(crate) struct Pipeline {
 fn gpu_segment_vertices(max_buffer_size: u64) -> usize {
     let stride = std::mem::size_of::<Vertex>() as u64;
     ((max_buffer_size / stride).min(u32::MAX as u64) / 6 * 6) as usize
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DrawSpan {
+    page: usize,
+    start: u32,
+    end: u32,
+}
+struct GpuChunk {
+    source: Arc<Vec<Vertex>>,
+    buffers: Vec<(wgpu::Buffer, u32)>,
+}
+/// Preserve painter order in a draw stream while switching independently
+/// allocated atlas page bindings at complete six-vertex face boundaries.
+fn page_spans(vertices: &[Vertex]) -> Vec<DrawSpan> {
+    let mut out: Vec<DrawSpan> = Vec::new();
+    for (face, quad) in vertices.chunks_exact(6).enumerate() {
+        let start = (face * 6) as u32;
+        let page = quad[0].atlas_page as usize;
+        if let Some(last) = out.last_mut() {
+            if last.page == page && last.end == start {
+                last.end += 6;
+                continue;
+            }
+        }
+        out.push(DrawSpan { page, start, end: start + 6 });
+    }
+    out
+}
+fn chunk_bucket(quad: &[Vertex], origin: [i32; 3]) -> (i32, i32, u32) {
+    // Source is world-relative; derive a stable chunk from the authored face
+    // position, not the camera. Negative world coordinates use Euclidean div.
+    let x = quad.iter().map(|v| v.xyz[0]).fold(f32::INFINITY, f32::min);
+    let z = quad.iter().map(|v| v.xyz[2]).fold(f32::INFINITY, f32::min);
+    let to_chunk = |position: f32, base: i32| {
+        ((position.floor() as i64 + base as i64).clamp(i32::MIN as i64, i32::MAX as i64) as i32)
+            .div_euclid(16)
+    };
+    (to_chunk(x, origin[0]), to_chunk(z, origin[2]), quad[0].atlas_page)
+}
+fn same_vertices(a: &[Vertex], b: &[Vertex]) -> bool {
+    bytemuck::cast_slice::<Vertex, u8>(a) == bytemuck::cast_slice::<Vertex, u8>(b)
+}
+fn make_chunk_buffers(
+    device: &wgpu::Device, queue: &wgpu::Queue, vertices: &[Vertex],
+) -> Vec<(wgpu::Buffer, u32)> {
+    let count = gpu_segment_vertices(device.limits().max_buffer_size);
+    if count == 0 || vertices.is_empty() { return Vec::new(); }
+    vertices.chunks(count).map(|part| {
+        let bytes = bytemuck::cast_slice::<Vertex, u8>(part);
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("MCEdit2 individual resident source chunk"),
+            size: bytes.len() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&buffer, 0, bytes);
+        (buffer, part.len() as u32)
+    }).collect()
 }
 /// Determine whether a redraw is needed and the first vertex whose bytes
 /// must be uploaded. Only a common prefix may safely stay on an existing
@@ -730,10 +814,14 @@ impl shader::Pipeline for Pipeline {
             has_transparent_world_faces: false,
             atlas: None,
             atlas_texture,
+            atlas_pages: Vec::new(),
             atlas_layout,
             nearest,
             linear,
             atlas_bind_group,
+            chunks: std::collections::BTreeMap::new(),
+            draw_spans: Vec::new(),
+            segment_spans: Vec::new(),
             quality: Quality::Balanced,
             offscreen_color,
             offscreen_depth,
@@ -755,109 +843,165 @@ impl shader::Primitive for Primitive {
         _: &Viewport,
     ) {
         let mesh_identity_changed = pipeline
-            .last_source_mesh
-            .as_ref()
-            .is_none_or(|previous| !Arc::ptr_eq(previous, &self.vertices));
+            .last_source_mesh.as_ref()
+            .is_none_or(|old| !Arc::ptr_eq(old, &self.vertices));
         let changed_camera = pipeline.last_camera != self.camera;
         if mesh_identity_changed {
             pipeline.has_transparent_world_faces = self.vertices.iter()
                 .any(|v| (v.mode & 3) == 2 && v.world_mode == 1);
         }
-        let needs_transparent_sort = self.camera.is_some()
-            && pipeline.has_transparent_world_faces;
-        let resort = needs_transparent_sort && (changed_camera || mesh_identity_changed);
-        // Transparent ordering is itself the uploaded representation. Reuse
-        // it across unchanged camera frames instead of replacing it with
-        // original (unsorted) vertex order on a redraw.
-        let unchanged_scene = !mesh_identity_changed && !resort;
-        let uploaded = if unchanged_scene {
-            None
-        } else if resort {
-            self.camera.as_ref().map(|camera| {
-                Arc::new(ordered_transparent_vertices(
-                    self.vertices.as_slice(),
-                    camera,
-                ))
-            })
-        } else {
-            Some(Arc::clone(&self.vertices))
-        };
-        let stride = std::mem::size_of::<Vertex>() as u64;
-        let needed = (self.vertices.len() as u64).saturating_mul(stride);
-        let max_buffer = device.limits().max_buffer_size;
-        let segmented = needed > max_buffer || self.vertices.len() > u32::MAX as usize;
-        let changed_mesh: bool;
-        if segmented {
-            // This is device segmentation, not an arbitrary scene quota:
-            // draw all the uploaded quads in stable opaque/translucent order.
-            let chunk_len = gpu_segment_vertices(max_buffer);
-            if chunk_len == 0 {
-                // The adapter cannot fit even one model quad.
-                return;
+        let resort = self.camera.is_some() && pipeline.has_transparent_world_faces
+            && (changed_camera || mesh_identity_changed);
+        let mut changed_mesh = false;
+        if let Some(origin) = self.source_origin {
+            // Each independent resident GPU buffer belongs to a real source
+            // chunk and atlas page. A new chunk cannot shift any other
+            // chunk's GPU offsets. Only dirty chunks are uploaded.
+            if mesh_identity_changed || pipeline.chunks.is_empty() {
+                let mut groups: std::collections::BTreeMap<(i32, i32, u32), Vec<Vertex>> =
+                    std::collections::BTreeMap::new();
+                for quad in self.vertices.chunks_exact(6) {
+                    if quad.iter().all(|v| (v.mode & 3) == 2 && v.world_mode == 1) {
+                        continue;
+                    }
+                    groups.entry(chunk_bucket(quad, origin))
+                        .or_default().extend_from_slice(quad);
+                }
+                let mut previous = std::mem::take(&mut pipeline.chunks);
+                let mut next = std::collections::BTreeMap::new();
+                for (key, vertices) in groups {
+                    let entry = match previous.remove(&key) {
+                        Some(resident) if same_vertices(&resident.source, &vertices) => resident,
+                        _ => {
+                            changed_mesh = true;
+                            let buffers = make_chunk_buffers(device, queue, &vertices);
+                            GpuChunk { source: Arc::new(vertices), buffers }
+                        }
+                    };
+                    next.insert(key, entry);
+                }
+                if !previous.is_empty() { changed_mesh = true; }
+                pipeline.chunks = next;
             }
-            let rebuild = !unchanged_scene || pipeline.segments.is_empty();
-            if rebuild {
-                let current = uploaded.as_ref().unwrap_or(&self.vertices);
-                let mut chunks = Vec::new();
-                for part in current.chunks(chunk_len) {
-                    let bytes = bytemuck::cast_slice::<Vertex, u8>(part);
-                    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some("MCEdit2 original world mesh segment"),
-                        size: bytes.len() as u64,
+            // Translucent faces must still be globally sorted across chunks
+            // (and across independently bound atlas pages). Keep only those
+            // faces in the dynamic vertex buffer, never reupload opaque chunks
+            // when the camera rotates.
+            if mesh_identity_changed || resort {
+                let order = if self.camera.is_some() && pipeline.has_transparent_world_faces {
+                    ordered_transparent_vertices(self.vertices.as_slice(),
+                        self.camera.as_ref().expect("camera present"))
+                } else {
+                    self.vertices.as_ref().clone()
+                };
+                let transparent = order.chunks_exact(6)
+                    .filter(|quad| quad.iter()
+                        .all(|v| (v.mode & 3) == 2 && v.world_mode == 1))
+                    .flat_map(|quad| quad.iter().copied())
+                    .collect::<Vec<_>>();
+                let needed = transparent.len() as u64
+                    * std::mem::size_of::<Vertex>() as u64;
+                let max_buffer = device.limits().max_buffer_size;
+                if needed > max_buffer || transparent.len() > u32::MAX as usize {
+                    pipeline.segments = make_chunk_buffers(device, queue, &transparent);
+                    let each = gpu_segment_vertices(max_buffer);
+                    pipeline.segment_spans = transparent.chunks(each)
+                        .map(page_spans).collect();
+                    pipeline.count = 0;
+                } else {
+                    pipeline.segments.clear();
+                    pipeline.segment_spans.clear();
+                    if needed > pipeline.capacity {
+                        pipeline.capacity = needed.next_power_of_two().min(max_buffer);
+                        pipeline.buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("MCEdit2 dynamic sorted transparent faces"),
+                            size: pipeline.capacity,
+                            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                            mapped_at_creation: false,
+                        });
+                    }
+                    if !transparent.is_empty() {
+                        queue.write_buffer(&pipeline.buffer, 0,
+                            bytemuck::cast_slice::<Vertex, u8>(&transparent));
+                    }
+                    pipeline.count = transparent.len() as u32;
+                    pipeline.draw_spans = page_spans(&transparent);
+                }
+                changed_mesh = true;
+            }
+            pipeline.last_uploaded_vertices = None;
+        } else {
+            let was_chunks = !pipeline.chunks.is_empty();
+            if was_chunks { pipeline.chunks.clear(); }
+            // Existing isometric projection uses screen-space vertices.
+            // Keep its suffix/range writes while the 3D spectator mode uses
+            // independent per-chunk buffers.
+            let unchanged = !mesh_identity_changed && !resort && !was_chunks;
+            let ordered = if resort {
+                self.camera.as_ref().map(|camera| Arc::new(
+                    ordered_transparent_vertices(self.vertices.as_slice(), camera)))
+            } else if !unchanged {
+                Some(Arc::clone(&self.vertices))
+            } else {
+                None
+            };
+            let stride = std::mem::size_of::<Vertex>() as u64;
+            let needed = self.vertices.len() as u64 * stride;
+            let max_buffer = device.limits().max_buffer_size;
+            if needed > max_buffer || self.vertices.len() > u32::MAX as usize {
+                let max_vertices = gpu_segment_vertices(max_buffer);
+                if max_vertices == 0 { return; }
+                if !unchanged || pipeline.segments.is_empty() {
+                    let current = ordered.as_deref().unwrap_or(&self.vertices);
+                    pipeline.segments = make_chunk_buffers(device, queue, current);
+                    pipeline.segment_spans = current.chunks(max_vertices)
+                        .map(page_spans).collect();
+                    pipeline.last_uploaded_vertices = Some(ordered.unwrap_or_else(
+                        || Arc::clone(&self.vertices)));
+                    changed_mesh = true;
+                }
+                pipeline.count = 0;
+            } else {
+                let was_segmented = !pipeline.segments.is_empty();
+                if was_segmented {
+                    pipeline.segments.clear();
+                    pipeline.segment_spans.clear();
+                    pipeline.last_uploaded_vertices = None;
+                }
+                let resized = needed > pipeline.capacity;
+                if resized {
+                    pipeline.capacity = needed.next_power_of_two().min(max_buffer);
+                    pipeline.buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("MCEdit2 isometric source GPU mesh"),
+                        size: pipeline.capacity,
                         usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                         mapped_at_creation: false,
                     });
-                    queue.write_buffer(&buffer, 0, bytes);
-                    chunks.push((buffer, part.len() as u32));
                 }
-                pipeline.segments = chunks;
-                pipeline.last_uploaded_vertices = Some(
-                    uploaded.unwrap_or_else(|| Arc::clone(&self.vertices))
-                );
-            }
-            pipeline.count = 0;
-            changed_mesh = rebuild;
-        } else {
-            let was_segmented = !pipeline.segments.is_empty();
-            if was_segmented {
-                pipeline.segments.clear();
-                pipeline.last_uploaded_vertices = None;
-            }
-            let resized_mesh = needed > pipeline.capacity;
-            if resized_mesh {
-                pipeline.capacity = needed.next_power_of_two().min(max_buffer);
-                pipeline.buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("MCEdit2 resized original source GPU mesh"),
-                    size: pipeline.capacity,
-                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-            }
-            let (modified, upload_ranges) = if unchanged_scene && !resized_mesh && !was_segmented {
-                (false, Vec::new())
-            } else {
-                let current = uploaded.as_ref().unwrap_or(&self.vertices);
-                mesh_upload_ranges(
-                    pipeline.last_uploaded_vertices.as_deref().map(Vec::as_slice),
-                    current,
-                    resized_mesh || was_segmented,
-                )
-            };
-            if !upload_ranges.is_empty() {
-                let current = uploaded.as_ref().unwrap_or(&self.vertices);
-                for range in upload_ranges {
-                    let offset = range.start * std::mem::size_of::<Vertex>();
-                    let bytes = bytemuck::cast_slice::<Vertex, u8>(&current[range]);
-                    if !bytes.is_empty() {
-                        queue.write_buffer(&pipeline.buffer, offset as u64, bytes);
+                let (modified, ranges) = if unchanged && !resized && !was_segmented {
+                    (false, Vec::new())
+                } else {
+                    let current = ordered.as_deref().unwrap_or(&self.vertices);
+                    mesh_upload_ranges(pipeline.last_uploaded_vertices.as_deref()
+                        .map(Vec::as_slice), current, resized || was_segmented)
+                };
+                if !ranges.is_empty() {
+                    let current = ordered.as_deref().unwrap_or(&self.vertices);
+                    for range in ranges {
+                        let bytes = bytemuck::cast_slice::<Vertex, u8>(&current[range.clone()]);
+                        if !bytes.is_empty() {
+                            queue.write_buffer(&pipeline.buffer,
+                                range.start as u64 * stride, bytes);
+                        }
                     }
                 }
+                if let Some(v) = ordered {
+                    pipeline.draw_spans = page_spans(&v);
+                    pipeline.last_uploaded_vertices = Some(v);
+                }
+                pipeline.count = self.vertices.len() as u32;
+                changed_mesh = modified || was_segmented || was_chunks;
             }
-            if let Some(vertices) = uploaded {
-                pipeline.last_uploaded_vertices = Some(vertices);
-            }
-            pipeline.count = self.vertices.len() as u32;
-            changed_mesh = modified || was_segmented;
         }
         pipeline.last_source_mesh = Some(Arc::clone(&self.vertices));
         let changed_atlas = match (&pipeline.atlas, &self.atlas) {
@@ -865,88 +1009,57 @@ impl shader::Primitive for Primitive {
             (None, None) => false,
             _ => true,
         };
-        if changed_atlas {
-            // Rebuild the array only when layout/layer count changes.
-            // Sprite animation replaces just the touched Arc atlas pages.
-            let target = self
-                .atlas
-                .as_ref()
-                .and_then(|a| {
-                    a.pages
-                        .first()
-                        .map(|p| (p.width, p.height, a.page_count() as u32))
-                })
-                .unwrap_or((1, 1, 1));
-            let previous = pipeline
-                .atlas
-                .as_ref()
-                .and_then(|a| {
-                    a.pages
-                        .first()
-                        .map(|p| (p.width, p.height, a.page_count() as u32))
-                })
-                .unwrap_or((1, 1, 1));
-            let layout_changed = target != previous;
-            if layout_changed {
-                pipeline.atlas_texture = make_texture(device, target.0, target.1, target.2);
-            }
+        let changed_quality = pipeline.quality != self.quality;
+        if changed_atlas || changed_quality {
+            let sampler = match self.quality {
+                Quality::Detailed => &pipeline.linear,
+                _ => &pipeline.nearest,
+            };
+            let mut old_gpu = std::mem::take(&mut pipeline.atlas_pages).into_iter();
+            let mut next_gpu = Vec::new();
             if let Some(atlas) = self.atlas.as_ref() {
-                for (layer, page) in atlas.pages.iter().enumerate() {
-                    if !layout_changed
-                        && pipeline
-                            .atlas
-                            .as_ref()
-                            .and_then(|old| old.pages.get(layer))
-                            .is_some_and(|prev| Arc::ptr_eq(prev, page))
-                    {
-                        continue;
-                    }
-                    queue.write_texture(
-                        wgpu::TexelCopyTextureInfo {
-                            texture: &pipeline.atlas_texture,
-                            mip_level: 0,
-                            origin: wgpu::Origin3d {
-                                x: 0,
-                                y: 0,
-                                z: layer as u32,
+                for (index, page) in atlas.pages.iter().enumerate() {
+                    let prior_page = pipeline.atlas.as_ref()
+                        .and_then(|previous| previous.pages.get(index));
+                    let old = old_gpu.next();
+                    let reused = old.as_ref().is_some_and(|_| prior_page.is_some_and(
+                        |prev| prev.width == page.width && prev.height == page.height));
+                    let texture = if reused {
+                        old.expect("existing GPU atlas page").0
+                    } else {
+                        make_texture(device, page.width, page.height, 1)
+                    };
+                    if !reused || prior_page.is_none_or(|old| !Arc::ptr_eq(old, page)) {
+                        queue.write_texture(
+                            wgpu::TexelCopyTextureInfo {
+                                texture: &texture,
+                                mip_level: 0,
+                                origin: wgpu::Origin3d::ZERO,
+                                aspect: wgpu::TextureAspect::All,
                             },
-                            aspect: wgpu::TextureAspect::All,
-                        },
-                        &page.rgba,
-                        wgpu::TexelCopyBufferLayout {
-                            offset: 0,
-                            bytes_per_row: Some(page.width * 4),
-                            rows_per_image: Some(page.height),
-                        },
-                        wgpu::Extent3d {
-                            width: page.width,
-                            height: page.height,
-                            depth_or_array_layers: 1,
-                        },
-                    );
+                            &page.rgba,
+                            wgpu::TexelCopyBufferLayout {
+                                offset: 0,
+                                bytes_per_row: Some(page.width * 4),
+                                rows_per_image: Some(page.height),
+                            },
+                            wgpu::Extent3d {
+                                width: page.width,
+                                height: page.height,
+                                depth_or_array_layers: 1,
+                            },
+                        );
+                    }
+                    let binding = make_binding(device, &pipeline.atlas_layout,
+                        &texture, sampler, &pipeline.camera_buffer);
+                    next_gpu.push((texture, binding));
                 }
-            } else {
-                queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &pipeline.atlas_texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    &[255, 255, 255, 255],
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(4),
-                        rows_per_image: Some(1),
-                    },
-                    wgpu::Extent3d {
-                        width: 1,
-                        height: 1,
-                        depth_or_array_layers: 1,
-                    },
-                );
             }
+            // Staging page textures and bindings together ensures no draw
+            // observes a new atlas page with an old sampler or page layout.
+            pipeline.atlas_pages = next_gpu;
             pipeline.atlas = self.atlas.clone();
+            pipeline.quality = self.quality;
         }
         if changed_camera {
             queue.write_buffer(
@@ -955,21 +1068,6 @@ impl shader::Primitive for Primitive {
                 bytemuck::bytes_of(&self.camera.unwrap_or_default()),
             );
             pipeline.last_camera = self.camera;
-        }
-        let changed_quality = pipeline.quality != self.quality;
-        if changed_atlas || changed_quality {
-            pipeline.quality = self.quality;
-            let sampler = match self.quality {
-                Quality::Detailed => &pipeline.linear,
-                _ => &pipeline.nearest,
-            };
-            pipeline.atlas_bind_group = make_binding(
-                device,
-                &pipeline.atlas_layout,
-                &pipeline.atlas_texture,
-                sampler,
-                &pipeline.camera_buffer,
-            );
         }
         let target = target_dimensions(bounds, device.limits().max_texture_dimension_2d);
         let resized_view = target != pipeline.offscreen_size;
@@ -1029,16 +1127,36 @@ impl shader::Primitive for Primitive {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            if pipeline.count > 0 || !pipeline.segments.is_empty() {
-                pass.set_pipeline(&pipeline.opaque);
-                pass.set_bind_group(0, &pipeline.atlas_bind_group, &[]);
-                if pipeline.segments.is_empty() {
-                    pass.set_vertex_buffer(0, pipeline.buffer.slice(..));
-                    pass.draw(0..pipeline.count, 0..1);
-                } else {
-                    for (buffer, count) in &pipeline.segments {
+            pass.set_pipeline(&pipeline.opaque);
+            if self.source_origin.is_some() {
+                for ((_, _, page), chunk) in &pipeline.chunks {
+                    let binding = pipeline.atlas_pages.get(*page as usize)
+                        .map(|item| &item.1).unwrap_or(&pipeline.atlas_bind_group);
+                    pass.set_bind_group(0, binding, &[]);
+                    for (buffer, count) in &chunk.buffers {
                         pass.set_vertex_buffer(0, buffer.slice(..));
                         pass.draw(0..*count, 0..1);
+                    }
+                }
+            } else {
+                if pipeline.segments.is_empty() {
+                    pass.set_vertex_buffer(0, pipeline.buffer.slice(..));
+                    for span in &pipeline.draw_spans {
+                        let binding = pipeline.atlas_pages.get(span.page)
+                            .map(|item| &item.1).unwrap_or(&pipeline.atlas_bind_group);
+                        pass.set_bind_group(0, binding, &[]);
+                        pass.draw(span.start..span.end, 0..1);
+                    }
+                } else {
+                    for ((buffer, _), spans) in pipeline.segments.iter()
+                        .zip(&pipeline.segment_spans) {
+                        pass.set_vertex_buffer(0, buffer.slice(..));
+                        for span in spans {
+                            let binding = pipeline.atlas_pages.get(span.page)
+                                .map(|item| &item.1).unwrap_or(&pipeline.atlas_bind_group);
+                            pass.set_bind_group(0, binding, &[]);
+                            pass.draw(span.start..span.end, 0..1);
+                        }
                     }
                 }
             }
@@ -1068,16 +1186,24 @@ impl shader::Primitive for Primitive {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            if pipeline.count > 0 || !pipeline.segments.is_empty() {
-                pass.set_pipeline(&pipeline.transparent);
-                pass.set_bind_group(0, &pipeline.atlas_bind_group, &[]);
-                if pipeline.segments.is_empty() {
-                    pass.set_vertex_buffer(0, pipeline.buffer.slice(..));
-                    pass.draw(0..pipeline.count, 0..1);
-                } else {
-                    for (buffer, count) in &pipeline.segments {
-                        pass.set_vertex_buffer(0, buffer.slice(..));
-                        pass.draw(0..*count, 0..1);
+            pass.set_pipeline(&pipeline.transparent);
+            if pipeline.segments.is_empty() {
+                pass.set_vertex_buffer(0, pipeline.buffer.slice(..));
+                for span in &pipeline.draw_spans {
+                    let binding = pipeline.atlas_pages.get(span.page)
+                        .map(|item| &item.1).unwrap_or(&pipeline.atlas_bind_group);
+                    pass.set_bind_group(0, binding, &[]);
+                    pass.draw(span.start..span.end, 0..1);
+                }
+            } else {
+                for ((buffer, _), spans) in pipeline.segments.iter()
+                    .zip(&pipeline.segment_spans) {
+                    pass.set_vertex_buffer(0, buffer.slice(..));
+                    for span in spans {
+                        let binding = pipeline.atlas_pages.get(span.page)
+                            .map(|item| &item.1).unwrap_or(&pipeline.atlas_bind_group);
+                        pass.set_bind_group(0, binding, &[]);
+                        pass.draw(span.start..span.end, 0..1);
                     }
                 }
             }
@@ -1097,6 +1223,31 @@ impl shader::Primitive for Primitive {
 mod tests {
     use super::*;
     #[test]
+    fn atlas_page_spans_preserve_face_order_across_independent_page_bindings() {
+        let mut quads = Vec::new();
+        for page in [0, 1, 1, 260, 0] {
+            quads.extend(gpu_test_quad(page as f32).into_iter().map(|mut v| {
+                v.atlas_page = page; v
+            }));
+        }
+        let spans = page_spans(&quads);
+        assert_eq!(spans, vec![
+            DrawSpan { page: 0, start: 0, end: 6 },
+            DrawSpan { page: 1, start: 6, end: 18 },
+            DrawSpan { page: 260, start: 18, end: 24 },
+            DrawSpan { page: 0, start: 24, end: 30 },
+        ]);
+    }
+    #[test]
+    fn spectator_chunk_identity_keeps_negative_world_coordinates() {
+        let quad = gpu_test_quad(2.0);
+        assert_eq!(chunk_bucket(&quad, [-32, 0, -32]), (-2, -2, 0));
+        assert!(same_vertices(&quad, &quad));
+        let mut changed = quad;
+        changed[0].atlas_page += 1;
+        assert!(!same_vertices(&quad, &changed));
+    }
+    #[test]
     fn spectator_mesh_handoff_retains_previous_complete_vertices_and_origin() {
         use mcedit2_world::surface::SurfaceView;
         let source = |x: i32| Arc::new(SurfaceView {
@@ -1110,15 +1261,19 @@ mod tests {
             xy: [0.0;2], depth: 0.0, rgba: [1.0;4], uv: [0.0;2],
             mode: 0, xyz: [0.5, 0.0, 0.0], world_mode: 1, atlas_page: 0,
         }]);
-        let fallback = (Arc::clone(&old_mesh), Arc::clone(&old_origin));
-        let (during, origin) = choose_spectator_mesh(None, &new_origin, Some(&fallback));
-        assert!(Arc::ptr_eq(&during, &old_mesh));
-        assert!(Arc::ptr_eq(&origin, &old_origin));
+        let fallback = crate::spectator::CompletedFrame {
+            vertices: Arc::clone(&old_mesh),
+            surface: Arc::clone(&old_origin),
+            atlas: None,
+        };
+        let during = choose_spectator_mesh(None, &new_origin, None, Some(&fallback));
+        assert!(Arc::ptr_eq(&during.vertices, &old_mesh));
+        assert!(Arc::ptr_eq(&during.surface, &old_origin));
         let replacement = Arc::new(vec![old_mesh[0], old_mesh[0]]);
-        let (ready, origin) = choose_spectator_mesh(
-            Some(Arc::clone(&replacement)), &new_origin, Some(&fallback));
-        assert!(Arc::ptr_eq(&ready, &replacement));
-        assert!(Arc::ptr_eq(&origin, &new_origin));
+        let ready = choose_spectator_mesh(
+            Some(Arc::clone(&replacement)), &new_origin, None, Some(&fallback));
+        assert!(Arc::ptr_eq(&ready.vertices, &replacement));
+        assert!(Arc::ptr_eq(&ready.surface, &new_origin));
     }
     fn test_camera(forward: [f32; 3]) -> crate::spectator::CameraUniform {
         crate::spectator::CameraUniform {
@@ -1336,7 +1491,7 @@ mod tests {
         assert!(WGSL.contains("vs_composite"));
         assert!(WGSL.contains("rgba.rgb*rgba.a"));
         assert!(WGSL.contains("texture_2d_array<f32>"));
-        assert!(WGSL.contains("i32(input.atlas_page)"));
+        assert!(WGSL.contains("textureSample(block_atlas,block_sampler,input.uv,0)"));
         assert!(WGSL.contains("@interpolate(flat) atlas_page"));
         assert!(WGSL.contains("textureSample(block_atlas,block_sampler,input.uv,0)"));
         assert_eq!(COLOR_FORMAT, wgpu::TextureFormat::Rgba8Unorm);
