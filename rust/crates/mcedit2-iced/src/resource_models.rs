@@ -28,6 +28,9 @@ pub(crate) struct ObjSelection {
     pub uv: [[f32; 2]; 3],
     pub texture: String,
     pub tint: [f32; 4],
+    pub alpha_mode: Option<String>,
+    pub alpha_cutoff: f32,
+    pub double_sided: bool,
 }
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ModelBank {
@@ -931,8 +934,11 @@ impl ModelBank {
                         .get(&(id_key.clone(),tri.material.clone()))
                         .cloned()
                         .unwrap_or_else(||format!("{ns}:{id}")),
-                    tint: mtl.map(|m|m.diffuse).or_else(||pbr.map(|m|m.base_color))
-                        .unwrap_or([1.;4]),
+                    tint: mtl.map(|m| m.diffuse).or_else(|| pbr.map(|m| m.base_color))
+                        .unwrap_or([1.; 4]),
+                    alpha_mode: pbr.map(|m| m.alpha_mode.clone()),
+                    alpha_cutoff: pbr.map_or(0.5, |m| m.alpha_cutoff),
+                    double_sided: pbr.is_none_or(|m| m.double_sided),
                 });
                 if out.len() > 4096 {
                     return None;

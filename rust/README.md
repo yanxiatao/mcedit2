@@ -303,3 +303,27 @@ roughness texture sampling, and correct per-material alpha cutoff are
 not yet implemented in wgpu. Reading these metadata fields is not
 equivalent to full PBR shading. Animations and Mod client renderer hooks
 remain deliberately out of scope.
+
+## Minecraft-like fullbright spectator material rendering
+
+The perspective 3D spectator shader treats original block/model textures
+and declared static base-color factors as **fully illuminated**. It does not
+darken nearby or distant surfaces based on world sky/block light, time of
+day, camera direction, metallic roughness, or simulated ambient occlusion;
+the GPU depth buffer and transparent face ordering still operate normally.
+The goal is vanilla-style recognizable block/resource textures with flight
+navigation, not an independent PBR lighting engine.
+
+The common GPU material-mode flags now preserve standard glTF
+`OPAQUE` (ignore sampled Alpha), `MASK` (per-material `alphaCutoff`),
+`BLEND` (sort and alpha-compose) and `doubleSided` (selective backface
+discard) without changing the geometry or atlas layout of existing
+Minecraft/OBJ faces. Ordinary cutout geometry retains the 0.5 cutoff.
+Material alpha metadata comes from resource-provided glTF/GLB JSON, not
+block ID guesses. Dedicated Rust tests check encoded modes, cutoff values
+and correct GPU sort classification with embedded material flags.
+
+This is intentionally **fullbright**, so glTF metallic/roughness,
+normal maps, BRDF reflections and physical light transport do not alter
+the voxel display. These properties remain readable source metadata, not
+a claim of full PBR appearance. No Mod-specific renderer is added here.

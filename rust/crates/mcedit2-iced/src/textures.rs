@@ -616,6 +616,9 @@ pub(crate) struct StaticObjTriangle {
     pub page: u32,
     pub alpha: AlphaMode,
     pub tint: [f32;4],
+    /// Low two bits are opaque/cutout/blend; high bits encode static glTF
+    /// sidedness, cutoff and OPAQUE alpha semantics.
+    pub mode: u32,
 }
 pub(crate) struct TextureBank {
     // Original PNG/JSON source is immutable and shared across animation.
@@ -1571,7 +1574,14 @@ impl TextureBank {
                 MISSING_TEXTURE_ID
             };
             let slot = atlas.entries.get(id)?;
-            let alpha = if tri.tint[3] < 0.999 { AlphaMode::Blend } else { self.tiles.get(id)?.alpha_mode() };
+            let alpha = if tri.tint[3] < 0.999 {
+                AlphaMode::Blend
+            } else {
+                self.tiles.get(id)?.alpha_mode()
+            };
+            let mode = crate::material_mode::encode(
+                alpha as u32, tri.alpha_mode.as_deref(), tri.alpha_cutoff, tri.double_sided,
+            );
             if !crate::static_triangle_uv::tile(tri.xyz, tri.uv, slot, |xyz, uv| {
                 if out.len() < 4096 {
                     out.push(StaticObjTriangle {
@@ -1579,6 +1589,7 @@ impl TextureBank {
                         uv,
                         page: slot.page,
                         alpha,
+                        mode,
                         tint: tri.tint,
                     });
                 }

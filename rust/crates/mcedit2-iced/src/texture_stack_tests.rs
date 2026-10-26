@@ -566,3 +566,69 @@ fn obj_material_map_d_is_baked_into_actual_atlas_sprite_alpha(){
     assert_eq!(vertices.len(),1);
     assert_eq!(vertices[0].alpha,AlphaMode::Blend);
 }
+
+#[test]
+fn fullbright_gltf_alpha_rules_flow_from_pack_material_into_gpu_mesh_mode() {
+    let fixture = Fixture::new();
+    for (index, alpha_mode, expected_kind) in [
+        (0, "OPAQUE", 0_u32),
+        (1, "MASK", 1_u32),
+        (2, "BLEND", 2_u32),
+    ] {
+        let root = fixture.path(&format!("fullbright_gltf_{index}"));
+        let mut positions = Vec::new();
+        for n in [0f32, 0., 0., 1., 0., 0., 0., 1., 0.] {
+            positions.extend_from_slice(&n.to_le_bytes());
+        }
+        let mut tex = Vec::new();
+        for n in [0f32, 0., 1., 0., 0., 1.] {
+            tex.extend_from_slice(&n.to_le_bytes());
+        }
+        let gltf = serde_json::json!({
+            "asset": {"version":"2.0"},
+            "buffers": [
+                {"uri":"positions.bin","byteLength":36},
+                {"uri":"uv.bin","byteLength":24}
+            ],
+            "bufferViews":[{"buffer":0,"byteLength":36},{"buffer":1,"byteLength":24}],
+            "accessors":[
+                {"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"},
+                {"bufferView":1,"componentType":5126,"count":3,"type":"VEC2"}
+            ],
+            "materials":[{"name":"panel","alphaMode":alpha_mode,
+                "alphaCutoff":0.75,"doubleSided":false,
+                "pbrMetallicRoughness":{"baseColorFactor":[0.2,0.4,0.6,0.25]}
+            }],
+            "meshes":[{"primitives":[{"attributes":
+                {"POSITION":0,"TEXCOORD_0":1},"material":0}]}]
+        });
+        put(&root,"assets/example/models/block/panel.gltf",
+            &serde_json::to_vec(&gltf).unwrap());
+        put(&root,"assets/example/models/block/positions.bin",&positions);
+        put(&root,"assets/example/models/block/uv.bin",&tex);
+        put(&root,"assets/example/textures/item/panel.png",
+            &png(&[100,170,200,80],1));
+        put(&root,"assets/example/blockstates/panel.json",
+            br#"{"variants":{"":{"model":"example:block/panel"}}}"#);
+        put(&root,"assets/example/models/block/panel.json",
+            br#"{"loader":"mcedit2:gltf","model":"example:models/block/panel.gltf",
+                "textures":{"panel":"example:item/panel"}}"#);
+        let bank=TextureBank::open(&root).unwrap();
+        let state=mcedit2_world::sections::State {
+            name:"example:panel".into(), properties:vec![],
+        };
+        let faces=bank.static_obj_at(&state,(0,70,0)).unwrap();
+        assert_eq!(faces.len(),1);
+        assert_eq!(faces[0].mode & 3,expected_kind);
+        assert_ne!(faces[0].mode & 4,0,"Single-sided glTF material must discard backfaces");
+        assert_eq!(faces[0].tint,[0.2,0.4,0.6,0.25]);
+        match expected_kind {
+            0 => assert_ne!(faces[0].mode & 8,0),
+            1 => {
+                assert_ne!(faces[0].mode & 16,0);
+                assert_eq!((faces[0].mode >> 8)&255,191);
+            },
+            _ => assert_eq!(faces[0].mode & 8,0),
+        }
+    }
+}

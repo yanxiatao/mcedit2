@@ -63,15 +63,29 @@ struct VOutput {
 fn shade(input:VOutput)->vec4<f32>{
     return textureSample(block_atlas,block_sampler,input.uv,i32(input.atlas_page))*input.rgba;
 }
-@fragment fn fs_opaque(input:VOutput)->@location(0) vec4<f32>{
-    if input.mode==2u{discard;}
+// This is Minecraft-style fullbright: texture * authored tint, no light
+// intensity attenuation, specular PBR highlights, shadows or time-of-day.
+@fragment fn fs_opaque(input:VOutput,@builtin(front_facing) front:bool)->@location(0) vec4<f32>{
+    if (input.mode & 3u)==2u{discard;}
+    if (input.mode & 4u)!=0u && !front{discard;}
     let rgba=shade(input);
-    if input.mode==1u && rgba.a<0.5{discard;}
+    if (input.mode & 3u)==1u {
+        var threshold=0.5;
+        if (input.mode & 16u)!=0u {
+            threshold=f32((input.mode >> 8u) & 255u)/255.0;
+        }
+        if rgba.a<threshold {discard;}
+    }
+    if (input.mode & 8u)!=0u {
+        // glTF OPAQUE ignores texture/vertex alpha and writes full depth.
+        return vec4<f32>(rgba.rgb,1.0);
+    }
     if rgba.a<=0.0039{discard;}
     return rgba;
 }
-@fragment fn fs_transparent(input:VOutput)->@location(0) vec4<f32>{
-    if input.mode!=2u{discard;}
+@fragment fn fs_transparent(input:VOutput,@builtin(front_facing) front:bool)->@location(0) vec4<f32>{
+    if (input.mode & 3u)!=2u{discard;}
+    if (input.mode & 4u)!=0u && !front{discard;}
     let rgba=shade(input);
     if rgba.a<=0.0039{discard;}
     // Offscreen color is premultiplied; otherwise compositing the
@@ -293,7 +307,7 @@ fn ordered_transparent_vertices(
     for (index, quad) in vertices.chunks_exact(6).enumerate() {
         if !quad
             .iter()
-            .all(|vertex| vertex.mode == 2 && vertex.world_mode == 1)
+            .all(|vertex| (vertex.mode & 3) == 2 && vertex.world_mode == 1)
         {
             continue;
         }
@@ -665,7 +679,7 @@ impl shader::Primitive for Primitive {
             && self
                 .vertices
                 .iter()
-                .any(|v| v.mode == 2 && v.world_mode == 1);
+                .any(|v| (v.mode & 3) == 2 && v.world_mode == 1);
         let resort = needs_transparent_sort && (changed_camera || mesh_identity_changed);
         // Transparent ordering is itself the uploaded representation. Reuse
         // it across unchanged camera frames instead of replacing it with
@@ -987,6 +1001,18 @@ mod tests {
         assert!(reversed[12..18].iter().all(|v| v.atlas_page == 30));
     }
     #[test]
+    fn gltf_single_sided_blend_mode_keeps_back_to_front_transparency_sort() {
+        let encoded = crate::material_mode::encode(0, Some("BLEND"), 0.5, false);
+        let mut vertices = Vec::new();
+        vertices.extend(test_quad(10.0, 2.0, encoded, 1));
+        vertices.extend(test_quad(30.0, 8.0, encoded, 1));
+        vertices.extend(test_quad(20.0, 4.0, 0, 1)); // opaque always fixed
+        let sorted = ordered_transparent_vertices(&vertices, &test_camera([0., 0., 1.]));
+        assert!(sorted[..6].iter().all(|v| v.atlas_page == 30));
+        assert!(sorted[6..12].iter().all(|v| v.atlas_page == 10));
+        assert!(sorted[12..].iter().all(|v| v.atlas_page == 20));
+    }
+    #[test]
     fn transparent_equal_depth_is_deterministic_and_keeps_triangle_pairs() {
         let mut vertices = Vec::new();
         vertices.extend(test_quad(1.0, 3.0, 2, 1));
@@ -1097,9 +1123,11 @@ mod tests {
     }
     #[test]
     fn depth_pipeline_excludes_blend_from_opaque_and_skips_depth_writes_for_blend() {
-        assert!(WGSL.contains("if input.mode==2u{discard;}"));
-        assert!(WGSL.contains("if input.mode!=2u{discard;}"));
-        assert!(WGSL.contains("input.mode==1u && rgba.a<0.5"));
+        assert!(WGSL.contains("(input.mode & 3u)==2u"));
+        assert!(WGSL.contains("(input.mode & 3u)!=2u"));
+        assert!(WGSL.contains("rgba.a<threshold"));
+        assert!(WGSL.contains("vec4<f32>(rgba.rgb,1.0)"));
+        assert!(WGSL.contains("@builtin(front_facing) front:bool"));
         assert!(WGSL.contains("vs_composite"));
         assert!(WGSL.contains("rgba.rgb*rgba.a"));
         assert!(WGSL.contains("texture_2d_array<f32>"));

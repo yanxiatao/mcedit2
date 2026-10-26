@@ -356,7 +356,7 @@ pub(crate) fn build_cancellable(
                             depth: 0.0,
                             rgba: tri.tint,
                             uv: tri.uv[index],
-                            mode: tri.alpha as u32,
+                            mode: tri.mode,
                             xyz: xyz[index],
                             world_mode: 1,
                             atlas_page: tri.page,

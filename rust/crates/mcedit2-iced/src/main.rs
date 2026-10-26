@@ -15,6 +15,7 @@ mod repeating_uv;
 mod special_obj;
 mod special_gltf;
 mod special_mtl;
+mod material_mode;
 mod static_triangle_uv;
 mod resource_ids;
 mod slice_canvas;
