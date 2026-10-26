@@ -688,6 +688,14 @@ impl App {
             show_textures: self.show_textures,
         }
     }
+    /// Keep a previously published view visible while a replacement snapshot
+    /// for the same world/dimension is being read. Never carry it into a
+    /// different world, even while a new indexing job is pending.
+    fn visible_scene_is_current(&self) -> bool {
+        self.surface
+            .as_ref()
+            .is_some_and(|(wi, di, _)| self.current_key() == Some((*wi, *di)))
+    }
     fn invalidate_near(&mut self) {
         self.near_nonce = self.near_nonce.wrapping_add(1);
         self.near_job = None;
@@ -857,7 +865,12 @@ impl App {
         if !exposed_volume {
             self.surface_cut_top = None;
         }
-        self.surface = None;
+        // Do not expose a blank viewport just because the next near-field
+        // read has started. The previous immutable snapshot stays visible
+        // until near_loaded publishes a complete successful replacement.
+        if !self.visible_scene_is_current() {
+            self.surface = None;
+        }
         self.selected_surface = None;
         self.selected_surface_face = None;
         self.surface_hover = None;
@@ -2009,8 +2022,21 @@ impl App {
         }
     }
 }
+/// A read-only near-view publication must not evict the completed spectator
+/// mesh. maintain_spectator_stream will snapshot it with its original origin
+/// before swapping in the refreshed combined source.
+fn must_reset_spectator_mesh(
+    before: &RenderSignature,
+    after: &RenderSignature,
+    read_only_near_publish: bool,
+) -> bool {
+    before.geometry != after.geometry
+        || before.show_textures != after.show_textures
+        || (before.source != after.source && !read_only_near_publish)
+}
 fn update(app: &mut App, message: Message) -> iced::Task<Message> {
     let before = app.render_signature();
+    let read_only_near_publish = matches!(&message, Message::NearLoaded(..));
     // Source mutations or stale-view navigation revoke all outstanding
     // near-field worker snapshots. Rendering-only camera/texture events do
     // not revoke an otherwise valid in-flight read.
@@ -2069,11 +2095,9 @@ fn update(app: &mut App, message: Message) -> iced::Task<Message> {
         app.spectator_stream_near = None;
     }
     let task = update_impl(app, message);
-    if before != app.render_signature() {
-        if before.source != app.render_signature().source
-            || before.geometry != app.render_signature().geometry
-            || before.show_textures != app.show_textures
-        {
+    let after = app.render_signature();
+    if before != after {
+        if must_reset_spectator_mesh(&before, &after, read_only_near_publish) {
             app.spectator_cache = std::sync::Arc::new(std::sync::Mutex::new(None));
             app.spectator_pending = std::sync::Arc::new(std::sync::Mutex::new(false));
             app.spectator_fallback = None;
@@ -2352,7 +2376,8 @@ fn update_impl(app: &mut App, message: Message) -> iced::Task<Message> {
         }
         Message::SurfaceArea(value) => {
             app.surface_area = value;
-            app.surface = None;
+            // Editing a source-window coordinate is not a published scene
+            // change. Keep the last valid picture until Reload/Inspect.
             app.far = None;
             app.surface_cut_top = None;
         }
@@ -4683,6 +4708,40 @@ fn main() -> iced::Result {
 mod tests {
     use super::{AdvancedFile, AdvancedSection};
     use crate::language::Language;
+    #[test]
+    fn near_refresh_retains_completed_view_and_rejects_other_worlds() {
+        use std::sync::Arc;
+        let mut app = super::App::default();
+        app.current = Some(0);
+        let source = Arc::new(mcedit2_world::surface::SurfaceView {
+            x: 16, z: -16, y_min: 0, y_max: 47, width: 16, depth: 16,
+            voxels: vec![], source_tiles: vec![], source_chunks: 0,
+            missing_columns: 0,
+        });
+        app.surface = Some((0, 0, Arc::clone(&source)));
+        assert!(app.visible_scene_is_current());
+        // An attempted reload can fail without discarding the last valid view.
+        app.inspect_surface(true);
+        assert!(app.surface.as_ref().is_some_and(|(_, _, view)| Arc::ptr_eq(view, &source)));
+        app.current = Some(1);
+        assert!(!app.visible_scene_is_current());
+        app.inspect_surface(true);
+        assert!(app.surface.is_none());
+    }
+    #[test]
+    fn read_only_refresh_keeps_spectator_mesh_until_new_source_is_ready() {
+        let mut before = super::App::default().render_signature();
+        before.source = Some((0, 0, 3, 10, 5, 2));
+        let mut after = super::App::default().render_signature();
+        after.source = Some((0, 0, 4, 12, 7, 3));
+        assert!(!super::must_reset_spectator_mesh(&before, &after, true));
+        assert!(super::must_reset_spectator_mesh(&before, &after, false));
+        after.geometry = Some((21, 22));
+        assert!(super::must_reset_spectator_mesh(&before, &after, true));
+        after.geometry = before.geometry;
+        after.show_textures = !before.show_textures;
+        assert!(super::must_reset_spectator_mesh(&before, &after, true));
+    }
     #[test]
     fn advanced_tools_tabs_are_localized_and_selection_specific() {
         assert_eq!(AdvancedSection::Viewer.label(Language::Chinese, AdvancedSection::Viewer), "● 3D 观察与材质");
