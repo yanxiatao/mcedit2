@@ -327,3 +327,38 @@ This is intentionally **fullbright**, so glTF metallic/roughness,
 normal maps, BRDF reflections and physical light transport do not alter
 the voxel display. These properties remain readable source metadata, not
 a claim of full PBR appearance. No Mod-specific renderer is added here.
+
+## Automatic glTF base-color sprite binding and source-verified LOD reuse
+
+Static glTF 2.0 / GLB materials with ordinary
+`pbrMetallicRoughness.baseColorTexture.index` now resolve their source
+`textures[index].source -> images[source].uri` references without Java-side
+manual `textures` entries. Unnamed materials get stable index-based source
+identities instead of all collapsing to `particle`. Image URIs resolve
+relative to their originating glTF path **inside the same resource-pack
+namespace**, with bounded canonical `..` handling and strict rejection of
+network/absolute/escaping paths. Textures in `assets/<ns>/models/**.png`
+receive noncolliding `<ns>:__gltf/...` atlas keys; references into the
+ordinary `textures/` tree reuse existing Java texture IDs. Explicit
+resource-model material mappings remain higher priority. This first
+automatic image path handles pack-local external PNG URIs; embedded
+`image.bufferView`, base64 image data URIs, alternate texture-coordinate
+sets and glTF sampler filters are **not yet** bound automatically.
+
+For camera-driven terrain streaming, a cached higher-fidelity original
+source chunk now supersedes its coarser sampled visual patch whenever the
+complete exact representation fits the current mesh budget. Conversely,
+while an exact request is still reading, a cached lower-fidelity source
+patch remains visible as a temporary bridge. Each source chunk contributes
+only one chosen patch to a rendered frame, and patches overlapping the
+exact near-source viewport remain excluded. This does not synthesize
+missing source chunks, add any editable LOD data or imply full exact
+64-chunk-radius rendering. The far horizon remains a sampled,
+non-editable visualization; source chunk completeness is recorded.
+
+Regression coverage includes safe glTF image URI traversal, material
+name collision avoidance, pack-to-atlas glTF image auto-binding with
+two distinct static scene nodes and spectator vertices, and source
+chunk LOD transition preferences/voxel budgets. The latest GitHub
+workspace still requires dedicated full-head Cargo and real-save GPU
+visual testing before declaring rendering equivalence.

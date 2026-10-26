@@ -295,11 +295,13 @@ fn parse_document(doc: Value, buffers: &[Vec<u8>]) -> Result<Vec<Triangle>, Stri
                 return Err("glTF triangle limit or incomplete primitive".into());
             }
             let material_id = prim.get("material").map(number).transpose()?;
-            let material = material_id
-                .and_then(|i| doc.get("materials")?.as_array()?.get(i))
-                .and_then(|v| v.get("name"))
-                .and_then(Value::as_str)
-                .unwrap_or("particle");
+            let material = if let Some(i) = material_id {
+                let entry = item(field(&doc, "materials")?, i)?;
+                let specified = entry.get("name").and_then(Value::as_str);
+                specified.map(str::to_owned).unwrap_or_else(|| format!("__gltf_material_{i}"))
+            } else {
+                "particle".to_owned()
+            };
             if material.len() > 160
                 || !material
                     .bytes()
@@ -327,7 +329,7 @@ fn parse_document(doc: Value, buffers: &[Vec<u8>]) -> Result<Vec<Triangle>, Stri
                 out.push(Triangle {
                     xyz,
                     uv,
-                    material: material.to_string(),
+                    material: material.clone(),
                 });
             }
         }
@@ -408,6 +410,10 @@ pub(crate) struct StaticPbrMaterial {
     pub alpha_mode: String,
     pub alpha_cutoff: f32,
     pub double_sided: bool,
+    /// URI from glTF images/textures/baseColorTexture; resolved only inside
+    /// the originating pack namespace, not through arbitrary OS paths.
+    pub base_color_uri: Option<String>,
+    pub base_color_texture: Option<String>,
 }
 /// Read material factors from ordinary glTF JSON or the JSON chunk of GLB.
 /// These are data only; metallic-roughness lighting is not inferred from
@@ -432,8 +438,9 @@ pub(crate) fn material_factors(source:&[u8])
         if n.is_finite() && (0.0..=1.0).contains(&n){Ok(n)}
         else{Err("glTF PBR factor out of range".into())}
     };
-    for material in materials{
-        let name=material.get("name").and_then(Value::as_str).unwrap_or("particle");
+    for (index,material) in materials.iter().enumerate(){
+        let generated = format!("__gltf_material_{index}");
+        let name=material.get("name").and_then(Value::as_str).unwrap_or(&generated);
         if name.len()>160||!name.bytes().all(|b|b.is_ascii_alphanumeric()||b"_.-".contains(&b)){
             return Err("Invalid glTF material identifier".into())
         }
@@ -459,6 +466,22 @@ pub(crate) fn material_factors(source:&[u8])
             return Err("Invalid glTF alphaMode".into())
         }
         let cutoff=bounded(material.get("alphaCutoff"),0.5)?;
+        let base_color_uri = if let Some(color_texture) = pbr.get("baseColorTexture") {
+            if color_texture.get("texCoord").is_some_and(|v| v.as_u64() != Some(0)) {
+                return Err("Only TEXCOORD_0 is currently supported".into());
+            }
+            let textures = field(&doc,"textures")?.as_array().ok_or("Missing glTF textures")?;
+            let index = number(field(color_texture,"index")?)?;
+            let descriptor = textures.get(index).ok_or("glTF texture index out of range")?;
+            let image_index = number(field(descriptor,"source")?)?;
+            let images = field(&doc,"images")?.as_array().ok_or("Missing glTF images")?;
+            let image = images.get(image_index).ok_or("glTF image index out of range")?;
+            // Embedded bufferView images are not automatically uploaded yet;
+            // preserve geometry and explicit Java-side texture overrides.
+            image.get("uri").and_then(Value::as_str).map(str::to_owned)
+        } else {
+            None
+        };
         out.insert(name.to_owned(),StaticPbrMaterial{
             base_color:base,
             metallic:bounded(pbr.get("metallicFactor"),1.)?,
@@ -467,13 +490,88 @@ pub(crate) fn material_factors(source:&[u8])
             alpha_mode:alpha_mode.into(),
             alpha_cutoff:cutoff,
             double_sided:material.get("doubleSided").and_then(Value::as_bool).unwrap_or(false),
+            base_color_uri,
+            base_color_texture: None,
         });
     }
     Ok(out)
 }
+/// Normalize a URI against its exact resource-pack glTF location. Relative
+/// `..` is legal within the same assets/<namespace> tree but can never
+/// escape that namespace. No HTTP, OS absolute path, query or percent escapes.
+/// Returns the canonical atlas texture ID matching TextureBank::texture_id.
+pub(crate) fn pack_image_id(source: &str, uri: &str) -> Option<String> {
+    if uri.is_empty() || uri.len() > 200 || !uri.ends_with(".png")
+        || uri.contains('\\') || uri.contains(':') || uri.contains('?')
+        || uri.contains('#') || uri.contains('%') || uri.starts_with('/')
+    {
+        return None;
+    }
+    let source_parts: Vec<_> = source.split('/').collect();
+    if source_parts.len() < 5 || source_parts[0] != "assets" || source_parts[2] != "models" {
+        return None;
+    }
+    let namespace = source_parts[1];
+    if !crate::resource_ids::namespace(namespace) { return None; }
+    let mut parts: Vec<String> = source_parts[..source_parts.len()-1]
+        .iter().map(|component| (*component).to_owned()).collect();
+    for component in uri.split('/') {
+        match component {
+            "" | "." => return None,
+            ".." if parts.len() > 2 => { parts.pop(); },
+            ".." => return None,
+            segment if segment.bytes().all(|b| b.is_ascii_lowercase()
+                || b.is_ascii_digit() || b"._-".contains(&b)) => parts.push(segment.to_owned()),
+            _ => return None,
+        }
+    }
+    if parts.len() < 4 || parts[0] != "assets" || parts[1] != namespace { return None; }
+    let id = parts[3..].join("/");
+    let id = id.strip_suffix(".png")?;
+    match parts[2].as_str() {
+        "textures" => {
+            if !crate::resource_ids::path(id, 160) { return None; }
+            let name = id.strip_prefix("block/")
+                .or_else(|| id.strip_prefix("blocks/")).unwrap_or(id);
+            Some(format!("{namespace}:{name}"))
+        },
+        "models" => {
+            if !crate::resource_ids::path(id, 154) { return None; }
+            Some(format!("{namespace}:__gltf/{id}"))
+        },
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn gltf_base_color_texture_is_resolved_from_nested_images_and_names() {
+        let data = br#"{"materials":[
+           {"pbrMetallicRoughness":{"baseColorTexture":{"index":1}}},
+           {"name":"steel","pbrMetallicRoughness":{"baseColorTexture":{"index":0}}}
+        ],"textures":[{"source":0},{"source":1}],
+        "images":[{"uri":"../../textures/block/steel.png"},{"uri":"panel.png"}]}"#;
+        let result = material_factors(data).unwrap();
+        assert_eq!(result["__gltf_material_0"].base_color_uri.as_deref(),Some("panel.png"));
+        assert_eq!(result["steel"].base_color_uri.as_deref(),Some("../../textures/block/steel.png"));
+        assert_eq!(pack_image_id("assets/example/models/block/test.gltf", "panel.png"),
+            Some("example:__gltf/block/panel".into()));
+        assert_eq!(pack_image_id("assets/example/models/block/test.gltf", "../../textures/block/steel.png"),
+            Some("example:steel".into()));
+    }
+    #[test]
+    fn gltf_image_paths_cannot_escape_namespace_or_load_remote_content() {
+        let source = "assets/safe/models/block/machine.gltf";
+        for uri in ["../../../other/cross.png","../../../../escape.png",
+                    "https://example.org/img.png","/etc/a.png","foo//x.png",
+                    "foo\\bad.png","image.jpg","%2e%2e/out.png"] {
+            assert!(pack_image_id(source,uri).is_none(),"{uri}");
+        }
+        assert_eq!(pack_image_id(source,"../panel.png"),Some("safe:__gltf/panel".into()));
+    }
+
     #[test]
     fn hierarchical_scene_uses_parent_child_transforms_and_filters_unreachable(){
         let d=serde_json::json!({"asset":{"version":"2.0"},"meshes":[{}],

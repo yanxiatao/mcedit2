@@ -632,3 +632,81 @@ fn fullbright_gltf_alpha_rules_flow_from_pack_material_into_gpu_mesh_mode() {
         }
     }
 }
+
+#[test]
+fn gltf_base_color_texture_autobinds_and_spectator_instances_are_distinct() {
+    use mcedit2_world::sections::State;
+    use mcedit2_world::surface::{SurfaceView, SurfaceVoxel, VoxelMaterial, ALL_FACES};
+    use std::sync::{Arc, Mutex};
+    let fixture = Fixture::new();
+    let root = fixture.path("gltf_auto_texture");
+    let mut binary = Vec::new();
+    for value in [0f32, 0., 0., 1., 0., 0., 0., 1., 0.,
+                  0., 0., 1., 0., 0., 1.] {
+        binary.extend_from_slice(&value.to_le_bytes());
+    }
+    let doc = serde_json::json!({
+        "asset":{"version":"2.0"},
+        "buffers":[{"uri":"geometry.bin","byteLength":60}],
+        "bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36},
+                       {"buffer":0,"byteOffset":36,"byteLength":24}],
+        "accessors":[
+           {"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"},
+           {"bufferView":1,"componentType":5126,"count":3,"type":"VEC2"}],
+        // Real glTF/GLB material image references, no Java-side 'textures'.
+        "images":[{"uri":"panel.png"}],
+        "textures":[{"source":0}],
+        "materials":[{"pbrMetallicRoughness":{
+            "baseColorTexture":{"index":0},
+            "baseColorFactor":[0.75,0.5,0.25,1.0]
+        }}],
+        "meshes":[{"primitives":[{"attributes":{
+            "POSITION":0,"TEXCOORD_0":1
+        },"material":0}]}],
+        "nodes":[{"mesh":0,"translation":[0.,0.,0.]},
+                 {"mesh":0,"translation":[0.5,0.,0.]}],
+        "scenes":[{"nodes":[0,1]}],"scene":0
+    });
+    put(&root, "assets/example/models/block/assembly.gltf",
+        &serde_json::to_vec(&doc).unwrap());
+    put(&root, "assets/example/models/block/geometry.bin", &binary);
+    put(&root, "assets/example/models/block/panel.png",
+        &png(&[20,130,220,255], 1));
+    put(&root, "assets/example/blockstates/assembly.json",
+        br#"{"variants":{"":{"model":"example:block/assembly"}}}"#);
+    put(&root, "assets/example/models/block/assembly.json",
+        br#"{"loader":"mcedit2:gltf","model":"example:models/block/assembly.gltf"}"#);
+    let bank = Arc::new(TextureBank::open(&root).unwrap());
+    let state = State{name:"example:assembly".into(),properties:vec![]};
+    assert_eq!(color(&bank, "example:__gltf/block/panel"), [20,130,220,255]);
+    let selected = bank.models.obj_at(&state,(0,70,0)).unwrap();
+    assert_eq!(selected.len(),2);
+    assert!(selected.iter().all(|t|t.texture=="example:__gltf/block/panel"));
+    assert_ne!(selected[0].xyz[0],selected[1].xyz[0]);
+    let surfaces = bank.static_obj_at(&state,(0,70,0)).unwrap();
+    assert_eq!(surfaces.len(),2);
+    let page = bank.atlas().unwrap().entries["example:__gltf/block/panel"].page;
+    assert!(surfaces.iter().all(|tri|tri.page==page));
+    let scene=crate::spectator::SpectatorScene {
+        surface:Arc::new(SurfaceView {
+            x:0,z:0,y_min:64,y_max:111,width:16,depth:16,
+            voxels:vec![SurfaceVoxel {
+                x:0,y:70,z:0,span:1,state,biome:None,
+                staged:false,original_block_entity:false,
+                faces:ALL_FACES,kind:VoxelMaterial::Solid,
+            }],
+            source_tiles:vec![],source_chunks:1,missing_columns:0,
+        }),
+        texture_bank:Some(bank),show_textures:true,
+        camera:crate::spectator::Camera::default(),
+        quality:crate::gpu_mesh::Quality::Balanced,
+        cache:Arc::new(Mutex::new(None)),pending:Arc::new(Mutex::new(false)),
+        chunk_cache:Arc::new(Mutex::new(
+            crate::chunk_mesh_cache::ChunkMeshCache::default()
+        )),
+    };
+    let vertices=crate::spectator::build(&scene);
+    assert_eq!(vertices.len(),12);
+    assert!(vertices.iter().all(|v|v.atlas_page==page));
+    assert!(vertices.iter().all(|v|v.uv.iter().all(|x|x.is_finite())));
+}

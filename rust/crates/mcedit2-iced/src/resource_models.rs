@@ -822,7 +822,15 @@ impl ModelBank {
             match resolved{
                 Ok(mesh)=>{
                     match special_gltf::material_factors(bytes){
-                        Ok(mat)=>{self.gltf_materials.insert(id.clone(),mat);}
+                        Ok(mut mat)=>{
+                            for value in mat.values_mut() {
+                                if let Some(uri) = value.base_color_uri.as_deref() {
+                                    value.base_color_texture =
+                                        special_gltf::pack_image_id(source, uri);
+                                }
+                            }
+                            self.gltf_materials.insert(id.clone(),mat);
+                        }
                         Err(e)=>{errors.push(format!("{source}: {e}"));continue;}
                     }
                     self.gltf_meshes.insert(id.clone(),mesh);
@@ -916,6 +924,7 @@ impl ModelBank {
                     .and_then(|m| m.get(&tri.material))
                     .and_then(Value::as_str)
                     .or_else(|| mtl.and_then(|m| m.map_kd.as_deref()))
+                    .or_else(|| pbr.and_then(|m| m.base_color_texture.as_deref()))
                     .or_else(|| {
                         mappings
                             .and_then(|m| m.get("particle"))

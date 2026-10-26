@@ -166,6 +166,25 @@ fn prioritized_pending(
     pending.append(&mut distant);
     pending
 }
+/// Pick the best original source resolution already in the cache for
+/// this chunk, never mixing exact and sampled samples from the same chunk.
+/// When a spectator flies toward terrain, a cached coarse patch remains
+/// visible until its exact read completes; on flying away, retain a cached
+/// exact patch rather than degrading to a new sampled approximation.
+/// All candidates refer to the same source chunk, not synthetic neighbors.
+fn best_cached_resolution(
+    req: FarChunkRequest,
+    available: impl Fn(Key) -> Option<usize>,
+    remaining_voxels: usize,
+) -> Option<Key> {
+    for span in [1_u8, 4, 8, 16] {
+        let id = (req.cx, req.cz, span);
+        if available(id).is_some_and(|len| len <= remaining_voxels) {
+            return Some(id);
+        }
+    }
+    None
+}
 /// A single background read may still be in the OS when the spectator flies
 /// elsewhere. Inspect cancellation between *original* chunk reads so stale
 /// jobs cannot keep scanning hundreds of now-irrelevant source chunks.
@@ -561,17 +580,21 @@ impl Stream {
             if overlaps(*req) {
                 continue;
             }
-            let Some(patch) = self.cache.get(&key(*req)) else {
-                continue;
-            };
             let limit = if req.span == 1 {
                 near_limit
             } else {
                 VISIBLE_VOXELS
             };
-            if result.voxels.len().saturating_add(patch.voxels.len()) > limit {
+            let Some(best) = best_cached_resolution(
+                *req,
+                |id| self.cache.get(&id).map(|patch| patch.voxels.len()),
+                limit.saturating_sub(result.voxels.len()),
+            ) else {
                 continue;
-            }
+            };
+            let Some(patch) = self.cache.get(&best) else {
+                continue;
+            };
             result.voxels.extend(patch.voxels.iter().cloned());
             result.source_tiles.push(patch.tile.clone());
             result.source_chunks += usize::from(patch.tile.source_present);
@@ -594,6 +617,40 @@ impl Drop for Stream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn exact_cached_chunk_wins_over_requested_coarse_lod() {
+        let req = FarChunkRequest { cx: 29, cz: -7, span: 16 };
+        let mut available = BTreeMap::new();
+        available.insert((29, -7, 16), 4_usize);
+        available.insert((29, -7, 4), 40);
+        available.insert((29, -7, 1), 150);
+        let select = |remaining| best_cached_resolution(
+            req, |key| available.get(&key).copied(), remaining,
+        );
+        assert_eq!(select(200), Some((29, -7, 1)));
+        // The best visible patch must fit the current vertex budget.
+        assert_eq!(select(80), Some((29, -7, 4)));
+        assert_eq!(select(8), Some((29, -7, 16)));
+        assert_eq!(select(2), None);
+    }
+    #[test]
+    fn cached_sample_is_only_a_visual_bridge_until_exact_chunk_arrives() {
+        let req = FarChunkRequest { cx: -12, cz: 33, span: 1 };
+        let mut available = BTreeMap::from([
+            ((-12, 33, 16), 5_usize),
+            ((-12, 33, 8), 15_usize),
+        ]);
+        let select = |cache: &BTreeMap<Key, usize>| best_cached_resolution(
+            req, |key| cache.get(&key).copied(), 100,
+        );
+        assert_eq!(select(&available), Some((-12, 33, 8)));
+        available.insert((-12, 33, 1), 80);
+        assert_eq!(select(&available), Some((-12, 33, 1)));
+        // Source chunk identity is exact, including negative coordinates.
+        assert_eq!(best_cached_resolution(req, |key| {
+            ((key.0, key.1) == (33, -12)).then_some(1)
+        }, 100), None);
+    }
     #[test]
     fn first_batch_previews_horizon_then_restores_nearby_detail() {
         let requests = plan([0.0, 80.0, 0.0], 16).unwrap();

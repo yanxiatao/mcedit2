@@ -648,9 +648,10 @@ pub(crate) struct TextureBank {
 /// collide. The atlas loader still applies its existing memory budget.
 fn texture_id(path: &str) -> Option<String> {
     let parts: Vec<_> = path.split('/').collect();
-    if parts.len() < 5
+    if parts.len() < 4
         || parts[0] != "assets"
-        || parts[2] != "textures"
+        || !matches!(parts[2], "textures" | "models")
+        || (parts[2] == "textures" && parts.len() < 5)
         || !path.ends_with(".png")
     {
         return None;
@@ -663,6 +664,11 @@ fn texture_id(path: &str) -> Option<String> {
     let name = relative.strip_suffix(".png")?;
     if !resource_ids::path(name, 160) {
         return None;
+    }
+    if parts[2] == "models" {
+        // glTF image URIs commonly live beside the .gltf itself, not in
+        // Minecraft's textures/ folder. Give them a collision-free atlas ID.
+        return Some(format!("{namespace}:__gltf/{name}"));
     }
     // Climate tables have an independent 256x256 source decoder.
     if namespace == "minecraft" && matches!(name, "colormap/grass" | "colormap/foliage") {
@@ -2407,6 +2413,22 @@ mod tests {
         assert_eq!(material_texture_id("model:example:block/widget","item/opacity"),
             Some("example:item/opacity".into()));
         assert_eq!(material_texture_id("model:example:block/widget","../secret"),None);
+    }
+    #[test]
+    fn gltf_images_in_model_root_have_stable_noncolliding_atlas_id() {
+        assert_eq!(
+            texture_id("assets/create.addon/models/panel.png"),
+            Some("create.addon:__gltf/panel".into())
+        );
+        assert_eq!(
+            texture_id("assets/create.addon/models/block/panel.png"),
+            Some("create.addon:__gltf/block/panel".into())
+        );
+        assert_eq!(
+            texture_id("assets/create.addon/textures/block/panel.png"),
+            Some("create.addon:panel".into())
+        );
+        assert_eq!(texture_id("assets/create.addon/textures/panel.png"), None);
     }
     #[test]
     fn all_model_texture_families_are_namespaced_and_collision_free() {
