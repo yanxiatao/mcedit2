@@ -19,7 +19,6 @@ use std::{
 const NEAR: f32 = 0.05;
 const FAR: f32 = 8192.0;
 const FOV_Y: f32 = 75.0;
-const MAX_SPECTATOR_FACES: usize = 150_000;
 const FACES: [Face; 6] = [
     Face::Top,
     Face::Bottom,
@@ -246,8 +245,6 @@ pub(crate) fn build_cancellable(
         .unwrap_or([[0.5, 0.5]; 4]);
     let bank = view.texture_bank.as_deref();
     let distant = models::DistantElevation::new(&view.surface);
-    let mut rendered_walls = 0usize;
-    const MAX_LOD_WALL_FACES: usize = MAX_SPECTATOR_FACES / 8;
     let liquid_cells: HashMap<(i32, i32, i32), &mcedit2_world::sections::State> = view
         .surface
         .voxels
@@ -262,17 +259,18 @@ pub(crate) fn build_cancellable(
         (ModelCacheKey<'_>, u8, usize),
         Option<([[f32; 2]; 4], AlphaMode, u32)>,
     > = HashMap::new();
-    // A dense near-field must not exhaust the mesh before distant LOD.
-    let has_far = view.surface.voxels.iter().any(|v| v.span > 1);
-    let exact_limit = if has_far {
-        MAX_SPECTATOR_FACES * 3 / 4
-    } else {
-        MAX_SPECTATOR_FACES
-    };
+    // Include every original visible face; never budget away valid chunks.
+    // The per-chunk cache is invalidated only by source or style changes.
     let origin = [view.surface.x, view.surface.y_min, view.surface.z];
     let style = crate::chunk_mesh_cache::ChunkMeshCache::style(
         view.texture_bank.as_ref(), view.show_textures, view.quality,
     );
+    let visible_chunks = view.surface.voxels.iter()
+        .filter(|voxel| voxel.span == 1)
+        .map(|voxel| (voxel.x.div_euclid(16), voxel.z.div_euclid(16)))
+        .collect::<std::collections::HashSet<_>>();
+    view.chunk_cache.lock().unwrap_or_else(|e| e.into_inner())
+        .retain_visible(&visible_chunks);
     // Preserve source draw order and layered LOD visibility. Contiguous exact
     // samples of an original chunk can reuse their own complete vertex block.
     let mut runs: Vec<(Option<(i32, i32)>, Vec<&SurfaceVoxel>)> = Vec::new();
@@ -299,30 +297,16 @@ pub(crate) fn build_cancellable(
             let cached = view.chunk_cache.lock().unwrap_or_else(|e| e.into_inner())
                 .get(style, id, &run);
             if let Some((vertices, from_origin)) = cached {
-                if out.len().saturating_add(vertices.len()) <= exact_limit * 6 {
-                    crate::chunk_mesh_cache::ChunkMeshCache::append_rebased(
-                        &mut out, &vertices, from_origin, origin,
-                    );
-                    continue;
-                }
+                crate::chunk_mesh_cache::ChunkMeshCache::append_rebased(
+                    &mut out, &vertices, from_origin, origin,
+                );
+                continue;
             }
         }
         for voxel in &run {
             if cancelled() { return None; }
-        let limit = if voxel.span == 1 {
-            exact_limit
-        } else {
-            MAX_SPECTATOR_FACES
-        };
-        if out.len() / 6 >= limit {
-            if voxel.span == 1 {
-                continue;
-            }
-            break;
-        }
-        // Build only witnessed neighboring height transitions. Reserve
-        // most of the mesh budget for original sampled horizon top faces.
-        let wall_parts = if voxel.span > 1 && rendered_walls < MAX_LOD_WALL_FACES {
+        // Only witnessed height transitions, without a global face cap.
+        let wall_parts = if voxel.span > 1 {
             distant.walls(voxel)
         } else {
             Vec::new()
@@ -342,9 +326,6 @@ pub(crate) fn build_cancellable(
         if voxel.span == 1 && view.show_textures {
             if let Some(triangles) = bank.and_then(|b| b.static_obj_at(&voxel.state, pos)) {
                 for tri in triangles {
-                    if out.len() / 6 >= limit {
-                        break;
-                    }
                     let xyz = tri.xyz.map(|point| {
                         [
                             (voxel.x as i64 - origin[0] as i64) as f32 + point[0],
@@ -410,13 +391,7 @@ pub(crate) fn build_cancellable(
                 .filter(|f| voxel.span == 1 || *f == Face::Top)
                 .map(|f| (f, element, false))
                 .chain(wall_parts.iter().map(|(f, part)| (*f, part, true)));
-            for (face, element, is_wall) in face_parts {
-                if out.len() / 6 >= limit {
-                    break;
-                }
-                if is_wall && rendered_walls >= MAX_LOD_WALL_FACES {
-                    continue;
-                }
+            for (face, element, _is_wall) in face_parts {
                 if voxel.kind == VoxelMaterial::Liquid
                     && voxel.span == 1
                     && voxel.faces & face.flag() == 0
@@ -508,13 +483,8 @@ pub(crate) fn build_cancellable(
                     if let Some((raw_uv, region)) = bank.and_then(|b| {
                         b.atlas_repeating_face_at(&voxel.state, face, index, sample)
                     }) {
-                        let remaining = limit.saturating_sub(out.len() / 6);
-                        let mut emitted = 0usize;
                         if !crate::repeating_uv::tiles(corners, raw_uv, &region, |xyz, tex| {
-                            if emitted < remaining {
-                                quad_vertices(&mut out, xyz, tex, shade, mode, page);
-                                emitted += 1;
-                            }
+                            quad_vertices(&mut out, xyz, tex, shade, mode, page);
                         }) {
                             quad_vertices(&mut out, corners, uv, shade, mode, page);
                         }
@@ -524,15 +494,12 @@ pub(crate) fn build_cancellable(
                 } else {
                     quad_vertices(&mut out, corners, uv, shade, mode, page);
                 }
-                if is_wall {
-                    rendered_walls += 1;
-                }
+
             }
         }
     }
         if let Some(id) = id {
-            // Never retain fragments truncated at the global face budget.
-            if out.len() / 6 < exact_limit && !cancelled() {
+            if !cancelled() {
                 view.chunk_cache.lock().unwrap_or_else(|e| e.into_inner())
                     .insert(style, id, &run, origin, out[before..].to_vec());
             }

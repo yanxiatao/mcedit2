@@ -64,6 +64,42 @@ This is an active rewrite, not complete MCEdit2 feature parity. Old Python sourc
 
 The latest code must be checked with the toolchain before a distributable build is described as verified. The previous Windows development ZIP does not automatically contain newer source changes.
 
+## Rendering architecture: Amulet reference and source-driven visibility
+
+The 3D renderer is being brought closer to the chunk lifecycle used by
+[Amulet Map Editor's chunk builder](https://github.com/Amulet-Team/Amulet-Map-Editor/blob/0.10/amulet_map_editor/api/opengl/mesh/level/chunk/chunk_builder.py)
+and [region merger](https://github.com/Amulet-Team/Amulet-Map-Editor/blob/0.10/amulet_map_editor/api/opengl/mesh/level/region.py).
+These are architectural references, not copied code or proof of parity.
+
+- No fixed global spectator face or visible-voxel count truncates readable
+  original source geometry. Requested source chunks are shown completely when
+  their mesh is available; no geometry is fabricated to fill absent chunks.
+- Exact chunk vertices are cached against exact source voxel values, model
+  style and source origin. A cache entry is retired when its chunk leaves the
+  current source snapshot (or its source/style changes), rather than after an
+  arbitrary fixed number of cached vertices or chunks.
+- Source stream snapshots coalesce: same-world chunk batches do not repeatedly
+  cancel the currently active geometry build, which prevented any completed
+  viewport from appearing when IO was faster than geometry creation.
+- Large meshes are segmented on complete six-vertex faces at the active
+  adapter's `max_buffer_size` and the draw API's index bounds. All segments
+  are uploaded and rendered; the segmentation is not a face-count budget.
+- Offscreen color/depth targets use `max_texture_dimension_2d` from the
+  active wgpu device, not a fixed 4096px threshold. A 128-chunk streaming
+  radius is now selectable, while the planner does not impose a hidden 64
+  chunk restriction.
+
+Resource decompression, image sizes and GPU texture-array limits still need
+validation against memory/device capabilities; these are not permission to
+discard successfully read world chunks. The existing mixed-resolution atlas
+memory guard is still present and may downsample high-resolution textures in
+large packs. Improving multi-array atlas scalability remains separate work.
+
+The above Rust tests are source-level regressions, not a verified Windows
+GPU result. A full local `cargo check --workspace`, `cargo test --workspace`,
+and a large authentic Modded-world visual comparison against Amulet are
+still required before describing renderer parity.
+
 ## Camera-facing full-ring streaming
 
 The native spectator still schedules **every** actual Java chunk inside the

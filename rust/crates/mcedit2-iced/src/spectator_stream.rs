@@ -21,10 +21,6 @@ use std::{
 };
 
 pub(crate) const DEFAULT_RADIUS: u16 = 32;
-pub(crate) const MAX_RADIUS: u16 = 64;
-const CACHE_LIMIT: usize = 18_000;
-const CACHE_VOXELS: usize = 96_000;
-const VISIBLE_VOXELS: usize = 96_000;
 const MAX_READ_BATCH: usize = 32;
 // Start by sampling one cheap distant ring before the costly nearby full
 // voxel scans. The next batches return to the exact ring, preserving detail.
@@ -55,8 +51,8 @@ fn stride(distance: i32) -> u8 {
 /// chosen circular/square ring is scheduled. Only its visual sampling level
 /// changes with distance; never insert synthetic blocks into unvisited holes.
 pub(crate) fn plan(location: [f64; 3], radius: u16) -> Result<Vec<FarChunkRequest>, String> {
-    if radius == 0 || radius > MAX_RADIUS {
-        return Err("Spectator streaming radius must be 1..64 chunks".into());
+    if radius == 0 {
+        return Err("Spectator streaming radius must be at least one chunk".into());
     }
     let (cx, cz) = center_chunk(location);
     let mut result = Vec::new();
@@ -166,8 +162,8 @@ fn prioritized_pending(
     pending.append(&mut distant);
     pending
 }
-/// Pick the best original source resolution already in the cache for
-/// this chunk, never mixing exact and sampled samples from the same chunk.
+/// Pick the best available original source resolution for this chunk.
+/// Completeness does not depend on a global visible-voxel quota.
 /// When a spectator flies toward terrain, a cached coarse patch remains
 /// visible until its exact read completes; on flying away, retain a cached
 /// exact patch rather than degrading to a new sampled approximation.
@@ -175,11 +171,10 @@ fn prioritized_pending(
 fn best_cached_resolution(
     req: FarChunkRequest,
     available: impl Fn(Key) -> Option<usize>,
-    remaining_voxels: usize,
 ) -> Option<Key> {
     for span in [1_u8, 4, 8, 16] {
         let id = (req.cx, req.cz, span);
-        if available(id).is_some_and(|len| len <= remaining_voxels) {
+        if available(id).is_some() {
             return Some(id);
         }
     }
@@ -190,38 +185,6 @@ fn best_cached_resolution(
 /// jobs cannot keep scanning hundreds of now-irrelevant source chunks.
 fn not_cancelled(flag: &AtomicBool) -> bool {
     !flag.load(Ordering::Acquire)
-}
-/// Cache trim performs one distance ordering per completed batch rather than
-/// rescanning every retained chunk for each individual eviction.
-fn evict_farthest(
-    cache: &mut BTreeMap<Key, Arc<FarChunkPatch>>,
-    cached_voxels: &mut usize,
-    center: (i32, i32),
-    max_entries: usize,
-    max_voxels: usize,
-) {
-    if cache.len() <= max_entries && *cached_voxels <= max_voxels {
-        return;
-    }
-    let mut candidates = cache.keys().copied().collect::<Vec<_>>();
-    candidates.sort_unstable_by_key(|&(cx, cz, span)| {
-        (
-            (i64::from(cx) - i64::from(center.0))
-                .abs()
-                .max((i64::from(cz) - i64::from(center.1)).abs()),
-            span,
-            cx,
-            cz,
-        )
-    });
-    for id in candidates.into_iter().rev() {
-        if cache.len() <= max_entries && *cached_voxels <= max_voxels {
-            break;
-        }
-        if let Some(patch) = cache.remove(&id) {
-            *cached_voxels = cached_voxels.saturating_sub(patch.voxels.len());
-        }
-    }
 }
 /// Reconcile exact block faces from independently loaded chunks using the
 /// same source-world occlusion predicate as intra-chunk reads. Only proven
@@ -524,23 +487,17 @@ impl Stream {
                 Ok(patch) => {
                     let id = key(req);
                     let n = patch.voxels.len();
-                    if n <= CACHE_VOXELS {
-                        self.cached_voxels += n;
-                        self.cache.insert(id, Arc::new(patch));
+                    // Do not drop valid source chunks because an arbitrary
+                    // fixed cache size was reached. The requested render
+                    // radius is already the ownership and eviction boundary.
+                    if let Some(previous) = self.cache.insert(id, Arc::new(patch)) {
+                        self.cached_voxels = self.cached_voxels.saturating_sub(previous.voxels.len());
                     }
+                    self.cached_voxels = self.cached_voxels.saturating_add(n);
                 }
                 Err(_) => self.errors += 1,
             }
         }
-        // Prune farthest source snapshots in one ordered pass. The cache
-        // is display-only and must never exceed its bounded voxel budget.
-        evict_farthest(
-            &mut self.cache,
-            &mut self.cached_voxels,
-            self.center,
-            CACHE_LIMIT,
-            CACHE_VOXELS,
-        );
         // Publish near-field updates promptly, but do not wait for 128
         // chunks before exposing the first distant tiles. A large batch
         // commonly contains the first visible horizon after an empty ring.
@@ -564,31 +521,13 @@ impl Stream {
                 && z < near.z as i64 + near.depth as i64
                 && z + 16 > near.z as i64
         };
-        // Source-aware budget: a dense exact ring must not use all visible
-        // geometry memory before there is room for verified distant samples.
-        // Keep complete patches (never truncate a real chunk midway).
-        let has_distant = self
-            .wanted
-            .iter()
-            .any(|r| r.span > 1 && self.cache.contains_key(&key(*r)));
-        let near_limit = if has_distant {
-            VISIBLE_VOXELS * 3 / 4
-        } else {
-            VISIBLE_VOXELS
-        };
         for req in &self.wanted {
             if overlaps(*req) {
                 continue;
             }
-            let limit = if req.span == 1 {
-                near_limit
-            } else {
-                VISIBLE_VOXELS
-            };
             let Some(best) = best_cached_resolution(
                 *req,
                 |id| self.cache.get(&id).map(|patch| patch.voxels.len()),
-                limit.saturating_sub(result.voxels.len()),
             ) else {
                 continue;
             };
@@ -625,14 +564,16 @@ mod tests {
         available.insert((29, -7, 16), 4_usize);
         available.insert((29, -7, 4), 40);
         available.insert((29, -7, 1), 150);
-        let select = |remaining| best_cached_resolution(
-            req, |key| available.get(&key).copied(), remaining,
-        );
-        assert_eq!(select(200), Some((29, -7, 1)));
-        // The best visible patch must fit the current vertex budget.
-        assert_eq!(select(80), Some((29, -7, 4)));
-        assert_eq!(select(8), Some((29, -7, 16)));
-        assert_eq!(select(2), None);
+        assert_eq!(best_cached_resolution(req, |key| available.get(&key).copied()),
+            Some((29, -7, 1)));
+        available.remove(&(29, -7, 1));
+        assert_eq!(best_cached_resolution(req, |key| available.get(&key).copied()),
+            Some((29, -7, 4)));
+        available.remove(&(29, -7, 4));
+        assert_eq!(best_cached_resolution(req, |key| available.get(&key).copied()),
+            Some((29, -7, 16)));
+        available.clear();
+        assert_eq!(best_cached_resolution(req, |key| available.get(&key).copied()), None);
     }
     #[test]
     fn cached_sample_is_only_a_visual_bridge_until_exact_chunk_arrives() {
@@ -642,7 +583,7 @@ mod tests {
             ((-12, 33, 8), 15_usize),
         ]);
         let select = |cache: &BTreeMap<Key, usize>| best_cached_resolution(
-            req, |key| cache.get(&key).copied(), 100,
+            req, |key| cache.get(&key).copied(),
         );
         assert_eq!(select(&available), Some((-12, 33, 8)));
         available.insert((-12, 33, 1), 80);
@@ -650,7 +591,7 @@ mod tests {
         // Source chunk identity is exact, including negative coordinates.
         assert_eq!(best_cached_resolution(req, |key| {
             ((key.0, key.1) == (33, -12)).then_some(1)
-        }, 100), None);
+        }), None);
     }
     #[test]
     fn first_batch_previews_horizon_then_restores_nearby_detail() {
@@ -719,30 +660,11 @@ mod tests {
         assert!(!not_cancelled(&worker));
     }
     #[test]
-    fn cache_eviction_is_bounded_and_keeps_nearer_chunk() {
-        use mcedit2_world::surface::SourceChunkTile;
-        let mut cache = BTreeMap::new();
-        let empty = |cx| {
-            Arc::new(FarChunkPatch {
-                tile: SourceChunkTile {
-                    chunk_x: cx,
-                    chunk_z: 0,
-                    source_present: true,
-                    known_columns: 0,
-                    unknown_columns: 0,
-                    exposed_voxels: 0,
-                },
-                voxels: Vec::new(),
-            })
-        };
-        cache.insert((0, 0, 4), empty(0));
-        cache.insert((10, 0, 4), empty(10));
-        cache.insert((30, 0, 4), empty(30));
-        let mut count = 0;
-        evict_farthest(&mut cache, &mut count, (0, 0), 2, 10);
-        assert_eq!(cache.len(), 2);
-        assert!(cache.contains_key(&(0, 0, 4)));
-        assert!(!cache.contains_key(&(30, 0, 4)));
+    fn cached_exact_source_is_never_discarded_due_to_its_voxel_count() {
+        let request = FarChunkRequest { cx: 30, cz: -19, span: 1 };
+        assert_eq!(best_cached_resolution(request, |key|
+            (key == (30, -19, 1)).then_some(usize::MAX)),
+            Some((30, -19, 1)));
     }
     #[test]
     fn exact_seams_cull_only_proven_full_opaque_neighbors() {

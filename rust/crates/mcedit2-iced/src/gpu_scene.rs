@@ -258,6 +258,9 @@ pub(crate) struct Pipeline {
     buffer: wgpu::Buffer,
     capacity: u64,
     count: u32,
+    /// Mesh buffers split only at the adapter's real max_buffer_size.
+    /// This replaces the previous fixed global face cap.
+    segments: Vec<(wgpu::Buffer, u32)>,
     /// Last *uploaded* vertex order, including transparency sorting. Retaining
     /// the Arc is cheap for ordinary source meshes and permits suffix writes
     /// instead of re-uploading unchanged exact chunks each stream update.
@@ -278,6 +281,13 @@ pub(crate) struct Pipeline {
     composite_bind_group: wgpu::BindGroup,
     camera_buffer: wgpu::Buffer,
     last_camera: Option<crate::spectator::CameraUniform>,
+}
+/// Respect the active adapter's maximum vertex buffer allocation. A scene
+/// can contain more geometry than a single device buffer can hold; split at
+/// complete quads (six vertices) without dropping faces or changing order.
+fn gpu_segment_vertices(max_buffer_size: u64) -> usize {
+    let stride = std::mem::size_of::<Vertex>() as u64;
+    ((max_buffer_size / stride).min(u32::MAX as u64) / 6 * 6) as usize
 }
 /// Determine whether a redraw is needed and the first vertex whose bytes
 /// must be uploaded. Only a common prefix may safely stay on an existing
@@ -401,9 +411,8 @@ fn make_binding(
 }
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
-/// Keep render targets within guaranteed adapter texture dimensions.
-/// These are display-only buffers; never inferred source world content.
-const MAX_OFFSCREEN_EDGE: u32 = 4096;
+/// Render targets are limited by the actual wgpu adapter, not an arbitrary
+/// 4096px cap that silently reduces viewport resolution on high-DPI displays.
 fn make_offscreen_color(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some("MCEdit2 offscreen voxel color"),
@@ -436,10 +445,11 @@ fn make_offscreen_depth(device: &wgpu::Device, width: u32, height: u32) -> wgpu:
         view_formats: &[],
     })
 }
-fn target_dimensions(bounds: &Rectangle) -> (u32, u32) {
+fn target_dimensions(bounds: &Rectangle, device_limit: u32) -> (u32, u32) {
+    let limit = device_limit.max(1);
     (
-        (bounds.width.ceil().max(1.0) as u32).min(MAX_OFFSCREEN_EDGE),
-        (bounds.height.ceil().max(1.0) as u32).min(MAX_OFFSCREEN_EDGE),
+        (bounds.width.ceil().max(1.0) as u32).min(limit),
+        (bounds.height.ceil().max(1.0) as u32).min(limit),
     )
 }
 fn scene_pipeline(
@@ -655,6 +665,7 @@ impl shader::Pipeline for Pipeline {
             buffer,
             capacity,
             count: 0,
+            segments: Vec::new(),
             last_uploaded_vertices: None,
             last_source_mesh: None,
             atlas: None,
@@ -710,43 +721,82 @@ impl shader::Primitive for Primitive {
         } else {
             Some(Arc::clone(&self.vertices))
         };
-        let needed = (self.vertices.len() * std::mem::size_of::<Vertex>()) as u64;
-        let resized_mesh = needed > pipeline.capacity;
-        if resized_mesh {
-            pipeline.capacity = needed.next_power_of_two();
-            pipeline.buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("MCEdit2 resized original source GPU mesh"),
-                size: pipeline.capacity,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-        }
-        let (changed_mesh, first_upload) = if unchanged_scene && !resized_mesh {
-            (false, None)
+        let stride = std::mem::size_of::<Vertex>() as u64;
+        let needed = (self.vertices.len() as u64).saturating_mul(stride);
+        let max_buffer = device.limits().max_buffer_size;
+        let segmented = needed > max_buffer || self.vertices.len() > u32::MAX as usize;
+        let changed_mesh: bool;
+        if segmented {
+            // This is device segmentation, not an arbitrary scene quota:
+            // draw all the uploaded quads in stable opaque/translucent order.
+            let chunk_len = gpu_segment_vertices(max_buffer);
+            if chunk_len == 0 {
+                // The adapter cannot fit even one model quad.
+                return;
+            }
+            let rebuild = !unchanged_scene || pipeline.segments.is_empty();
+            if rebuild {
+                let current = uploaded.as_ref().unwrap_or(&self.vertices);
+                let mut chunks = Vec::new();
+                for part in current.chunks(chunk_len) {
+                    let bytes = bytemuck::cast_slice::<Vertex, u8>(part);
+                    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("MCEdit2 original world mesh segment"),
+                        size: bytes.len() as u64,
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    });
+                    queue.write_buffer(&buffer, 0, bytes);
+                    chunks.push((buffer, part.len() as u32));
+                }
+                pipeline.segments = chunks;
+                pipeline.last_uploaded_vertices = Some(
+                    uploaded.unwrap_or_else(|| Arc::clone(&self.vertices))
+                );
+            }
+            pipeline.count = 0;
+            changed_mesh = rebuild;
         } else {
-            let current = uploaded.as_ref().unwrap_or(&self.vertices);
-            mesh_upload_suffix(
-                pipeline
-                    .last_uploaded_vertices
-                    .as_deref()
-                    .map(Vec::as_slice),
-                current,
-                resized_mesh,
-            )
-        };
-        if let Some(first) = first_upload {
-            let current = uploaded.as_ref().unwrap_or(&self.vertices);
-            let offset = first * std::mem::size_of::<Vertex>();
-            let bytes = bytemuck::cast_slice::<Vertex, u8>(&current[first..]);
-            // Vertex is Pod/repr(C), so start offsets and data lengths are
-            // multiples of the four-byte wgpu queue.write_buffer alignment.
-            queue.write_buffer(&pipeline.buffer, offset as u64, bytes);
-        }
-        if let Some(vertices) = uploaded {
-            pipeline.last_uploaded_vertices = Some(vertices);
+            let was_segmented = !pipeline.segments.is_empty();
+            if was_segmented {
+                pipeline.segments.clear();
+                pipeline.last_uploaded_vertices = None;
+            }
+            let resized_mesh = needed > pipeline.capacity;
+            if resized_mesh {
+                pipeline.capacity = needed.next_power_of_two().min(max_buffer);
+                pipeline.buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("MCEdit2 resized original source GPU mesh"),
+                    size: pipeline.capacity,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+            }
+            let (modified, first_upload) = if unchanged_scene && !resized_mesh && !was_segmented {
+                (false, None)
+            } else {
+                let current = uploaded.as_ref().unwrap_or(&self.vertices);
+                mesh_upload_suffix(
+                    pipeline.last_uploaded_vertices.as_deref().map(Vec::as_slice),
+                    current,
+                    resized_mesh || was_segmented,
+                )
+            };
+            if let Some(first) = first_upload {
+                let current = uploaded.as_ref().unwrap_or(&self.vertices);
+                let offset = first * std::mem::size_of::<Vertex>();
+                let bytes = bytemuck::cast_slice::<Vertex, u8>(&current[first..]);
+                if !bytes.is_empty() {
+                    queue.write_buffer(&pipeline.buffer, offset as u64, bytes);
+                }
+            }
+            if let Some(vertices) = uploaded {
+                pipeline.last_uploaded_vertices = Some(vertices);
+            }
+            pipeline.count = self.vertices.len() as u32;
+            changed_mesh = modified || was_segmented;
         }
         pipeline.last_source_mesh = Some(Arc::clone(&self.vertices));
-        pipeline.count = self.vertices.len() as u32;
         let changed_atlas = match (&pipeline.atlas, &self.atlas) {
             (Some(old), Some(new)) => !Arc::ptr_eq(old, new),
             (None, None) => false,
@@ -858,7 +908,7 @@ impl shader::Primitive for Primitive {
                 &pipeline.camera_buffer,
             );
         }
-        let target = target_dimensions(bounds);
+        let target = target_dimensions(bounds, device.limits().max_texture_dimension_2d);
         let resized_view = target != pipeline.offscreen_size;
         if resized_view {
             pipeline.offscreen_color = make_offscreen_color(device, target.0, target.1);
@@ -916,11 +966,18 @@ impl shader::Primitive for Primitive {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            if pipeline.count > 0 {
+            if pipeline.count > 0 || !pipeline.segments.is_empty() {
                 pass.set_pipeline(&pipeline.opaque);
-                pass.set_vertex_buffer(0, pipeline.buffer.slice(..));
                 pass.set_bind_group(0, &pipeline.atlas_bind_group, &[]);
-                pass.draw(0..pipeline.count, 0..1);
+                if pipeline.segments.is_empty() {
+                    pass.set_vertex_buffer(0, pipeline.buffer.slice(..));
+                    pass.draw(0..pipeline.count, 0..1);
+                } else {
+                    for (buffer, count) in &pipeline.segments {
+                        pass.set_vertex_buffer(0, buffer.slice(..));
+                        pass.draw(0..*count, 0..1);
+                    }
+                }
             }
         }
         // Translucent faces remain sorted far-to-near. They depth-test
@@ -948,11 +1005,18 @@ impl shader::Primitive for Primitive {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            if pipeline.count > 0 {
+            if pipeline.count > 0 || !pipeline.segments.is_empty() {
                 pass.set_pipeline(&pipeline.transparent);
-                pass.set_vertex_buffer(0, pipeline.buffer.slice(..));
                 pass.set_bind_group(0, &pipeline.atlas_bind_group, &[]);
-                pass.draw(0..pipeline.count, 0..1);
+                if pipeline.segments.is_empty() {
+                    pass.set_vertex_buffer(0, pipeline.buffer.slice(..));
+                    pass.draw(0..pipeline.count, 0..1);
+                } else {
+                    for (buffer, count) in &pipeline.segments {
+                        pass.set_vertex_buffer(0, buffer.slice(..));
+                        pass.draw(0..*count, 0..1);
+                    }
+                }
             }
         }
         queue.submit(Some(encoder.finish()));
@@ -1074,6 +1138,17 @@ mod tests {
         }; 6]
     }
     #[test]
+    fn hardware_mesh_segmentation_preserves_complete_quads() {
+        let stride = std::mem::size_of::<Vertex>() as u64;
+        assert_eq!(gpu_segment_vertices(stride * 6), 6);
+        assert_eq!(gpu_segment_vertices(stride * 16), 12);
+        assert_eq!(gpu_segment_vertices(stride * 5), 0);
+        let full = (0..30).collect::<Vec<_>>();
+        let rebuilt = full.chunks(gpu_segment_vertices(stride * 12))
+            .flat_map(|chunk| chunk.iter().copied()).collect::<Vec<_>>();
+        assert_eq!(rebuilt, full);
+    }
+    #[test]
     fn gpu_upload_avoids_rewriting_unchanged_prefix_and_handles_shorter_mesh() {
         let a = gpu_test_quad(1.0);
         let b = gpu_test_quad(2.0);
@@ -1182,20 +1257,21 @@ mod tests {
             width: 750.2,
             height: 360.5,
         };
-        assert_eq!(target_dimensions(&rect), (751, 361));
+        assert_eq!(target_dimensions(&rect, 8192), (751, 361));
         let empty = Rectangle {
             x: 0.0,
             y: 0.0,
             width: 0.0,
             height: 0.0,
         };
-        assert_eq!(target_dimensions(&empty), (1, 1));
+        assert_eq!(target_dimensions(&empty, 8192), (1, 1));
         let massive = Rectangle {
             x: 0.0,
             y: 0.0,
             width: 9000.0,
             height: 9000.0,
         };
-        assert_eq!(target_dimensions(&massive), (4096, 4096));
+        assert_eq!(target_dimensions(&massive, 4096), (4096, 4096));
+        assert_eq!(target_dimensions(&massive, 8192), (8192, 8192));
     }
 }

@@ -1,4 +1,4 @@
-//! Bounded exact-chunk spectator geometry cache. Never stores approximate LOD.
+//! Original-source exact-chunk spectator mesh cache, keyed by source identity.
 //! Equality of original source voxels invalidates changed seam flags, biomes,
 //! weighted model states and edited blocks without hash-collision risks.
 use crate::{
@@ -7,13 +7,10 @@ use crate::{
 };
 use mcedit2_world::surface::{SurfaceVoxel, VoxelMaterial};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet},
     sync::Arc,
 };
 
-const MAX_VERTICES: usize = 450_000;
-const MAX_SOURCE_VOXELS: usize = 100_000;
-const MAX_CHUNKS: usize = 2048;
 pub(crate) type Key = (i32, i32, i32, i32, i32);
 type Style = (usize, bool, Quality);
 struct Entry {
@@ -24,9 +21,6 @@ struct Entry {
 #[derive(Default)]
 pub(crate) struct ChunkMeshCache {
     entries: HashMap<Key, Entry>,
-    order: VecDeque<Key>,
-    used_vertices: usize,
-    used_voxels: usize,
     style: Option<Style>,
 }
 impl ChunkMeshCache {
@@ -45,9 +39,6 @@ impl ChunkMeshCache {
     fn ensure_style(&mut self, style: Style) {
         if self.style != Some(style) {
             self.entries.clear();
-            self.order.clear();
-            self.used_vertices = 0;
-            self.used_voxels = 0;
             self.style = Some(style);
         }
     }
@@ -64,10 +55,7 @@ impl ChunkMeshCache {
         {
             return None;
         }
-        let result = (Arc::clone(&entry.vertices), entry.origin);
-        self.order.retain(|k| *k != key);
-        self.order.push_back(key);
-        Some(result)
+        Some((Arc::clone(&entry.vertices), entry.origin))
     }
     pub(crate) fn insert(
         &mut self,
@@ -82,18 +70,9 @@ impl ChunkMeshCache {
         if source
             .iter()
             .any(|v| v.span != 1 || v.kind == VoxelMaterial::Liquid)
-            || vertices.len() > MAX_VERTICES
-            || source.len() > MAX_SOURCE_VOXELS
         {
             return;
         }
-        if let Some(old) = self.entries.remove(&key) {
-            self.used_vertices = self.used_vertices.saturating_sub(old.vertices.len());
-            self.used_voxels = self.used_voxels.saturating_sub(old.source.len());
-        }
-        self.order.retain(|k| *k != key);
-        self.used_vertices += vertices.len();
-        self.used_voxels += source.len();
         self.entries.insert(
             key,
             Entry {
@@ -102,19 +81,12 @@ impl ChunkMeshCache {
                 vertices: Arc::new(vertices),
             },
         );
-        self.order.push_back(key);
-        while self.entries.len() > MAX_CHUNKS
-            || self.used_vertices > MAX_VERTICES
-            || self.used_voxels > MAX_SOURCE_VOXELS
-        {
-            let Some(evicted) = self.order.pop_front() else {
-                break;
-            };
-            if let Some(old) = self.entries.remove(&evicted) {
-                self.used_vertices = self.used_vertices.saturating_sub(old.vertices.len());
-                self.used_voxels = self.used_voxels.saturating_sub(old.source.len());
-            }
-        }
+    }
+    /// Like Amulet's chunk render manager, retain chunks in the selected
+    /// visible source set instead of throwing away valid meshes after an
+    /// arbitrary fixed count. Replanning camera visibility retires old meshes.
+    pub(crate) fn retain_visible(&mut self, visible: &HashSet<(i32, i32)>) {
+        self.entries.retain(|(cx, cz, _, _, _), _| visible.contains(&(*cx, *cz)));
     }
     /// Chunk triangles are stored relative to the *old* world-view origin.
     /// Offset all copies to keep their absolute world positions unchanged.
@@ -216,18 +188,34 @@ mod tests {
         assert!(c.get(s, (0, 0, 0, 90, 0), &[&water]).is_none());
     }
     #[test]
-    fn bounded_cache_eviction() {
-        let mut c = ChunkMeshCache::default();
-        let s = ChunkMeshCache::style(None, false, Quality::Balanced);
-        for n in 0..(MAX_CHUNKS as i32 + 3) {
-            let v = sample(n * 16);
-            c.insert(s, (n, 0, n * 16, 90, 0), &[&v], [0, 0, 0], vec![vertex()]);
+    fn no_fixed_chunk_count_discards_active_meshes() {
+        let mut cache = ChunkMeshCache::default();
+        let style = ChunkMeshCache::style(None, false, Quality::Balanced);
+        let active: HashSet<_> = (0..2200).map(|cx| (cx, 0)).collect();
+        for cx in 0..2200 {
+            let sample = sample(cx * 16);
+            cache.insert(style, (cx, 0, sample.x, sample.y, sample.z),
+                &[&sample], [0, 0, 0], vec![vertex()]);
         }
-        assert!(c.entries.len() <= MAX_CHUNKS);
-        assert!(c.get(s, (0, 0, 0, 90, 0), &[&sample(0)]).is_none());
-        let n = (MAX_CHUNKS + 2) as i32;
-        assert!(c
-            .get(s, (n, 0, n * 16, 90, 0), &[&sample(n * 16)])
-            .is_some());
+        cache.retain_visible(&active);
+        assert_eq!(cache.entry_count(), 2200);
+        assert!(cache.get(style, (0, 0, 0, 90, 0), &[&sample(0)]).is_some());
+    }
+    #[test]
+    fn cache_retains_all_visible_chunks_and_discards_departed_chunks() {
+        let mut c = ChunkMeshCache::default();
+        let style = ChunkMeshCache::style(None, false, Quality::Balanced);
+        for cx in -4..=4 {
+            let voxel = sample(cx * 16);
+            c.insert(style, (cx, 0, voxel.x, voxel.y, voxel.z),
+                &[&voxel], [0, 0, 0], vec![vertex()]);
+        }
+        let active: HashSet<_> = (-4..=4).filter(|cx| *cx >= 0).map(|cx| (cx, 0)).collect();
+        c.retain_visible(&active);
+        assert_eq!(c.entry_count(), 5);
+        let voxel = sample(0);
+        assert!(c.get(style, (0, 0, 0, 90, 0), &[&voxel]).is_some());
+        let old = sample(-16);
+        assert!(c.get(style, (-1, 0, -16, 90, 0), &[&old]).is_none());
     }
 }

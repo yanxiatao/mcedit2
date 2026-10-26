@@ -43,13 +43,27 @@ impl MeshRequest {
 struct WorkerState {
     next: Option<MeshRequest>,
     active: Option<Arc<AtomicBool>>,
+    // Keep the active scene's chunk-source identity. Progressive updates
+    // from one world must not repeatedly cancel expensive geometry builds.
+    active_spectator_chunks: Option<Arc<Mutex<crate::chunk_mesh_cache::ChunkMeshCache>>>,
 }
 impl WorkerState {
     fn replace(&mut self, request: MeshRequest) -> Option<MeshRequest> {
         // Do not wait for the previous mesh to finish traversing thousands
         // of original blocks before the newest camera can be rendered.
         if let Some(active) = &self.active {
-            active.store(true, Ordering::Release);
+            let same_world = match (&self.active_spectator_chunks, &request) {
+                (Some(old), MeshRequest::Spectator { view, .. }) =>
+                    Arc::ptr_eq(old, &view.chunk_cache),
+                _ => false,
+            };
+            // Superseding a queued *unstarted* mesh is always cheap. However,
+            // cancelling the currently building mesh for every arriving
+            // chunk batch can starve the viewport indefinitely. Allow it
+            // to finish; only the latest queued snapshot runs next.
+            if !same_world {
+                active.store(true, Ordering::Release);
+            }
         }
         let previous = self.next.replace(request);
         if let Some(old) = &previous {
@@ -75,6 +89,11 @@ fn queue() -> &'static Queue {
                     }
                     let request = state.next.take().unwrap();
                     state.active = Some(Arc::clone(request.cancellation()));
+                    state.active_spectator_chunks = match &request {
+                        MeshRequest::Spectator { view, .. } =>
+                            Some(Arc::clone(&view.chunk_cache)),
+                        MeshRequest::Isometric { .. } => None,
+                    };
                     request
                 };
                 let cancellation = Arc::clone(request.cancellation());
@@ -103,6 +122,7 @@ fn queue() -> &'static Queue {
                     .is_some_and(|active| Arc::ptr_eq(active, &cancellation))
                 {
                     state.active = None;
+                    state.active_spectator_chunks = None;
                 }
             })
             .expect("Cannot start bounded GPU mesh worker");
@@ -193,6 +213,7 @@ mod tests {
         let mut state = WorkerState {
             next: None,
             active: Some(Arc::clone(&active)),
+            active_spectator_chunks: None,
         };
         let scene = crate::spectator::SpectatorScene {
             surface: Arc::new(mcedit2_world::surface::SurfaceView {
@@ -232,5 +253,49 @@ mod tests {
         assert!(old_token.load(Ordering::Acquire));
         assert!(!newest_token.load(Ordering::Acquire));
         assert!(state.next.is_some());
+    }
+    #[test]
+    fn spectator_chunk_batches_coalesce_without_cancelling_active_world() {
+        let scene = crate::spectator::SpectatorScene {
+            surface: Arc::new(mcedit2_world::surface::SurfaceView {
+                x: 0, z: 0, y_min: 0, y_max: 0, width: 16, depth: 16,
+                voxels: Vec::new(), missing_columns: 0, source_chunks: 0,
+                source_tiles: Vec::new(),
+            }),
+            texture_bank: None,
+            show_textures: false,
+            camera: crate::spectator::Camera::default(),
+            quality: crate::gpu_mesh::Quality::Fast,
+            cache: Arc::new(Mutex::new(None)),
+            pending: Arc::new(Mutex::new(false)),
+            fallback: None,
+            chunk_cache: Arc::new(Mutex::new(crate::chunk_mesh_cache::ChunkMeshCache::default())),
+        };
+        let active = Arc::new(AtomicBool::new(false));
+        let mut state = WorkerState {
+            active: Some(Arc::clone(&active)),
+            active_spectator_chunks: Some(Arc::clone(&scene.chunk_cache)),
+            next: None,
+        };
+        let queued = Arc::new(AtomicBool::new(false));
+        state.replace(MeshRequest::Spectator {
+            view: scene.clone(), cancelled: Arc::clone(&queued)
+        });
+        assert!(!active.load(Ordering::Acquire));
+        let newer = Arc::new(AtomicBool::new(false));
+        state.replace(MeshRequest::Spectator {
+            view: scene.clone(), cancelled: Arc::clone(&newer)
+        });
+        assert!(!active.load(Ordering::Acquire));
+        assert!(queued.load(Ordering::Acquire));
+        assert!(!newer.load(Ordering::Acquire));
+        let unrelated = crate::spectator::SpectatorScene {
+            chunk_cache: Arc::new(Mutex::new(crate::chunk_mesh_cache::ChunkMeshCache::default())),
+            ..scene
+        };
+        state.replace(MeshRequest::Spectator {
+            view: unrelated, cancelled: Arc::new(AtomicBool::new(false))
+        });
+        assert!(active.load(Ordering::Acquire));
     }
 }

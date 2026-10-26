@@ -3775,6 +3775,7 @@ fn workspace_view(app: &App) -> Element<'_, Message> {
                 button("16").on_press(Message::SpectatorRadius(16)),
                 button("32").on_press(Message::SpectatorRadius(32)),
                 button("64").on_press(Message::SpectatorRadius(64)),
+                button("128").on_press(Message::SpectatorRadius(128)),
             ]
             .spacing(5),
         );
