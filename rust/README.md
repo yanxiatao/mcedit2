@@ -201,6 +201,39 @@ The revision has not been compiled with Cargo, run with a GPU, or compared
 against a real Minecraft modpack; rendering correctness and large-pack memory
 behavior remain unverified. CI and Windows packaging remain user-triggered.
 
+## Incremental LOD halo invalidation and correct GPU material passes
+
+Far-source `FarChunkPatch` mesh caching now records an immutable source
+identity and its immediate horizontal-neighbor identities, plus the near
+exact-surface identity only where a patch borders the near viewport. Each
+stream mesh publication builds a coordinate-indexed dependency table once:
+a distant patch is reused unchanged when unrelated chunks arrive, regardless
+of the order in which other patches finished streaming. A newly loaded,
+replaced, or departed neighboring source invalidates dependent distant cliff
+meshes without relying on lossy hashes. Existing exact-source mesh entries
+share their `Arc<Vec<Vertex>>` directly with the completed frame and the
+GPU instead of copying a full vertex array on cache insertion.
+
+The stream GPU importer separates blended quads from opaque/cutout quads.
+Only opaque/cutout faces are placed in source-resident vertex buffers. Blended
+faces are submitted once through the camera-sorted transparent pass. This
+prevents duplicate vertex transfers and fragment work for water and glass
+while maintaining original page bindings. Fully opaque source chunks take
+a borrowed, allocation-free preparation path.
+
+Original cross-chunk occlusion indexing is restricted to candidate block
+faces on chunk boundaries. Known internal faces are already resolved by the
+world reader. When a seam mask must change, it is computed once per source
+run, and only the affected chunk's original voxels are cloned. No arbitrary
+scene-face, visible-chunk or LOD-mesh-count budget is introduced. Hardware
+buffer limits and actual resource allocation remain authoritative.
+
+Regression cases cover an unrelated distant chunk arriving before an
+existing patch, a newly discovered adjacent source invalidating its LOD
+cache, negative-coordinate source seams, exact Arc cache identity and mixed
+transparent/opaque material page routing. These tests must still be compiled
+and exercised against real Java worlds and graphics drivers.
+
 ## Camera-facing full-ring streaming
 
 The native spectator still schedules **every** actual Java chunk inside the

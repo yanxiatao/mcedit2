@@ -254,8 +254,9 @@ pub(crate) fn build_stream_cancellable(
 ) -> Option<StreamMesh> {
     let sources = snapshot.sources().collect::<Vec<_>>();
     let neighbors = crate::spectator_stream::ExactNeighbors::new(&sources);
+    let contexts = snapshot.lod_contexts();
     let chunks = build_sources(view, &sources, snapshot.origin(),
-        snapshot.y_max(), Some(&neighbors), cancelled)?;
+        snapshot.y_max(), Some(&neighbors), Some(&contexts), cancelled)?;
     Some(StreamMesh { chunks, origin: snapshot.origin() })
 }
 /// Abandon stale meshes between source voxels. An interrupted build returns
@@ -266,7 +267,7 @@ pub(crate) fn build_cancellable(
 ) -> Option<Vec<Vertex>> {
     let sources = [view.surface.voxels.as_slice()];
     let origin = [view.surface.x, view.surface.y_min, view.surface.z];
-    build_sources(view, &sources, origin, view.surface.y_max, None, cancelled)
+    build_sources(view, &sources, origin, view.surface.y_max, None, None, cancelled)
         .map(|chunks| chunks.into_iter()
             .flat_map(|part| part.vertices.as_ref().clone().into_iter())
             .collect())
@@ -277,6 +278,7 @@ fn build_sources(
     origin: [i32; 3],
     y_max: i32,
     neighbors: Option<&crate::spectator_stream::ExactNeighbors<'_>>,
+    lod_contexts: Option<&[crate::spectator_stream::LodContext]>,
     cancelled: &impl Fn() -> bool,
 ) -> Option<Vec<MeshChunk>> {
     if cancelled() { return None; }
@@ -315,7 +317,6 @@ fn build_sources(
         view.texture_bank.as_ref(), view.show_textures, view.quality,
     );
     let visible_chunks = sources.iter().flat_map(|part| (*part).iter())
-        .filter(|voxel| voxel.span == 1)
         .map(|voxel| (voxel.x.div_euclid(16), voxel.z.div_euclid(16)))
         .collect::<std::collections::HashSet<_>>();
     view.chunk_cache.lock().unwrap_or_else(|e| e.into_inner())
@@ -331,20 +332,47 @@ fn build_sources(
         // Keep original source arrays immutable; only rewrite a chunk's
         // affected face flags if exact neighboring chunks prove occlusion.
         let corrected = neighbors.and_then(|index| {
-            original.iter().any(|v| index.faces(v) != v.faces).then(|| {
-                original.iter().map(|v| {
-                    let mut voxel = v.clone();
-                    voxel.faces = index.faces(v);
-                    voxel
-                }).collect::<Vec<_>>()
-            })
+            // Resolve each original face mask once. The previous any()+map()
+            // walked up to six spatial neighbors twice for changed chunks.
+            let masks = original.iter().map(|voxel| index.faces(voxel))
+                .collect::<Vec<_>>();
+            masks.iter().zip(original).any(|(mask, voxel)| *mask != voxel.faces)
+                .then(|| original.iter().zip(masks).map(|(voxel, faces)| {
+                    let mut corrected = voxel.clone();
+                    corrected.faces = faces;
+                    corrected
+                }).collect::<Vec<_>>())
         });
         let run = corrected.as_deref().unwrap_or(original);
         let chunk = source_chunk_group(&run[0]);
         let first = &run[0];
+        // The position in the arriving patch list is NOT a stable GPU
+        // identity. Its index shifts whenever a different patch completes.
+        // Keep only the source category (near/far) and local run index.
         let chunk_id = (first.x.div_euclid(16), first.z.div_euclid(16),
-            first.span, source_index, run_index);
+            first.span, usize::from(source_index != 0), run_index);
+        let context = if source_index > 0 && first.span > 1 {
+            lod_contexts.and_then(|contexts| contexts.get(source_index - 1))
+        } else {
+            None
+        };
         let mut out = Vec::new();
+        if let Some(context) = context {
+            let cached = view.chunk_cache.lock().unwrap_or_else(|e| e.into_inner())
+                .get_lod(style, (chunk_id.0, chunk_id.1, chunk_id.2), context);
+            if let Some((vertices, from_origin)) = cached {
+                let mesh = if from_origin == origin {
+                    vertices
+                } else {
+                    let mut rebased = Vec::with_capacity(vertices.len());
+                    crate::chunk_mesh_cache::ChunkMeshCache::append_rebased(
+                        &mut rebased, &vertices, from_origin, origin);
+                    Arc::new(rebased)
+                };
+                chunks.push(MeshChunk { key: chunk_id, vertices: mesh });
+                continue;
+            }
+        }
         let id = chunk.map(|(cx, cz)| (cx, cz, first.x, first.y, first.z));
         if let Some(id) = id {
             let cached = view.chunk_cache.lock().unwrap_or_else(|e| e.into_inner())
@@ -560,14 +588,22 @@ fn build_sources(
             }
         }
     }
-        if let Some(id) = id {
-            if !cancelled() {
-                view.chunk_cache.lock().unwrap_or_else(|e| e.into_inner())
-                    .insert(style, id, run, origin, out.clone());
-            }
-        }
         if !out.is_empty() {
-            chunks.push(MeshChunk { key: chunk_id, vertices: Arc::new(out) });
+            // Share one allocation between the source-exact cache, the
+            // completed frame and GPU residency. Previous code cloned
+            // every newly built chunk just to populate its cache.
+            let vertices = Arc::new(out);
+            if !cancelled() {
+                let mut cache = view.chunk_cache.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(id) = id {
+                    cache.insert(style, id, run, origin, Arc::clone(&vertices));
+                }
+                if let Some(context) = context {
+                    cache.insert_lod(style, (chunk_id.0, chunk_id.1, chunk_id.2),
+                        context.clone(), origin, Arc::clone(&vertices));
+                }
+            }
+            chunks.push(MeshChunk { key: chunk_id, vertices });
         }
       }
     }

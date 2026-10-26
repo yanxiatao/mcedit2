@@ -4,6 +4,7 @@
 use crate::{
     gpu_mesh::{Quality, Vertex},
     textures::TextureBank,
+    spectator_stream::LodContext,
 };
 use mcedit2_world::surface::{SurfaceVoxel, VoxelMaterial};
 use std::{
@@ -18,9 +19,17 @@ struct Entry {
     origin: [i32; 3],
     vertices: Arc<Vec<Vertex>>,
 }
+/// A cached LOD mesh depends on adjacent original source patches, not only
+/// the tile it represents. All dependencies are immutable Arc identities.
+struct LodEntry {
+    context: LodContext,
+    origin: [i32; 3],
+    vertices: Arc<Vec<Vertex>>,
+}
 #[derive(Default)]
 pub(crate) struct ChunkMeshCache {
     entries: HashMap<Key, Entry>,
+    lod: HashMap<(i32, i32, u8), LodEntry>,
     style: Option<Style>,
 }
 impl ChunkMeshCache {
@@ -39,6 +48,7 @@ impl ChunkMeshCache {
     fn ensure_style(&mut self, style: Style) {
         if self.style != Some(style) {
             self.entries.clear();
+            self.lod.clear();
             self.style = Some(style);
         }
     }
@@ -63,7 +73,7 @@ impl ChunkMeshCache {
         key: Key,
         source: &[SurfaceVoxel],
         origin: [i32; 3],
-        vertices: Vec<Vertex>,
+        vertices: Arc<Vec<Vertex>>,
     ) {
         self.ensure_style(style);
         // Liquid faces depend on neighbors outside the sampled chunk.
@@ -78,15 +88,32 @@ impl ChunkMeshCache {
             Entry {
                 source: source.to_vec(),
                 origin,
-                vertices: Arc::new(vertices),
+                vertices,
             },
         );
+    }
+    pub(crate) fn get_lod(
+        &mut self, style: Style, key: (i32, i32, u8),
+        context: &LodContext,
+    ) -> Option<(Arc<Vec<Vertex>>, [i32; 3])> {
+        self.ensure_style(style);
+        let entry = self.lod.get(&key)?;
+        entry.context.same_sources(context)
+            .then(|| (Arc::clone(&entry.vertices), entry.origin))
+    }
+    pub(crate) fn insert_lod(
+        &mut self, style: Style, key: (i32, i32, u8),
+        context: LodContext, origin: [i32; 3], vertices: Arc<Vec<Vertex>>,
+    ) {
+        self.ensure_style(style);
+        self.lod.insert(key, LodEntry { context, origin, vertices });
     }
     /// Like Amulet's chunk render manager, retain chunks in the selected
     /// visible source set instead of throwing away valid meshes after an
     /// arbitrary fixed count. Replanning camera visibility retires old meshes.
     pub(crate) fn retain_visible(&mut self, visible: &HashSet<(i32, i32)>) {
         self.entries.retain(|(cx, cz, _, _, _), _| visible.contains(&(*cx, *cz)));
+        self.lod.retain(|(cx, cz, _), _| visible.contains(&(*cx, *cz)));
     }
     /// Chunk triangles are stored relative to the *old* world-view origin.
     /// Offset all copies to keep their absolute world positions unchanged.
@@ -145,11 +172,24 @@ mod tests {
         }
     }
     #[test]
+    fn exact_mesh_cache_keeps_original_arc_without_copying_vertex_arrays() {
+        let mut cache = ChunkMeshCache::default();
+        let voxel = sample(0);
+        let style = ChunkMeshCache::style(None, true, Quality::Balanced);
+        let original = Arc::new(vec![vertex()]);
+        cache.insert(style, (0, 0, 0, 90, 0),
+            std::slice::from_ref(&voxel), [0, 0, 0], Arc::clone(&original));
+        let (reused, origin) = cache.get(style, (0, 0, 0, 90, 0),
+            std::slice::from_ref(&voxel)).unwrap();
+        assert!(Arc::ptr_eq(&reused, &original));
+        assert_eq!(origin, [0, 0, 0]);
+    }
+    #[test]
     fn exact_equality_invalidates_modified_source() {
         let mut c = ChunkMeshCache::default();
         let v = sample(-1);
         let s = ChunkMeshCache::style(None, false, Quality::Balanced);
-        c.insert(s, (-1, 0, -1, 90, 0), std::slice::from_ref(&v), [-16, 80, 0], vec![vertex()]);
+        c.insert(s, (-1, 0, -1, 90, 0), std::slice::from_ref(&v), [-16, 80, 0], Arc::new(vec![vertex()]));
         assert!(c.get(s, (-1, 0, -1, 90, 0), std::slice::from_ref(&v)).is_some());
         let mut changed = v.clone();
         changed.faces = 0;
@@ -173,7 +213,7 @@ mod tests {
         let mut c = ChunkMeshCache::default();
         let v = sample(0);
         let a = ChunkMeshCache::style(None, false, Quality::Balanced);
-        c.insert(a, (0, 0, 0, 90, 0), std::slice::from_ref(&v), [0, 0, 0], vec![vertex()]);
+        c.insert(a, (0, 0, 0, 90, 0), std::slice::from_ref(&v), [0, 0, 0], Arc::new(vec![vertex()]));
         assert!(c
             .get(
                 ChunkMeshCache::style(None, true, Quality::Balanced),
@@ -184,7 +224,7 @@ mod tests {
         let s = ChunkMeshCache::style(None, true, Quality::Balanced);
         let mut water = v.clone();
         water.kind = VoxelMaterial::Liquid;
-        c.insert(s, (0, 0, 0, 90, 0), std::slice::from_ref(&water), [0, 0, 0], vec![vertex()]);
+        c.insert(s, (0, 0, 0, 90, 0), std::slice::from_ref(&water), [0, 0, 0], Arc::new(vec![vertex()]));
         assert!(c.get(s, (0, 0, 0, 90, 0), std::slice::from_ref(&water)).is_none());
     }
     #[test]
@@ -195,7 +235,7 @@ mod tests {
         for cx in 0..2200 {
             let sample = sample(cx * 16);
             cache.insert(style, (cx, 0, sample.x, sample.y, sample.z),
-                std::slice::from_ref(&sample), [0, 0, 0], vec![vertex()]);
+                std::slice::from_ref(&sample), [0, 0, 0], Arc::new(vec![vertex()]));
         }
         cache.retain_visible(&active);
         assert_eq!(cache.entry_count(), 2200);
@@ -208,7 +248,7 @@ mod tests {
         for cx in -4..=4 {
             let voxel = sample(cx * 16);
             c.insert(style, (cx, 0, voxel.x, voxel.y, voxel.z),
-                std::slice::from_ref(&voxel), [0, 0, 0], vec![vertex()]);
+                std::slice::from_ref(&voxel), [0, 0, 0], Arc::new(vec![vertex()]));
         }
         let active: HashSet<_> = (-4..=4).filter(|cx| *cx >= 0).map(|cx| (cx, 0)).collect();
         c.retain_visible(&active);

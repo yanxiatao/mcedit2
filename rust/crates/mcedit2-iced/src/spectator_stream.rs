@@ -236,7 +236,13 @@ pub(crate) struct ExactNeighbors<'a> {
 impl<'a> ExactNeighbors<'a> {
     pub(crate) fn new(sources: &[&'a [SurfaceVoxel]]) -> Self {
         let occupied = sources.iter().flat_map(|source| (*source).iter())
-            .filter(|v| v.span == 1)
+            // Only original horizontal chunk seams require cross-source
+            // reconciliation; within each chunk original face masks have
+            // already been verified by the Java world reader.
+            .filter(|v| v.span == 1 && (
+                matches!(v.x.rem_euclid(16), 0 | 15)
+                    || matches!(v.z.rem_euclid(16), 0 | 15)
+            ))
             .map(|v| ((v.x, v.y, v.z), (&v.state, v.kind)))
             .collect();
         Self { occupied }
@@ -245,7 +251,12 @@ impl<'a> ExactNeighbors<'a> {
     /// A missing source patch, uncertain Mod model, or sampled distant tile
     /// cannot invent an occluding block at a chunk boundary.
     pub(crate) fn faces(&self, voxel: &SurfaceVoxel) -> u8 {
-        if voxel.span != 1 { return voxel.faces; }
+        if voxel.span != 1
+            || (!matches!(voxel.x.rem_euclid(16), 0 | 15)
+                && !matches!(voxel.z.rem_euclid(16), 0 | 15))
+        {
+            return voxel.faces;
+        }
         let mut faces = voxel.faces;
         for (dx, dy, dz, face) in [
             (0, 1, 0, FACE_TOP), (0, -1, 0, FACE_BOTTOM),
@@ -281,6 +292,29 @@ fn reconcile_exact_seams(view: &mut SurfaceView) {
 /// A mesh worker materializes an exact face-seam snapshot only when it needs
 /// to rebuild geometry, leaving the previous complete GPU frame visible.
 #[derive(Clone)]
+/// Source and immediate-neighbor identities needed to reuse a distant
+/// LOD mesh. Comparing the actual Arcs avoids hash collisions and does not
+/// copy any terrain. A patch's cliffs depend on neighboring LOD samples and
+/// its edge may contact the near exact-block window.
+#[derive(Clone)]
+pub(crate) struct LodContext {
+    pub source: Arc<FarChunkPatch>,
+    pub neighbors: Vec<Arc<FarChunkPatch>>,
+    pub near: Option<Arc<SurfaceView>>,
+}
+impl LodContext {
+    pub(crate) fn same_sources(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.source, &other.source)
+            && self.neighbors.len() == other.neighbors.len()
+            && self.neighbors.iter().zip(&other.neighbors)
+                .all(|(a, b)| Arc::ptr_eq(a, b))
+            && match (&self.near, &other.near) {
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
 pub(crate) struct SceneSnapshot {
     near: Arc<SurfaceView>,
     patches: Vec<Arc<FarChunkPatch>>,
@@ -299,6 +333,37 @@ impl SceneSnapshot {
         [self.near.x, self.near.y_min, self.near.z]
     }
     pub(crate) fn y_max(&self) -> i32 { self.near.y_max }
+    /// Build an O(N) world-coordinate lookup once per scene publication.
+    /// Calling a linear scan per patch would scale quadratically for a
+    /// 128-chunk-radius world (tens of thousands of loaded patches).
+    pub(crate) fn lod_contexts(&self) -> Vec<LodContext> {
+        let by_coordinate = self.patches.iter().map(|patch|
+            ((patch.tile.chunk_x, patch.tile.chunk_z), Arc::clone(patch))
+        ).collect::<HashMap<_, _>>();
+        self.patches.iter().map(|source| {
+            let cx = source.tile.chunk_x;
+            let cz = source.tile.chunk_z;
+            let mut neighbors = Vec::new();
+            for dx in -1..=1_i32 {
+                for dz in -1..=1_i32 {
+                    if dx == 0 && dz == 0 { continue; }
+                    let Some(x) = cx.checked_add(dx) else { continue };
+                    let Some(z) = cz.checked_add(dz) else { continue };
+                    if let Some(patch) = by_coordinate.get(&(x, z)) {
+                        neighbors.push(Arc::clone(patch));
+                    }
+                }
+            }
+            let x = cx as i64 * 16;
+            let z = cz as i64 * 16;
+            let near = (x + 32 > self.near.x as i64
+                && x - 16 < self.near.x as i64 + self.near.width as i64
+                && z + 32 > self.near.z as i64
+                && z - 16 < self.near.z as i64 + self.near.depth as i64)
+                .then(|| Arc::clone(&self.near));
+            LodContext { source: Arc::clone(source), neighbors, near }
+        }).collect()
+    }
     #[cfg(test)]
     fn patch_count(&self) -> usize { self.patches.len() }
     #[cfg(test)]
@@ -703,6 +768,75 @@ mod tests {
             &scene, &without_neighbor, &|| false).unwrap();
         assert_eq!(after.chunks.len(), 1);
         assert_eq!(after.chunks[0].vertices.len(), 36);
+    }
+    #[test]
+    fn distant_lod_reuses_unchanged_chunk_and_invalidates_adjacent_source() {
+        use mcedit2_world::{
+            sections::State,
+            surface::{SurfaceVoxel, SourceChunkTile, ALL_FACES},
+        };
+        let near = Arc::new(SurfaceView {
+            x: 0, z: 0, y_min: 64, y_max: 96, width: 16, depth: 16,
+            voxels: vec![], source_tiles: vec![],
+            source_chunks: 0, missing_columns: 0,
+        });
+        let patch = |cx: i32| Arc::new(FarChunkPatch {
+            tile: SourceChunkTile {
+                chunk_x: cx, chunk_z: 0, source_present: true,
+                known_columns: 256, unknown_columns: 0, exposed_voxels: 1,
+            },
+            voxels: vec![SurfaceVoxel {
+                x: cx * 16, y: 72, z: 0, span: 4,
+                state: State { name: "minecraft:stone".into(), properties: vec![] },
+                biome: None, kind: VoxelMaterial::Solid,
+                faces: ALL_FACES, staged: false, original_block_entity: false,
+            }],
+        });
+        let target = patch(4);
+        let unrelated = patch(10);
+        let adjacent = patch(5);
+        let snapshot = |patches: Vec<Arc<FarChunkPatch>>| SceneSnapshot {
+            near: Arc::clone(&near), patches,
+            ready: Arc::new(Mutex::new(None)),
+        };
+        let scene = crate::spectator::SpectatorScene {
+            surface: Arc::clone(&near), texture_bank: None, show_textures: false,
+            camera: crate::spectator::Camera::default(),
+            quality: crate::gpu_mesh::Quality::Balanced,
+            cache: Arc::new(Mutex::new(None)),
+            pending: Arc::new(Mutex::new(false)), fallback: None, snapshot: None,
+            chunk_cache: Arc::new(Mutex::new(
+                crate::chunk_mesh_cache::ChunkMeshCache::default())),
+        };
+        let first_scene = snapshot(vec![Arc::clone(&target)]);
+        let first = crate::spectator::build_stream_cancellable(
+            &scene, &first_scene, &|| false).unwrap();
+        let first_part = first.chunks.iter().find(|c| c.key.0 == 4).unwrap();
+        assert!(!first_part.vertices.is_empty());
+        let second_scene = snapshot(vec![Arc::clone(&unrelated), Arc::clone(&target)]);
+        let second = crate::spectator::build_stream_cancellable(
+            &scene, &second_scene, &|| false).unwrap();
+        let second_part = second.chunks.iter().find(|c| c.key.0 == 4).unwrap();
+        // Arrival of an unrelated chunk changes the patch list index but
+        // must neither change the GPU identity nor rebuild the old mesh.
+        assert_eq!(first_part.key, second_part.key);
+        assert!(Arc::ptr_eq(&first_part.vertices, &second_part.vertices));
+        let third_scene = snapshot(vec![Arc::clone(&target), Arc::clone(&adjacent)]);
+        let third = crate::spectator::build_stream_cancellable(
+            &scene, &third_scene, &|| false).unwrap();
+        let third_part = third.chunks.iter().find(|c| c.key.0 == 4).unwrap();
+        assert_eq!(first_part.key, third_part.key);
+        assert!(!Arc::ptr_eq(&first_part.vertices, &third_part.vertices));
+        // A near-scene refresh far outside this patch halo is unrelated.
+        let mut moved = (*near).clone();
+        moved.y_max += 1;
+        let fourth_scene = SceneSnapshot {
+            near: Arc::new(moved), patches: vec![Arc::clone(&target)],
+            ready: Arc::new(Mutex::new(None)),
+        };
+        let fourth = crate::spectator::build_stream_cancellable(
+            &scene, &fourth_scene, &|| false).unwrap();
+        assert_eq!(fourth.chunks[0].key, first_part.key);
     }
     #[test]
     fn immutable_chunk_snapshot_reuses_patch_arcs_and_materializes_on_demand() {

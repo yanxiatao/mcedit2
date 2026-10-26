@@ -352,8 +352,23 @@ struct GpuChunk {
 }
 struct GpuStreamChunk {
     source: Arc<Vec<Vertex>>,
+    /// Only opaque/cutout faces belong in the resident GPU buffer.
+    /// Blended faces have a globally sorted dynamic pass.
     buffers: Vec<(wgpu::Buffer, u32)>,
     spans: Vec<Vec<DrawSpan>>,
+}
+fn opaque_chunk_faces(vertices: &[Vertex]) -> Cow<'_, [Vertex]> {
+    // Fast path: no duplicated allocation for non-blended original chunks.
+    let is_blended = |quad: &[Vertex]| quad.iter().all(|v|
+        (v.mode & 3) == 2 && v.world_mode == 1);
+    if !vertices.chunks_exact(6).any(is_blended) {
+        Cow::Borrowed(vertices)
+    } else {
+        Cow::Owned(vertices.chunks_exact(6)
+            .filter(|quad| !is_blended(quad))
+            .flat_map(|quad| quad.iter().copied())
+            .collect())
+    }
 }
 /// Preserve painter order in a draw stream while switching independently
 /// allocated atlas page bindings at complete six-vertex face boundaries.
@@ -910,8 +925,9 @@ impl shader::Primitive for Primitive {
                                 previous,
                             _ => {
                                 changed_mesh = true;
-                                let buffers = make_chunk_buffers(device, queue, &part.vertices);
-                                let spans = part.vertices.chunks(capacity)
+                                let opaque = opaque_chunk_faces(&part.vertices);
+                                let buffers = make_chunk_buffers(device, queue, &opaque);
+                                let spans = opaque.chunks(capacity)
                                     .map(page_spans).collect();
                                 GpuStreamChunk {
                                     source: Arc::clone(&part.vertices),
@@ -1384,6 +1400,24 @@ mod tests {
             Some(Arc::clone(&replacement)), &new_origin, None, None, Some(&fallback));
         assert!(Arc::ptr_eq(&ready.vertices, &replacement));
         assert!(Arc::ptr_eq(&ready.surface, &new_origin));
+    }
+    #[test]
+    fn mixed_chunk_uploads_only_opaque_faces_and_keeps_page_bindings() {
+        let mut vertices = Vec::new();
+        vertices.extend(test_quad(1.0, 0.0, 0, 1));
+        vertices.extend(test_quad(2.0, 1.0, 2, 1));
+        vertices.extend(test_quad(3.0, 2.0, 1, 1));
+        let opaque = opaque_chunk_faces(&vertices);
+        assert_eq!(opaque.len(), 12);
+        assert_eq!(opaque[0].atlas_page, 1);
+        assert_eq!(opaque[6].atlas_page, 3);
+        assert_eq!(page_spans(&opaque), vec![
+            DrawSpan { page: 1, start: 0, end: 6 },
+            DrawSpan { page: 3, start: 6, end: 12 },
+        ]);
+        assert!(matches!(opaque_chunk_faces(&vertices[0..6]), Cow::Borrowed(_)));
+        assert!(opaque_chunk_faces(&vertices[6..12]).is_empty());
+        assert_eq!(vertices.len(), 18);
     }
     #[test]
     fn completed_stream_generation_keeps_separate_chunks_and_original_atlas() {
