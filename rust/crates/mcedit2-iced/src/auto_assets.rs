@@ -142,12 +142,13 @@ fn mod_archive_contains_assets(path: &Path) -> bool {
     let Ok(archive) = zip::ZipArchive::new(file) else { return false };
     // No ZIP member is extracted or decompressed in discovery. Require a
     // namespace asset subtree rather than adding a library JAR as a pack.
-    archive.file_names().any(|name| {
+    let contains_assets = archive.file_names().any(|name| {
         let mut parts = name.split('/');
         matches!(parts.next(), Some("assets"))
             && parts.next().is_some_and(crate::resource_ids::namespace)
             && matches!(parts.next(), Some("textures" | "models" | "blockstates"))
-    })
+    });
+    contains_assets
 }
 fn selected_pack_names(game: &Path, warnings: &mut Vec<String>) -> Vec<String> {
     let settings = game.join("options.txt");
