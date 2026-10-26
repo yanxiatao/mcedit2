@@ -6,6 +6,14 @@ pub(crate) struct Material {
     pub diffuse: [f32; 4],
     pub map_kd: Option<String>,
     pub map_d: Option<String>,
+    pub ambient: [f32;3],
+    pub specular: [f32;3],
+    pub emissive: [f32;3],
+    pub shininess: f32,
+    pub refraction: f32,
+    pub roughness: Option<f32>,
+    pub metallic: Option<f32>,
+    pub illum: u8,
 }
 impl Default for Material {
     fn default() -> Self {
@@ -13,6 +21,14 @@ impl Default for Material {
             diffuse: [1.; 4],
             map_kd: None,
             map_d: None,
+            ambient: [0.;3],
+            specular: [0.;3],
+            emissive: [0.;3],
+            shininess: 0.,
+            refraction: 1.,
+            roughness: None,
+            metallic: None,
+            illum: 2,
         }
     }
 }
@@ -51,7 +67,7 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<BTreeMap<String, Material>, String> 
                 current = Some(name.to_owned());
                 out.insert(name.to_owned(), Material::default());
             }
-            Some(tag @ ("Kd" | "d" | "Tr" | "map_Kd" | "map_d")) => {
+            Some(tag @ ("Kd" | "Ka" | "Ks" | "Ke" | "Ns" | "Ni" | "Pr" | "Pm" | "illum" | "d" | "Tr" | "map_Kd" | "map_d")) => {
                 let Some(name) = current.as_ref() else {
                     continue;
                 };
@@ -61,6 +77,40 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<BTreeMap<String, Material>, String> 
                         for k in 0..3 {
                             mat.diffuse[k] = color(parts.next().ok_or("Missing RGB channel")?)?;
                         }
+                    }
+                    "Ka" | "Ks" | "Ke" => {
+                        let out=match tag {
+                            "Ka"=>&mut mat.ambient,
+                            "Ks"=>&mut mat.specular,
+                            _=>&mut mat.emissive,
+                        };
+                        for value in out {
+                            *value=color(parts.next().ok_or("Missing MTL material color")?)?;
+                        }
+                    }
+                    "Ns" | "Ni" | "Pr" | "Pm" => {
+                        let v=parts.next().ok_or("Missing MTL material scalar")?
+                            .parse::<f32>().map_err(|_|"Invalid MTL scalar")?;
+                        let (lo,hi)=match tag {
+                            "Ns"=>(0.,1000.),
+                            "Ni"=>(1.,3.),
+                            _=>(0.,1.),
+                        };
+                        if !v.is_finite() || !(lo..=hi).contains(&v) {
+                            return Err("MTL material scalar out of range".into());
+                        }
+                        match tag {
+                            "Ns"=>mat.shininess=v,
+                            "Ni"=>mat.refraction=v,
+                            "Pr"=>mat.roughness=Some(v),
+                            _=>mat.metallic=Some(v),
+                        }
+                    }
+                    "illum" => {
+                        let model=parts.next().ok_or("Missing illum model")?
+                            .parse::<u8>().map_err(|_|"Invalid illumination model")?;
+                        if model>10{return Err("Unsupported MTL illum index".into())}
+                        mat.illum=model;
                     }
                     "d" => mat.diffuse[3] = color(parts.next().ok_or("Missing opacity")?)?,
                     "Tr" => {
@@ -93,6 +143,18 @@ mod tests {
         let m=parse(b"newmtl frame\nKd 0.25 0.5 1\nd 0.6\nmap_Kd example:item/casing\nmap_d example:item/casing_alpha\n").unwrap();
         assert_eq!(m["frame"].diffuse, [0.25, 0.5, 1., 0.6]);
         assert_eq!(m["frame"].map_kd.as_deref(), Some("example:item/casing"));
+    }
+    #[test]
+    fn parses_static_specular_emission_and_pbr_extension_values(){
+        let m=parse(b"newmtl chrome\nKs 0.5 0.25 1\nKe 0.1 0.2 0.3\nNs 100\nNi 1.4\nPm 0.8\nPr 0.35\nillum 2\n").unwrap();
+        let c=&m["chrome"];
+        assert_eq!(c.specular,[0.5,0.25,1.]);
+        assert_eq!(c.emissive,[0.1,0.2,0.3]);
+        assert_eq!(c.shininess,100.);
+        assert_eq!(c.refraction,1.4);
+        assert_eq!(c.metallic,Some(0.8));
+        assert_eq!(c.roughness,Some(0.35));
+        assert!(parse(b"newmtl bad\nNs NaN\n").is_err());
     }
     #[test]
     fn refuses_path_traversal_and_invalid_opacity() {

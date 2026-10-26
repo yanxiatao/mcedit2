@@ -278,3 +278,28 @@ memory is bounded and unresolved model references produce warnings, not
 world-save changes. Scene hierarchy, buffer bounds, traversal, and unordered
 ZIP references have Rust regression tests. Skinning and animation are
 intentionally excluded from this static renderer.
+
+## OBJ/MTL opacity atlas and static material parameters
+
+OBJ Wavefront `map_d` is now applied as a **real per-pixel opacity map**
+instead of only being recorded as a parsed filename. After all resource
+layers and any source animation frames have been resolved, valid
+`map_Kd`/ `map_d` pairs are combined into immutable RGBA sprites before
+GPU atlas packing: grayscale mask luminance or explicit PNG Alpha scales
+the original diffuse Alpha channel. Different texture dimensions are sampled
+in normalized local texture coordinates. Synthesized sprites share the
+ordinary transparent/cutout material path and total atlas memory budget.
+Unresolved masks produce warnings and leave the original material intact.
+No source PNG, save NBT or Mod executable is changed.
+
+The OBJ MTL metadata reader now validates diffuse, ambient, specular and
+emissive colors (`Kd/Ka/Ks/Ke`), `d/Tr`, `Ns`, `Ni`, `illum`, and
+the common `Pm/Pr` metallic/roughness extensions. glTF/GLB material
+metadata reads `baseColorFactor`, alpha mode/cutoff, double-sided,
+metallic/roughness factors, and emissive factors. Base-color RGBA affects
+the existing static GPU vertex tint. **True PBR illumination is not
+complete**: image-based lighting, tangent-space normal maps, metallic-
+roughness texture sampling, and correct per-material alpha cutoff are
+not yet implemented in wgpu. Reading these metadata fields is not
+equivalent to full PBR shading. Animations and Mod client renderer hooks
+remain deliberately out of scope.

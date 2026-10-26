@@ -536,3 +536,33 @@ fn nested_gltf_scene_uses_external_buffers_in_unordered_zip_pack(){
     assert_eq!(selected[0].xyz[1],[0.75,0.,-0.5]);
     assert!(!bank.warnings.iter().any(|x|x.contains("glTF")));
 }
+
+#[test]
+fn obj_material_map_d_is_baked_into_actual_atlas_sprite_alpha(){
+    let f=Fixture::new();
+    let dir=f.path("material_map");
+    put(&dir,"assets/example/textures/item/base.png",
+        &png(&[125,180,230,255, 10,50,90,128],2));
+    put(&dir,"assets/example/textures/item/mask.png",
+        &png(&[0,0,0,255, 255,255,255,255],2));
+    put(&dir,"assets/example/blockstates/widget.json",
+        br#"{"variants":{"":{"model":"example:block/assembly"}}}"#);
+    put(&dir,"assets/example/models/block/assembly.json",
+        br#"{"loader":"neoforge:obj","model":"example:models/block/assembly.obj",
+            "textures":{"particle":"example:item/base"}}"#);
+    put(&dir,"assets/example/models/block/assembly.obj",
+        b"v 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nusemtl casing\nf 1/1 2/2 3/3\n");
+    put(&dir,"assets/example/models/block/assembly.mtl",
+        b"newmtl casing\nKd 1 1 1\nmap_Kd example:item/base\nmap_d example:item/mask\n");
+    let bank=TextureBank::open(&dir).unwrap();
+    let source=mcedit2_world::sections::State{
+        name:"example:widget".into(),properties:vec![]
+    };
+    let mesh=bank.models.obj_at(&source,(0,64,0)).unwrap();
+    let composed=bank.get(&mesh[0].texture).unwrap();
+    assert_eq!(composed.pixel(0.5,0.25),[125,180,230,0]);
+    assert_eq!(composed.pixel(0.5,0.75),[10,50,90,128]);
+    let vertices=bank.static_obj_at(&source,(0,64,0)).unwrap();
+    assert_eq!(vertices.len(),1);
+    assert_eq!(vertices[0].alpha,AlphaMode::Blend);
+}

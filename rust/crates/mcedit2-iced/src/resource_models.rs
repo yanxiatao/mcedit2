@@ -34,10 +34,12 @@ pub(crate) struct ModelBank {
     files: BTreeMap<String, Value>,
     obj_meshes: BTreeMap<String, Vec<special_obj::Triangle>>,
     gltf_meshes: BTreeMap<String, Vec<special_obj::Triangle>>,
+    gltf_materials: BTreeMap<String, BTreeMap<String, special_gltf::StaticPbrMaterial>>,
     gltf_sources: BTreeMap<String, (String, Vec<u8>)>,
     gltf_buffers: BTreeMap<String, Vec<u8>>,
     gltf_buffer_bytes: usize,
     obj_materials: BTreeMap<String, BTreeMap<String, special_mtl::Material>>,
+    obj_mask_overlays: BTreeMap<(String, String), String>,
     json_sizes: BTreeMap<String, usize>,
     total_json_bytes: usize,
 }
@@ -807,6 +809,7 @@ impl ModelBank {
     pub fn finish_gltf(&mut self)->Vec<String>{
         let mut errors=Vec::new();
         self.gltf_meshes.clear();
+        self.gltf_materials.clear();
         for (id,(source,bytes)) in &self.gltf_sources{
             let folder=source.rsplit_once('/').map(|(dir,_)|dir).unwrap_or("");
             let resolved=special_gltf::parse_with_resolver(bytes,&|uri|{
@@ -814,11 +817,33 @@ impl ModelBank {
                 self.gltf_buffers.get(&format!("{folder}/{uri}")).cloned()
             });
             match resolved{
-                Ok(mesh)=>{self.gltf_meshes.insert(id.clone(),mesh);}
+                Ok(mesh)=>{
+                    match special_gltf::material_factors(bytes){
+                        Ok(mat)=>{self.gltf_materials.insert(id.clone(),mat);}
+                        Err(e)=>{errors.push(format!("{source}: {e}"));continue;}
+                    }
+                    self.gltf_meshes.insert(id.clone(),mesh);
+                }
                 Err(e)=>errors.push(format!("{source}: {e}")),
             }
         }
         errors
+    }
+    /// List exact original MTL opacity-map pairs. Resource decoding and
+    /// overlay allocation belong to the atlas, never to model geometry.
+    pub fn opacity_maps(&self)->Vec<(String,String,String,String)>{
+        let mut entries=Vec::new();
+        for (model,materials) in &self.obj_materials{
+            for (name,mat) in materials{
+                if let (Some(diffuse),Some(mask))=(&mat.map_kd,&mat.map_d){
+                    entries.push((model.clone(),name.clone(),diffuse.clone(),mask.clone()));
+                }
+            }
+        }
+        entries
+    }
+    pub fn set_opacity_overlay(&mut self,model:String,name:String,sprite:String){
+        self.obj_mask_overlays.insert((model,name),sprite);
     }
     /// Select special models through the original blockstate JSON. Loader
     /// declarations are a data contract, not an arbitrary executable hook.
@@ -879,8 +904,11 @@ impl ModelBank {
             } else {
                 None
             };
+            let id_key=id.clone();
+            let gltf_materials=self.gltf_materials.get(&id);
             for tri in mesh {
                 let mtl = materials.and_then(|m| m.get(&tri.material));
+                let pbr=gltf_materials.and_then(|m|m.get(&tri.material));
                 let raw = mappings
                     .and_then(|m| m.get(&tri.material))
                     .and_then(Value::as_str)
@@ -899,8 +927,12 @@ impl ModelBank {
                 out.push(ObjSelection {
                     xyz: tri.xyz.map(|p| rotation.point(p)),
                     uv: tri.uv,
-                    texture: format!("{ns}:{id}"),
-                    tint: mtl.map_or([1.; 4], |m| m.diffuse),
+                    texture: self.obj_mask_overlays
+                        .get(&(id_key.clone(),tri.material.clone()))
+                        .cloned()
+                        .unwrap_or_else(||format!("{ns}:{id}")),
+                    tint: mtl.map(|m|m.diffuse).or_else(||pbr.map(|m|m.base_color))
+                        .unwrap_or([1.;4]),
                 });
                 if out.len() > 4096 {
                     return None;

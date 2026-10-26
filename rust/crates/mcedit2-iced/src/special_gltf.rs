@@ -398,6 +398,79 @@ pub(crate) fn parse_with_resolver(
 pub(crate) fn parse(bytes:&[u8])->Result<Vec<Triangle>,String>{
     parse_with_resolver(bytes,&|_|None)
 }
+
+#[derive(Clone, Debug)]
+pub(crate) struct StaticPbrMaterial {
+    pub base_color: [f32;4],
+    pub metallic: f32,
+    pub roughness: f32,
+    pub emissive: [f32;3],
+    pub alpha_mode: String,
+    pub alpha_cutoff: f32,
+    pub double_sided: bool,
+}
+/// Read material factors from ordinary glTF JSON or the JSON chunk of GLB.
+/// These are data only; metallic-roughness lighting is not inferred from
+/// missing scene lights or custom client shaders.
+pub(crate) fn material_factors(source:&[u8])
+    ->Result<std::collections::BTreeMap<String,StaticPbrMaterial>,String>{
+    let data=if source.starts_with(b"glTF"){
+        if source.len()<20{return Err("Truncated GLB".into())}
+        let n=u32::from_le_bytes(source[12..16].try_into().unwrap()) as usize;
+        if n>source.len()-20 || &source[16..20]!=b"JSON"{
+            return Err("GLB lacks JSON material chunk".into())
+        }
+        &source[20..20+n]
+    }else{source};
+    let doc:Value=serde_json::from_slice(data).map_err(|e|e.to_string())?;
+    let mut out=std::collections::BTreeMap::new();
+    let Some(materials)=doc.get("materials").and_then(Value::as_array) else{return Ok(out)};
+    if materials.len()>2048{return Err("Too many glTF materials".into())}
+    let bounded=|v:Option<&Value>,default:f32|->Result<f32,String>{
+        let n=v.map(|v|v.as_f64().ok_or("Invalid glTF PBR factor"))
+            .transpose()?.map(|n|n as f32).unwrap_or(default);
+        if n.is_finite() && (0.0..=1.0).contains(&n){Ok(n)}
+        else{Err("glTF PBR factor out of range".into())}
+    };
+    for material in materials{
+        let name=material.get("name").and_then(Value::as_str).unwrap_or("particle");
+        if name.len()>160||!name.bytes().all(|b|b.is_ascii_alphanumeric()||b"_.-".contains(&b)){
+            return Err("Invalid glTF material identifier".into())
+        }
+        let pbr=material.get("pbrMetallicRoughness").unwrap_or(&Value::Null);
+        let color=pbr.get("baseColorFactor").and_then(Value::as_array);
+        if color.is_some_and(|v|v.len()!=4){return Err("Invalid glTF RGBA factor".into())}
+        let base=[
+            bounded(color.and_then(|v|v.first()),1.)?,
+            bounded(color.and_then(|v|v.get(1)),1.)?,
+            bounded(color.and_then(|v|v.get(2)),1.)?,
+            bounded(color.and_then(|v|v.get(3)),1.)?,
+        ];
+        let em=material.get("emissiveFactor").and_then(Value::as_array);
+        if em.is_some_and(|v|v.len()!=3){return Err("Invalid emissive color".into())}
+        let emissive=[
+            bounded(em.and_then(|v|v.first()),0.)?,
+            bounded(em.and_then(|v|v.get(1)),0.)?,
+            bounded(em.and_then(|v|v.get(2)),0.)?,
+        ];
+        let alpha_mode=material.get("alphaMode").and_then(Value::as_str)
+            .unwrap_or("OPAQUE");
+        if !matches!(alpha_mode,"OPAQUE"|"MASK"|"BLEND"){
+            return Err("Invalid glTF alphaMode".into())
+        }
+        let cutoff=bounded(material.get("alphaCutoff"),0.5)?;
+        out.insert(name.to_owned(),StaticPbrMaterial{
+            base_color:base,
+            metallic:bounded(pbr.get("metallicFactor"),1.)?,
+            roughness:bounded(pbr.get("roughnessFactor"),1.)?,
+            emissive,
+            alpha_mode:alpha_mode.into(),
+            alpha_cutoff:cutoff,
+            double_sided:material.get("doubleSided").and_then(Value::as_bool).unwrap_or(false),
+        });
+    }
+    Ok(out)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,6 +500,21 @@ mod tests {
             assert!(!safe_external_uri(path));
         }
         assert!(safe_external_uri("meshes/points.bin"));
+    }
+    #[test]
+    fn static_gltf_pbr_color_roughness_metallic_and_alpha_are_validated(){
+        let doc=br#"{"asset":{"version":"2.0"},"materials":[{
+            "name":"frame","pbrMetallicRoughness":{"baseColorFactor":[0.1,0.2,0.3,0.6],
+            "metallicFactor":0.8,"roughnessFactor":0.25},
+            "emissiveFactor":[0.02,0.04,0.06],"alphaMode":"BLEND",
+            "doubleSided":true}]}"#;
+        let mat=material_factors(doc).unwrap();
+        assert_eq!(mat["frame"].base_color,[0.1,0.2,0.3,0.6]);
+        assert_eq!(mat["frame"].metallic,0.8);
+        assert_eq!(mat["frame"].roughness,0.25);
+        assert_eq!(mat["frame"].alpha_mode,"BLEND");
+        assert!(mat["frame"].double_sided);
+        assert!(material_factors(br#"{"materials":[{"name":"bad","pbrMetallicRoughness":{"metallicFactor":-3}}]}"#).is_err());
     }
     #[test]
     fn rejects_remote_external_and_malformed_sources() {

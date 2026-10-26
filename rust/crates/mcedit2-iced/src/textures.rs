@@ -873,6 +873,35 @@ impl PackAsset {
     }
 }
 
+/// Bake static Wavefront map_d into RGBA *before* the shared atlas is
+/// allocated. A separate second atlas sample per fragment is unnecessary,
+/// and textured cutout opacity is preserved at pixel resolution.
+fn combine_opacity(diffuse:&Tile,mask:&Tile)->Tile{
+    let mut rgba=diffuse.rgba.clone();
+    let width=diffuse.width as usize;
+    let height=diffuse.height as usize;
+    for y in 0..height{
+        for x in 0..width{
+            let m=mask.pixel((x as f32+0.5)/width as f32,(y as f32+0.5)/height as f32);
+            let luma=(0.2126*m[0] as f32+0.7152*m[1] as f32
+                +0.0722*m[2] as f32).round() as u16;
+            // Grayscale maps use luminance; PNG alpha masks use Alpha.
+            let opacity=if m[3]<255 {m[3] as u16} else {luma};
+            let i=(y*width+x)*4+3;
+            rgba[i]=((rgba[i] as u16*opacity+127)/255) as u8;
+        }
+    }
+    Tile{width:diffuse.width,height:diffuse.height,rgba}
+}
+fn material_texture_id(model:&str,raw:&str)->Option<String>{
+    let ns=model.strip_prefix("model:")?.split_once(':')?.0;
+    let id=resource_ids::qualified(raw,ns)?;
+    let (ns,path)=id.split_once(':')?;
+    let path=path.strip_prefix("block/")
+        .or_else(||path.strip_prefix("blocks/"))
+        .unwrap_or(path);
+    Some(format!("{ns}:{path}"))
+}
 impl TextureBank {
     fn ingest_asset(&mut self, name: &str, asset: PackAsset, bytes: Vec<u8>, memory: &mut usize) {
         match asset {
@@ -1113,6 +1142,40 @@ impl TextureBank {
     }
     /// Resource packs may place metadata before or after the PNG in ZIPs;
     /// resolve order-independently only after all namespaced assets load.
+    fn bake_mtl_masks(&mut self){
+        let declared=self.models.opacity_maps();
+        if declared.len()>8192{
+            self.warnings.push("Too many MTL opacity materials".into());
+            return;
+        }
+        let mut memory:usize=self.tiles.values().map(|t|t.rgba.len()).sum();
+        for (model,material,diffuse,mask) in declared{
+            let (Some(diffuse_id),Some(mask_id))=(
+                material_texture_id(&model,&diffuse),
+                material_texture_id(&model,&mask)
+            )else{
+                self.warnings.push(format!("Invalid MTL texture for {material}"));
+                continue;
+            };
+            let (Some(base),Some(alpha))=(
+                self.tiles.get(&diffuse_id),self.tiles.get(&mask_id)
+            )else{
+                self.warnings.push(format!("Missing map_Kd/map_d for {material}"));
+                continue;
+            };
+            let bytes=base.rgba.len();
+            if memory.checked_add(bytes).is_none_or(|v|v>MAX_RGBA_MEMORY){
+                self.warnings.push("MTL opacity maps exceed atlas memory budget".into());
+                break;
+            }
+            let tile=combine_opacity(base,alpha);
+            let synthetic=format!("mcedit2:mtl_opacity_{}",self.tiles.len());
+            Arc::make_mut(&mut self.tiles).insert(synthetic.clone(),tile);
+            Arc::make_mut(&mut self.models)
+                .set_opacity_overlay(model,material,synthetic);
+            memory+=bytes;
+        }
+    }
     fn finalize_animations(&mut self) {
         let source = std::mem::take(&mut self.animations);
         let candidates = Arc::try_unwrap(source).unwrap_or_else(|shared| (*shared).clone());
@@ -1227,6 +1290,7 @@ impl TextureBank {
         // entries and overlay layers have been added, independent of order.
         out.warnings.extend(Arc::make_mut(&mut out.models).finish_gltf());
         out.finalize_animations();
+        out.bake_mtl_masks();
         let chosen = mixed_layout(&out.tiles)?;
         let source_max = out
             .tiles
@@ -2308,6 +2372,30 @@ mod tests {
         bytes[16..20].copy_from_slice(&10000u32.to_be_bytes());
         bytes[20..24].copy_from_slice(&1u32.to_be_bytes());
         assert!(decode_png(&bytes).unwrap_err().contains("dimensions"));
+    }
+    #[test]
+    fn material_map_d_combines_luminance_and_png_alpha_per_pixel(){
+        let diffuse=Tile{
+            width:2,height:1,
+            rgba:vec![120,180,240,255, 30,60,90,128]
+        };
+        let alpha=Tile{
+            width:2,height:1,
+            rgba:vec![0,0,0,255, 255,255,255,64]
+        };
+        let output=combine_opacity(&diffuse,&alpha);
+        assert_eq!(&output.rgba[0..3],&[120,180,240]);
+        assert_eq!(output.rgba[3],0);
+        assert_eq!(&output.rgba[4..7],&[30,60,90]);
+        assert_eq!(output.rgba[7],32);
+    }
+    #[test]
+    fn opacity_material_texture_ids_cannot_escape_pack_namespace(){
+        assert_eq!(material_texture_id("model:example:block/widget","example:item/mask"),
+            Some("example:item/mask".into()));
+        assert_eq!(material_texture_id("model:example:block/widget","item/opacity"),
+            Some("example:item/opacity".into()));
+        assert_eq!(material_texture_id("model:example:block/widget","../secret"),None);
     }
     #[test]
     fn all_model_texture_families_are_namespaced_and_collision_free() {
