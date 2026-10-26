@@ -1,7 +1,8 @@
 //! Bounded lookup of resource-pack blockstate variants and model texture maps.
-//! A small conservative subset of Java JSON model inheritance is supported;
-//! unsupported multipart, rotations, random weighted variants and custom
-//! geometry use the ordinary named-texture fallback rather than guessing.
+//! Read-only, bounded support for declarative vanilla Java blockstates,
+//! weighted variants, multipart, JSON elements, UV and parent inheritance.
+//! Unsupported mod loaders and unresolved foreign parents fail closed; no
+//! mod-specific geometry or name-derived fallback is constructed here.
 use crate::{isometric::Face, resource_ids};
 use crate::models::{Box3, ElementRotation, Part};
 use crate::{special_obj, special_gltf, special_mtl};
@@ -657,6 +658,13 @@ impl ModelBank {
             let Some(model) = self.files.get(&id) else {
                 return vanilla_parent_elements(&id);
             };
+            // "loader" and editor-specific static format adapters are not
+            // vanilla Java model declarations. Geometry for those remains
+            // unavailable until an explicit rendering plugin handles it.
+            if model.get("loader").is_some()
+                || model.get("mcedit2:static_renderer").is_some() {
+                return None;
+            }
             if let Some(elements) = model.get("elements") {
                 return elements.as_array();
             }
@@ -1373,6 +1381,31 @@ mod tests {
             0
         )
         .is_none());
+    }
+    #[test]
+    fn modded_json_models_use_exact_vanilla_elements_but_reject_custom_loaders() {
+        let mut bank = ModelBank::default();
+        bank.insert("assets/example/blockstates/gearbox.json",
+            br#"{"variants":{"facing=north":{"model":"example:block/gearbox"}}}"#).unwrap();
+        bank.insert("assets/example/models/block/gearbox.json",
+            br##"{"parent":"minecraft:block/cube_all",
+              "textures":{"all":"example:block/gearbox"}}"##).unwrap();
+        let state = s("example:gearbox", &[("facing","north")]);
+        assert_eq!(bank.parts_at(&state, (2, 64, 4)).unwrap().len(), 1);
+        assert_eq!(
+            bank.element_face_at(&state, Face::Top, 0, (2, 64, 4)).unwrap().texture,
+            "example:gearbox"
+        );
+        bank.insert("assets/example/models/block/gearbox.json",
+            br##"{"loader":"neoforge:obj",
+              "parent":"minecraft:block/cube_all",
+              "textures":{"all":"example:block/gearbox"}}"##).unwrap();
+        assert!(bank.parts_at(&state, (2, 64, 4)).is_none());
+        assert!(bank.element_face_at(&state, Face::Top, 0, (2, 64, 4)).is_none());
+        bank.insert("assets/example/models/block/gearbox.json",
+            br##"{"parent":"example:block/nonexistent",
+              "textures":{"all":"example:block/gearbox"}}"##).unwrap();
+        assert!(bank.parts_at(&state, (2, 64, 4)).is_none());
     }
     #[test]
     fn state_variants_inherit_named_top_side_and_preserve_namespace() {

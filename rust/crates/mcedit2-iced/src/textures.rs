@@ -844,6 +844,14 @@ impl PackAsset {
             && (name.contains("/models/") || name.contains("/blockstates/")))
         .then_some(Self::Model)
     }
+    /// The built-in runtime accepts only vanilla Java asset formats.
+    /// Experimental external model decoders remain isolated for a future
+    /// plugin backend; they are not enabled by mod JAR discovery.
+    fn is_java_resource(&self, path: &str) -> bool {
+        matches!(self, Self::Model | Self::Metadata(_) | Self::Colormap(_))
+            || (matches!(self, Self::Texture(_))
+                && !path.contains("/models/"))
+    }
     fn max_bytes(&self) -> u64 {
         match self {
             Self::Model | Self::Obj | Self::Mtl => 2 * 1024 * 1024,
@@ -1031,6 +1039,7 @@ impl TextureBank {
         memory: &mut usize,
         depth: u8,
         entries: &mut usize,
+        java_only: bool,
     ) -> Result<(), String> {
         if depth > 20 {
             return Err("Resource-pack folder nesting over 20".into());
@@ -1066,7 +1075,7 @@ impl TextureBank {
             }
             let path = item.path();
             if ty.is_dir() {
-                self.walk(root, &path, memory, depth + 1, entries)?;
+                self.walk(root, &path, memory, depth + 1, entries, java_only)?;
             } else if ty.is_file() {
                 let Ok(relative) = path.strip_prefix(root) else {
                     continue;
@@ -1075,6 +1084,9 @@ impl TextureBank {
                 let Some(asset) = PackAsset::classify(&name) else {
                     continue;
                 };
+                if java_only && !asset.is_java_resource(&name) {
+                    continue;
+                }
                 let max_size = asset.max_bytes();
                 let meta = fs::metadata(&path).map_err(|e| e.to_string())?;
                 if meta.len() > max_size {
@@ -1091,7 +1103,9 @@ impl TextureBank {
         }
         Ok(())
     }
-    fn read_zip<R: Read + Seek>(&mut self, r: R, memory: &mut usize) -> Result<(), String> {
+    fn read_zip<R: Read + Seek>(
+        &mut self, r: R, memory: &mut usize, java_only: bool
+    ) -> Result<(), String> {
         let mut archive = zip::ZipArchive::new(r).map_err(|e| e.to_string())?;
         if archive.len() > 1_000_000 {
             return Err("ZIP exceeds 1,000,000 entries safety budget".into());
@@ -1108,6 +1122,9 @@ impl TextureBank {
             let Some(asset) = PackAsset::classify(&name) else {
                 continue;
             };
+            if java_only && !asset.is_java_resource(&name) {
+                continue;
+            }
             let max_size = asset.max_bytes();
             if member.size() > max_size {
                 self.warnings.push(format!("Skipped oversize {name}"));
@@ -1218,14 +1235,27 @@ impl TextureBank {
             .map(|atlas| Arc::new(atlas.advance(&self.animations, self.animation_tick, ticks)));
         Some(next)
     }
-    /// A single pack uses the same path as ordered overlays.
+    /// Legacy experimental importer exists for regression tests only.
+    /// Production renderer and later plugin host must not invoke it.
+    #[cfg(test)]
     pub fn open(path: &Path) -> Result<Self, String> {
         Self::open_stack(&[path.to_path_buf()])
     }
 
     /// Merge client and resource packs in increasing priority. Only source
     /// identity maps are overlaid; the GPU atlas is allocated once at the end.
+    #[cfg(test)]
     pub fn open_stack(paths: &[std::path::PathBuf]) -> Result<Self, String> {
+        Self::open_stack_with_policy(paths, false)
+    }
+    /// Default UI/automatic-import path. No OBJ, glTF, GLB, MTL or custom
+    /// format is auto-imported, even if those files occur inside a Mod JAR.
+    pub fn open_stack_java(paths: &[std::path::PathBuf]) -> Result<Self, String> {
+        Self::open_stack_with_policy(paths, true)
+    }
+    fn open_stack_with_policy(
+        paths: &[std::path::PathBuf], java_only: bool
+    ) -> Result<Self, String> {
         if paths.is_empty() || paths.iter().any(|p| p.as_os_str().is_empty()) {
             return Err("Select at least one resource-pack directory or ZIP".into());
         }
@@ -1255,7 +1285,7 @@ impl TextureBank {
             if path.is_dir() {
                 let root = path.canonicalize().map_err(|e| e.to_string())?;
                 let mut entries = 0;
-                out.walk(&root, &root.join("assets"), &mut memory, 0, &mut entries)?;
+                out.walk(&root, &root.join("assets"), &mut memory, 0, &mut entries, java_only)?;
             } else if path.is_file() {
                 if !path.extension().and_then(|ext| ext.to_str())
                     .is_some_and(|ext| ext.eq_ignore_ascii_case("zip")
@@ -1265,7 +1295,7 @@ impl TextureBank {
                         "Only directories, .zip packs and .jar client assets are supported".into(),
                     );
                 }
-                out.read_zip(File::open(path).map_err(|e| e.to_string())?, &mut memory)?;
+                out.read_zip(File::open(path).map_err(|e| e.to_string())?, &mut memory, java_only)?;
             } else {
                 return Err(format!("Resource-pack layer does not exist: {}", path.display()));
             }
@@ -1394,8 +1424,14 @@ impl TextureBank {
                     return None;
                 }
                 (
-                    self.resolve_id_at(state, face, pos)
-                        .unwrap_or_else(|| MISSING_TEXTURE_ID.into()),
+                    if state.name.starts_with("minecraft:") {
+                        self.resolve_id_at(state, face, pos)
+                            .unwrap_or_else(|| MISSING_TEXTURE_ID.into())
+                    } else {
+                        // No name-derived fallback for modded blocks. Without
+                        // an exact Java JSON face the source model is unknown.
+                        MISSING_TEXTURE_ID.to_owned()
+                    },
                     [0.0, 0.0, 16.0, 16.0],
                     0,
                     [0, 1, 2, 3],
@@ -1616,6 +1652,14 @@ impl TextureBank {
         let (ns, name) = state.name.split_once(':')?;
         if ns == "numeric" {
             return None;
+        }
+        // Only the minecraft namespace has the built-in legacy sprite
+        // conventions. Foreign namespaces require an actual resolved JSON
+        // element face and must not borrow same-named PNGs.
+        if ns != "minecraft" {
+            return self.models.element_face_at(state, face, 0, pos)
+                .map(|spec| spec.texture)
+                .filter(|id| self.tiles.contains_key(id));
         }
         if let Some(key) = self.models.texture_at(state, face, pos) {
             if self.tiles.contains_key(&key) {

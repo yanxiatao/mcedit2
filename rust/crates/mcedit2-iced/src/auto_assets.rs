@@ -276,7 +276,7 @@ pub(crate) fn load(index: usize, world: &WorldSummary, nonce: u64) -> Task<Messa
             let return_root = root.clone();
             std::thread::spawn(move || {
                 let result = discover_stack(&root, &version).map(|stack| {
-                    TextureBank::open_stack(&stack.paths).map(|bank| (stack, bank))
+                    TextureBank::open_stack_java(&stack.paths).map(|bank| (stack, bank))
                 });
                 let _ = tx.send(result);
             });

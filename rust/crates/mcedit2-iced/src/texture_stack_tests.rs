@@ -67,7 +67,7 @@ fn zip_overlay_preserves_lower_models_and_sprites_without_stale_animation() {
     assert_eq!(color(&reversed, "minecraft:stone"), [0, 200, 0, 255]);
     assert_eq!(reversed.animation_count(), 1);
     assert!(TextureBank::open_stack(&[]).is_err());
-    assert!(TextureBank::open_stack(&vec![temp.path("base"); 33]).is_err());
+    assert!(TextureBank::open_stack(&vec![temp.path("base"); 1025]).is_err());
 }
 #[test]
 fn metadata_only_overlay_changes_schedule_without_replacing_png() {
@@ -713,4 +713,69 @@ fn gltf_base_color_texture_autobinds_and_spectator_instances_are_distinct() {
     assert_eq!(vertices.len(),12);
     assert!(vertices.iter().all(|v|v.atlas_page==page));
     assert!(vertices.iter().all(|v|v.uv.iter().all(|x|x.is_finite())));
+}
+
+
+#[test]
+fn core_java_resource_reader_does_not_import_custom_mod_renderers() {
+    let fixture = Fixture::new();
+    let directory = fixture.path("standard_only");
+    let zip_path = fixture.path("standard_only.zip");
+    let inputs: Vec<(&str, Vec<u8>)> = vec![
+        ("assets/example/textures/block/casing.png", png(&[12, 110, 208, 255], 1)),
+        ("assets/example/textures/block/unresolved.png", png(&[220, 30, 11, 255], 1)),
+        ("assets/example/blockstates/casing.json",
+            br#"{"variants":{"":{"model":"example:block/casing"}}}"#.to_vec()),
+        ("assets/example/models/block/casing.json",
+            br##"{"parent":"minecraft:block/cube_all","textures":{"all":"example:block/casing"}}"##.to_vec()),
+        ("assets/example/blockstates/custom.json",
+            br#"{"variants":{"":{"model":"example:block/custom"}}}"#.to_vec()),
+        ("assets/example/models/block/custom.json",
+            br##"{"loader":"neoforge:obj","model":"example:models/block/custom.obj",
+                "parent":"minecraft:block/cube_all","textures":{"all":"example:block/casing"}}"##.to_vec()),
+        ("assets/example/models/block/custom.obj",
+            b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n".to_vec()),
+        ("assets/example/models/block/custom.mtl", b"newmtl custom\n".to_vec()),
+        ("assets/example/models/block/custom.gltf", br#"{"asset":{"version":"2.0"}}"#.to_vec()),
+        ("assets/example/models/block/custom.bin", b"not a vanilla resource".to_vec()),
+        ("assets/example/models/block/sidecar.png", png(&[200, 200, 0, 255], 1)),
+    ];
+    for (name, bytes) in &inputs { put(&directory, name, bytes); }
+    {
+        let mut writer = zip::ZipWriter::new(File::create(&zip_path).unwrap());
+        for (name, bytes) in inputs.iter().rev() {
+            writer.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+            writer.write_all(bytes).unwrap();
+        }
+        writer.finish().unwrap();
+    }
+    for source in [&directory, &zip_path] {
+        let bank = TextureBank::open_stack_java(&[source.to_path_buf()]).unwrap();
+        let casing = state("example:casing", vec![]);
+        let custom = state("example:custom", vec![]);
+        let unresolved = state("example:unresolved", vec![]);
+        assert_eq!(bank.model_count(), 4);
+        assert_eq!(color(&bank, "example:casing"), [12, 110, 208, 255]);
+        // Sidecar images under models/ are only used by non-vanilla formats.
+        assert!(!bank.atlas().unwrap().entries.contains_key("example:__gltf/block/sidecar"));
+        let (uv, _, page) = bank.atlas_face_style_at(
+            &casing, crate::isometric::Face::Top, 0, (0, 64, 0)).unwrap();
+        assert_eq!(bank.atlas_pixel([
+            (uv[0][0] + uv[2][0]) * 0.5,
+            (uv[0][1] + uv[2][1]) * 0.5,
+        ], page), Some([12, 110, 208, 255]));
+        assert!(bank.geometry_at(&casing, (0, 64, 0)).is_some());
+        assert!(bank.geometry_at(&custom, (0, 64, 0)).is_none());
+        assert!(bank.static_obj_at(&custom, (0, 64, 0)).is_none());
+        for missing in [&custom, &unresolved] {
+            assert!(bank.resolve_id_at(missing, crate::isometric::Face::Top, (0, 64, 0)).is_none());
+            let (uv, _, page) = bank.atlas_face_style_at(
+                missing, crate::isometric::Face::Top, 0, (0, 64, 0)).unwrap();
+            let pixel = bank.atlas_pixel([
+                (uv[0][0] + uv[2][0]) * 0.5,
+                (uv[0][1] + uv[2][1]) * 0.5,
+            ], page);
+            assert!(matches!(pixel, Some([248, 0, 248, 255] | [0, 0, 0, 255])));
+        }
+    }
 }

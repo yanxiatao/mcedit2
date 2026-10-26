@@ -13,10 +13,15 @@ The root of this branch is the native rewrite, not the original Python applicati
 ## Resource-pack overlay order
 
 The native texture input supports multiple local folders, ZIP resource packs
-or client JAR paths separated by `;`, **lowest priority first**. If the active
-Java world has a locally discoverable vanilla client JAR, it becomes the lowest
-layer automatically. Upper packs override only matching block PNG, model or
-blockstate JSON identities; missing assets still use the original lower layer.
+or client JAR paths separated by `;`, **lowest priority first**. The selected world's `saves/` parent determines its Minecraft game
+directory. The renderer attempts to layer a matching vanilla client JAR,
+resource-bearing JARs under that same instance's `mods/`, generated
+`kubejs/assets/` files, and the `file/...` packs enabled in that
+instance's `options.txt`, in increasing priority. Only explicitly selected
+packs are enabled; other installed resource packs are ignored. Manually
+selected ZIP/JAR/folder layers have the highest priority. Upper layers override
+only matching PNG, model JSON or blockstate JSON identities; absent overrides
+retain an intact lower layer.
 A new static PNG does not inherit stale `.mcmeta` animation instructions
 from a lower layer. All decoding happens in the existing background worker,
 and the combined atlas is generated once under existing memory/GPU budgets.
@@ -48,7 +53,7 @@ Windows packaging is an opt-in workflow. Do **not** trigger Actions, tests, buil
 
 - Accept original Java Minecraft world folders, metadata, signed coordinates and known Alpha, MCRegion and Anvil source layouts. Unknown/modded data must not be invented or silently rewritten.
 - Open directly into a 3D spectator-style viewport; fly, mouse-look, inspect, select and stream existing chunks. Sparse distant LOD is a visualization only, never an editing authority.
-- Load PNG textures and Java blockstate/model metadata from local resource-pack folders, ZIPs or a known client JAR. Mixed-resolution, multi-page GPU atlas packing preserves per-face atlas page and UV mapping. Unsupported model features may fall back; no shader or entity-render parity is promised.
+- Auto-discover Java PNG, `.mcmeta`, blockstate JSON and model JSON assets from the selected world's vanilla client, installed Mods and enabled resource packs. Mixed-resolution, multi-page GPU atlas packing preserves per-face page and UV mapping. Unresolved foreign-namespace models display the explicit purple/black missing texture, not inferred block geometry or name-based sprites.
 - Use in-memory edit groups, preview/undo, native source-validation and deliberately guarded save paths. World writes must not occur implicitly from inspection or a resource-pack load.
 
 Read [COMPATIBILITY.md](COMPATIBILITY.md) for the detailed data-version/storage safety policy. See [original-format regression fixtures](../test_files/README.md) and `crates/mcedit2-world/tests/` for native regression coverage.
@@ -71,16 +76,36 @@ reorder only unread tasks and the display budget; already cached Region data,
 in-progress reads, edit history and source NBT are not changed. Priority never
 acts as a visibility or source-data filter.
 
-## Installed client auto-detection
+## Minecraft instance resource auto-detection
 
-With the 3D spectator view enabled, MCEdit2 attempts to load the exact
-version-matched vanilla Java client JAR, first from paths adjacent to the
-world save and then from conventional Minecraft, PrismLauncher and MultiMC
-install locations under the user's OS application data or home directory.
-Only known candidate filenames are probed; the editor does not scan disks,
-search the network or modify the installed launcher/client. If no matching
-client is installed, a diagnostic tells the user to select a pack/JAR
-manually. A manually selected stack still overrides its vanilla base.
+With 3D spectator enabled, MCEdit2 probes the exact version-matched vanilla
+Java client JAR, first near the world save and then at known Minecraft,
+PrismLauncher and MultiMC paths. When the world is inside `saves/`, its parent
+game directory is also used for a **bounded, flat** read-only scan of
+`mods/*.jar` files that actually contain `assets/<namespace>/...`;
+disabled JARs and plain Java libraries without assets are skipped.
+`kubejs/assets` is treated as a generated resource layer. Only `file/...`
+entries enabled in `options.txt:resourcePacks` are loaded from `resourcepacks/`,
+in their recorded low-to-high order. No Mod code/scripts are executed and no
+network/download or disk-wide discovery occurs. The UI can rescan the same
+instance without clearing the previous completed atlas. Switching game
+instances invalidates the old atlas and discards stale worker results.
+
+**Core renderer scope:** Mod assets use the same declarative vanilla Java
+blockstate variants, weighted choices, multipart conditions, JSON parent
+inheritance, elements, per-face UV, rotation, tint and `textures` aliases.
+Only standard PNG and `.mcmeta` sources are imported by the production
+resource loader. If a foreign-namespace block has no resolvable Java model,
+has an unresolved parent, specifies a custom `loader`, or has invalid
+geometry, the viewer uses the fixed purple/black missing-texture marker on
+a conservative placeholder rather than guessing a same-named PNG. Missing
+individual JSON faces remain absent, not invented. Namespace preservation
+prevents accidental cross-Mod sprite borrowing.
+
+Custom Mod geometry, OBJ/MTL, glTF/GLB, block-entity renderers, dynamic
+NBT-dependent meshes and executable client render hooks are **not enabled**
+in the production asset path. They are reserved for a later opt-in plugin
+rendering interface; no current plugin support is implied.
 
 ## Exact 3D chunk seam visibility
 
@@ -198,7 +223,16 @@ This is generic static model handling, not per-block renderer special cases.
 Dynamic NBT-dependent block entity shapes and non-JSON loaders still need a
 source-aware plugin/model contract; no Mod executable render code is loaded.
 
-## Static special-model loader, independent of block identity
+## Legacy experimental special-model parsers (not enabled by the app)
+
+The following historical sections describe **test-only experimental
+implementations** retained in source. The desktop application's production
+automatic and manual resource entrypoints now use `open_stack_java`,
+which does not ingest OBJ, MTL, glTF, GLB, sidecar model images or binary
+buffers. Those experimental parsers do not participate in normal Mod
+rendering; a future plugin interface would need to opt in explicitly.
+Historical tests using the legacy `open_stack` path do not indicate
+production renderer support.
 
 The universal resource-pack model path now includes a **guarded static OBJ
 backend** selected by `forge:obj` / `neoforge:obj` in the original block

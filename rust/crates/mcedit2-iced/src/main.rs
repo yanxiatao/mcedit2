@@ -2352,7 +2352,7 @@ fn update_impl(app: &mut App, message: Message) -> iced::Task<Message> {
                             // Explicit packs are always highest priority.
                             stack.retain(|base| !layers.contains(base));
                             stack.extend(layers);
-                            textures::TextureBank::open_stack(&stack)
+                            textures::TextureBank::open_stack_java(&stack)
                                 .map(|bank| (bank, detected))
                         };
                         let _ = sender.send((path, result));
