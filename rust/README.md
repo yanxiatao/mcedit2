@@ -100,6 +100,49 @@ GPU result. A full local `cargo check --workspace`, `cargo test --workspace`,
 and a large authentic Modded-world visual comparison against Amulet are
 still required before describing renderer parity.
 
+## Incremental chunk source and GPU refresh
+
+The native terrain compositor now separates three distinct operations:
+
+1. **Original chunk reads** are queued in camera-facing order, without
+   filtering any valid source chunk out of the requested radius.
+2. **Visible scene assembly** retains the publication order of already
+   completed chunk reads. New chunks append to the existing draw order and
+   an upgraded LOD replaces the same chunk's slot. Camera yaw changes only
+   reprioritize unread IO; they do not rebuild terrain geometry.
+3. **GPU uploads** compare complete six-vertex faces by their actual POD
+   bytes. Equal-length replacements update dirty intervals rather than
+   rewriting all later unchanged chunks. Insertions/removals use a safe
+   shifted-suffix upload. Changed camera uniforms without transparent
+   geometry do not scan the source mesh each frame.
+
+The exact-chunk mesh builder iterates directly over contiguous original
+source voxel slices instead of allocating intermediate per-chunk vectors of
+references. Cache validation still uses exact `SurfaceVoxel` equality, so
+changes to an original face mask, blockstate, biome or staging status
+invalidate affected mesh data without relying on a hash collision assumption.
+Region seams remain checked against real original neighbors, using a
+hash-indexed lookup rather than repeated balanced-tree searches. Existing
+coarser source patches remain available during finer reads after camera
+replanning; absent source chunks are never synthesized.
+
+Both 3D spectator and the isometric projection no longer truncate visible
+faces at historical 150k/175k-face thresholds. Rendering hardware constraints
+remain handled by device-sized GPU buffer segmentation, not a fixed
+user-visible geometry quota. Cached layouts and atlases continue to require
+independent memory and device-capability checks.
+
+These changes were developed from the chunk/region lifecycle principles in
+Amulet Map Editor. They are not an Amulet port. In particular, the current
+`SurfaceView` still materializes a combined voxel list on publication,
+and the GPU still maintains a flattened scene buffer. Fully persistent
+per-chunk GPU buffers and multiple independent atlas bindings are future
+architectural work, not claimed capabilities of this commit.
+
+No GitHub Actions/CI or Windows packaging runs were initiated for this
+change; offline source inspection and regression test additions are not a
+substitute for running `cargo check`, the tests and real-save GPU validation.
+
 ## Camera-facing full-ring streaming
 
 The native spectator still schedules **every** actual Java chunk inside the

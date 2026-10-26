@@ -46,12 +46,12 @@ impl ChunkMeshCache {
         &mut self,
         style: Style,
         key: Key,
-        source: &[&SurfaceVoxel],
+        source: &[SurfaceVoxel],
     ) -> Option<(Arc<Vec<Vertex>>, [i32; 3])> {
         self.ensure_style(style);
         let entry = self.entries.get(&key)?;
         if entry.source.len() != source.len()
-            || !entry.source.iter().zip(source).all(|(a, b)| a == *b)
+            || !entry.source.iter().zip(source).all(|(a, b)| a == b)
         {
             return None;
         }
@@ -61,7 +61,7 @@ impl ChunkMeshCache {
         &mut self,
         style: Style,
         key: Key,
-        source: &[&SurfaceVoxel],
+        source: &[SurfaceVoxel],
         origin: [i32; 3],
         vertices: Vec<Vertex>,
     ) {
@@ -76,7 +76,7 @@ impl ChunkMeshCache {
         self.entries.insert(
             key,
             Entry {
-                source: source.iter().map(|v| (*v).clone()).collect(),
+                source: source.to_vec(),
                 origin,
                 vertices: Arc::new(vertices),
             },
@@ -149,17 +149,17 @@ mod tests {
         let mut c = ChunkMeshCache::default();
         let v = sample(-1);
         let s = ChunkMeshCache::style(None, false, Quality::Balanced);
-        c.insert(s, (-1, 0, -1, 90, 0), &[&v], [-16, 80, 0], vec![vertex()]);
-        assert!(c.get(s, (-1, 0, -1, 90, 0), &[&v]).is_some());
+        c.insert(s, (-1, 0, -1, 90, 0), std::slice::from_ref(&v), [-16, 80, 0], vec![vertex()]);
+        assert!(c.get(s, (-1, 0, -1, 90, 0), std::slice::from_ref(&v)).is_some());
         let mut changed = v.clone();
         changed.faces = 0;
-        assert!(c.get(s, (-1, 0, -1, 90, 0), &[&changed]).is_none());
+        assert!(c.get(s, (-1, 0, -1, 90, 0), std::slice::from_ref(&changed)).is_none());
         changed.faces = FACE_TOP;
         changed.biome = None;
-        assert!(c.get(s, (-1, 0, -1, 90, 0), &[&changed]).is_none());
+        assert!(c.get(s, (-1, 0, -1, 90, 0), std::slice::from_ref(&changed)).is_none());
         changed.biome = v.biome.clone();
         changed.state.name = "minecraft:dirt".into();
-        assert!(c.get(s, (-1, 0, -1, 90, 0), &[&changed]).is_none());
+        assert!(c.get(s, (-1, 0, -1, 90, 0), std::slice::from_ref(&changed)).is_none());
         assert!(c.get(s, (-1, 0, -1, 90, 0), &[]).is_none());
     }
     #[test]
@@ -173,19 +173,19 @@ mod tests {
         let mut c = ChunkMeshCache::default();
         let v = sample(0);
         let a = ChunkMeshCache::style(None, false, Quality::Balanced);
-        c.insert(a, (0, 0, 0, 90, 0), &[&v], [0, 0, 0], vec![vertex()]);
+        c.insert(a, (0, 0, 0, 90, 0), std::slice::from_ref(&v), [0, 0, 0], vec![vertex()]);
         assert!(c
             .get(
                 ChunkMeshCache::style(None, true, Quality::Balanced),
                 (0, 0, 0, 90, 0),
-                &[&v]
+                std::slice::from_ref(&v)
             )
             .is_none());
         let s = ChunkMeshCache::style(None, true, Quality::Balanced);
         let mut water = v.clone();
         water.kind = VoxelMaterial::Liquid;
-        c.insert(s, (0, 0, 0, 90, 0), &[&water], [0, 0, 0], vec![vertex()]);
-        assert!(c.get(s, (0, 0, 0, 90, 0), &[&water]).is_none());
+        c.insert(s, (0, 0, 0, 90, 0), std::slice::from_ref(&water), [0, 0, 0], vec![vertex()]);
+        assert!(c.get(s, (0, 0, 0, 90, 0), std::slice::from_ref(&water)).is_none());
     }
     #[test]
     fn no_fixed_chunk_count_discards_active_meshes() {
@@ -195,11 +195,11 @@ mod tests {
         for cx in 0..2200 {
             let sample = sample(cx * 16);
             cache.insert(style, (cx, 0, sample.x, sample.y, sample.z),
-                &[&sample], [0, 0, 0], vec![vertex()]);
+                std::slice::from_ref(&sample), [0, 0, 0], vec![vertex()]);
         }
         cache.retain_visible(&active);
         assert_eq!(cache.entry_count(), 2200);
-        assert!(cache.get(style, (0, 0, 0, 90, 0), &[&sample(0)]).is_some());
+        assert!(cache.get(style, (0, 0, 0, 90, 0), std::slice::from_ref(&sample(0))).is_some());
     }
     #[test]
     fn cache_retains_all_visible_chunks_and_discards_departed_chunks() {
@@ -208,14 +208,14 @@ mod tests {
         for cx in -4..=4 {
             let voxel = sample(cx * 16);
             c.insert(style, (cx, 0, voxel.x, voxel.y, voxel.z),
-                &[&voxel], [0, 0, 0], vec![vertex()]);
+                std::slice::from_ref(&voxel), [0, 0, 0], vec![vertex()]);
         }
         let active: HashSet<_> = (-4..=4).filter(|cx| *cx >= 0).map(|cx| (cx, 0)).collect();
         c.retain_visible(&active);
         assert_eq!(c.entry_count(), 5);
         let voxel = sample(0);
-        assert!(c.get(style, (0, 0, 0, 90, 0), &[&voxel]).is_some());
+        assert!(c.get(style, (0, 0, 0, 90, 0), std::slice::from_ref(&voxel)).is_some());
         let old = sample(-16);
-        assert!(c.get(style, (-1, 0, -16, 90, 0), &[&old]).is_none());
+        assert!(c.get(style, (-1, 0, -16, 90, 0), std::slice::from_ref(&old)).is_none());
     }
 }

@@ -2293,7 +2293,7 @@ fn update_impl(app: &mut App, message: Message) -> iced::Task<Message> {
         }
         Message::SpectatorFocusLost => app.spectator_keys.clear(),
         Message::SpectatorRadius(value) => {
-            if matches!(value, 8 | 16 | 32 | 64) {
+            if matches!(value, 8 | 16 | 32 | 64 | 128) {
                 app.spectator_radius = value;
             }
         }

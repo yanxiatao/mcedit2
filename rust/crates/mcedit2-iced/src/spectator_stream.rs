@@ -13,7 +13,7 @@ use mcedit2_world::{
     WorldError,
 };
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -162,6 +162,41 @@ fn prioritized_pending(
     pending.append(&mut distant);
     pending
 }
+/// Per-chunk, append-only display order independent of background IO
+/// scheduling. Streaming a new chunk appends it after already visible chunks
+/// rather than inserting it into the middle of a large GPU vertex array.
+/// Existing positions remain stable across camera rotation and LOD changes.
+#[derive(Default)]
+struct DisplayOrder {
+    visible: Vec<FarChunkRequest>,
+    positions: HashMap<(i32, i32), usize>,
+}
+impl DisplayOrder {
+    fn publish(&mut self, request: FarChunkRequest) {
+        let id = (request.cx, request.cz);
+        if let Some(&index) = self.positions.get(&id) {
+            self.visible[index] = request;
+        } else {
+            self.positions.insert(id, self.visible.len());
+            self.visible.push(request);
+        }
+    }
+    fn replan(&mut self, requested: &[FarChunkRequest]) {
+        let index: HashMap<(i32, i32), FarChunkRequest> = requested.iter()
+            .copied().map(|req| ((req.cx, req.cz), req)).collect();
+        self.visible.retain_mut(|req| {
+            if let Some(new) = index.get(&(req.cx, req.cz)) {
+                *req = *new;
+                true
+            } else {
+                false
+            }
+        });
+        self.positions = self.visible.iter().enumerate()
+            .map(|(index, req)| ((req.cx, req.cz), index))
+            .collect();
+    }
+}
 /// Pick the best available original source resolution for this chunk.
 /// Completeness does not depend on a global visible-voxel quota.
 /// When a spectator flies toward terrain, a cached coarse patch remains
@@ -195,7 +230,9 @@ fn not_cancelled(flag: &AtomicBool) -> bool {
 /// be reused without cloning potentially tens of thousands of palettes.
 fn reconcile_exact_seams(view: &mut SurfaceView) {
     let hidden: Vec<u8> = {
-        let occupied: BTreeMap<(i32, i32, i32), (&mcedit2_world::sections::State, VoxelMaterial)> =
+        // Face-neighbor lookup is independent of coordinate order. Hashing
+        // avoids six O(log N) BTreeMap probes per exact source voxel.
+        let occupied: HashMap<(i32, i32, i32), (&mcedit2_world::sections::State, VoxelMaterial)> =
             view.voxels
                 .iter()
                 .filter(|v| v.span == 1)
@@ -246,6 +283,8 @@ pub(crate) struct Stream {
     pub center: (i32, i32),
     pub radius: u16,
     look_sector: u8,
+    /// Display source chunks in publication order, not re-sorted with yaw.
+    display_order: DisplayOrder,
     pub exact_y_min: i32,
     pub nonce: u64,
     pub running: bool,
@@ -291,6 +330,7 @@ impl Stream {
             center: center_chunk(location),
             radius,
             look_sector: look_sector(yaw),
+            display_order: DisplayOrder::default(),
             exact_y_min,
             nonce,
             running: false,
@@ -319,15 +359,20 @@ impl Stream {
     ) -> Result<(), String> {
         let mut requests = plan(location, radius)?;
         let center = center_chunk(location);
+        // Retain the draw offset of every still-requested source chunk.
+        // New chunks get their slot only after their read successfully ends.
+        self.display_order.replan(&requests);
         self.look_sector = look_sector(yaw);
         sort_facing(&mut requests, center, self.look_sector);
         let exact_y_min = Self::height_window(&self.source, location);
         let changed_height = self.exact_y_min != exact_y_min;
-        let needed: BTreeSet<_> = requests.iter().copied().map(key).collect();
-        // Exact voxel chunks depend on the observer's vertical view window.
-        // Distant sampled source-height columns do not.
-        self.cache
-            .retain(|id, _| needed.contains(id) && !(changed_height && id.2 == 1));
+        let needed: HashSet<_> = requests.iter()
+            .map(|req| (req.cx, req.cz)).collect();
+        // Keep verified coarser patches while a finer source request reads;
+        // otherwise moving toward a chunk temporarily erases it. Exact
+        // vertical windows must still be reread after a vertical shift.
+        self.cache.retain(|id, _| needed.contains(&(id.0, id.1))
+            && !(changed_height && id.2 == 1));
         self.exact_y_min = exact_y_min;
         self.cached_voxels = self.cache.values().map(|p| p.voxels.len()).sum();
         self.complete = requests
@@ -369,7 +414,8 @@ impl Stream {
         sort_facing(&mut self.wanted, self.center, sector);
         let unread = self.pending.drain(..).collect::<Vec<_>>();
         self.pending = prioritized_pending(&unread, &self.cache, self.center, sector);
-        self.dirty = true;
+        // Geometry has not changed. A new camera orientation updates the GPU
+        // camera uniform and transparent ordering, not the source mesh.
     }
     pub fn fetch(&mut self) -> Task<Message> {
         if self.running || self.pending.is_empty() {
@@ -494,6 +540,7 @@ impl Stream {
                         self.cached_voxels = self.cached_voxels.saturating_sub(previous.voxels.len());
                     }
                     self.cached_voxels = self.cached_voxels.saturating_add(n);
+                    self.display_order.publish(req);
                 }
                 Err(_) => self.errors += 1,
             }
@@ -521,7 +568,7 @@ impl Stream {
                 && z < near.z as i64 + near.depth as i64
                 && z + 16 > near.z as i64
         };
-        for req in &self.wanted {
+        for req in &self.display_order.visible {
             if overlaps(*req) {
                 continue;
             }
@@ -610,6 +657,38 @@ mod tests {
         assert_eq!(scheduled, original);
     }
     #[test]
+    fn display_order_is_append_only_and_independent_of_camera_facing() {
+        let requests = plan([0.0, 72.0, 0.0], 12).unwrap();
+        let mut a = requests.clone();
+        let mut b = requests.clone();
+        sort_facing(&mut a, (0, 0), look_sector(0.0));
+        sort_facing(&mut b, (0, 0), look_sector(180.0));
+        assert_ne!(a, b);
+        let mut order = DisplayOrder::default();
+        let first = requests[0];
+        let second = requests[1];
+        let third = requests[2];
+        order.publish(second);
+        order.publish(first);
+        order.publish(second);
+        assert_eq!(order.visible, vec![second, first]);
+        order.replan(&b);
+        assert_eq!(order.visible, vec![second, first]);
+        order.publish(third);
+        assert_eq!(order.visible, vec![second, first, third]);
+        // Changing requested source resolution never moves the existing slot.
+        let mut finer = requests.clone();
+        let target = finer.iter_mut().find(|r|
+            (r.cx, r.cz) == (second.cx, second.cz)).unwrap();
+        target.span = 1;
+        order.replan(&finer);
+        assert_eq!(order.visible[0].span, 1);
+        assert_eq!((order.visible[0].cx, order.visible[0].cz),
+            (second.cx, second.cz));
+        order.replan(&[first, third]);
+        assert_eq!(order.visible, vec![first, third]);
+    }
+    #[test]
     fn camera_facing_prioritizes_complete_chunk_rings_without_skipping_sources() {
         let planned = plan([0.0, 80.0, 0.0], 8).unwrap();
         let unique = planned.iter().copied().map(key).collect::<BTreeSet<_>>();
@@ -665,6 +744,13 @@ mod tests {
         assert_eq!(best_cached_resolution(request, |key|
             (key == (30, -19, 1)).then_some(usize::MAX)),
             Some((30, -19, 1)));
+    }
+    #[test]
+    fn selected_radius_has_no_hidden_sixty_four_chunk_limit() {
+        let radius = 128;
+        let selected = plan([0.0, 70.0, 0.0], radius).unwrap();
+        assert_eq!(selected.len(), (radius as usize * 2 + 1).pow(2));
+        assert!(selected.iter().any(|req| req.cx == 128 && req.cz == 0));
     }
     #[test]
     fn exact_seams_cull_only_proven_full_opaque_neighbors() {

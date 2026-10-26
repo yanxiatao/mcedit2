@@ -57,9 +57,6 @@ pub enum Face {
     PosZ,
     NegZ,
 }
-/// Hard cap shared by GPU draw and CPU original-block picking; never
-/// advertise clickable faces omitted by the GPU vertex budget.
-pub(crate) const MAX_RENDER_FACES: usize = 150_000;
 impl Face {
     pub fn normal(self) -> (i32, i32, i32) {
         match self {
@@ -190,6 +187,7 @@ pub(crate) struct RenderFace {
 /// Screen-relative frame-priority: preserve near faces across a whole
 /// multi-chunk viewport instead of silently truncating after the first
 /// X/Z columns. Both drawing and picking consume this exact same set.
+#[cfg(test)]
 fn face_nearest_first(a: &RenderFace, b: &RenderFace) -> std::cmp::Ordering {
     b.depth
         .total_cmp(&a.depth)
@@ -198,6 +196,7 @@ fn face_nearest_first(a: &RenderFace, b: &RenderFace) -> std::cmp::Ordering {
         .then_with(|| a.face.flag().cmp(&b.face.flag()))
         .then_with(|| a.element_index.cmp(&b.element_index))
 }
+#[cfg(test)]
 fn prune_nearest_faces(faces: &mut Vec<RenderFace>, limit: usize) {
     if faces.len() <= limit {
         return;
@@ -213,6 +212,7 @@ fn prune_nearest_faces(faces: &mut Vec<RenderFace>, limit: usize) {
 /// Keep far sampled terrain visible even when nearby multipart geometry
 /// produces more faces than the frame can upload. Without distinct quotas,
 /// center-priority truncation can permanently eliminate the distant horizon.
+#[cfg(test)]
 fn scene_lod_layer(face: &RenderFace, view: &SurfaceView) -> usize {
     let voxel = &view.voxels[face.voxel_index];
     if voxel.span == 1 {
@@ -230,6 +230,7 @@ fn scene_lod_layer(face: &RenderFace, view: &SurfaceView) -> usize {
         1
     }
 }
+#[cfg(test)]
 fn prune_scene_faces(faces: &mut Vec<RenderFace>, view: &SurfaceView, limit: usize) {
     if faces.len() <= limit {
         return;
@@ -845,8 +846,6 @@ impl IsometricSurface {
             .map(|v| ((v.x, v.y, v.z), &v.state))
             .collect();
         let distant = models::DistantElevation::new(&self.surface);
-        let mut rendered_walls = 0usize;
-        const MAX_LOD_WALL_FACES: usize = MAX_RENDER_FACES / 8;
         let mut json_face_cache: HashMap<
             (crate::gpu_mesh::ModelCacheKey<'_>, usize, u8),
             (Option<bool>, Option<Option<Face>>, bool),
@@ -859,7 +858,7 @@ impl IsometricSurface {
             // face projection. Padding 4 blocks covers allowed model-element
             // rotations/rescale and extends beyond zero-thickness quads.
             // Far LOD tiles get a real span-based conservative envelope.
-            let wall_parts = if voxel.span > 1 && rendered_walls < MAX_LOD_WALL_FACES {
+            let wall_parts = if voxel.span > 1 {
                 distant.walls(voxel)
             } else {
                 Vec::new()
@@ -949,10 +948,7 @@ impl IsometricSurface {
                 .filter(|f| voxel.span == 1 || *f == Face::Top)
                 .map(|f| (f, element, false))
                 .chain(wall_parts.iter().map(|(f, part)| (*f, part, true)));
-                for (face, element, is_wall) in face_parts {
-                    if is_wall && rendered_walls >= MAX_LOD_WALL_FACES {
-                        continue;
-                    }
+                for (face, element, _is_wall) in face_parts {
                     // A lowered liquid surface is not on the block boundary.
                     // Use verified source fluid face visibility, not cube bounds.
                     if voxel.kind == VoxelMaterial::Liquid
@@ -1100,16 +1096,9 @@ impl IsometricSurface {
                         block_entity: voxel.original_block_entity,
                         staged: voxel.staged,
                     });
-                    if is_wall {
-                        rendered_walls += 1;
-                    }
-                    if out.len() >= MAX_RENDER_FACES + 4096 {
-                        prune_scene_faces(&mut out, &self.surface, MAX_RENDER_FACES);
-                    }
                 }
             }
         }
-        prune_scene_faces(&mut out, &self.surface, MAX_RENDER_FACES);
         // Painter's algorithm: far to near. Same ordering is used for picking.
         if cancelled() {
             return None;
@@ -1893,10 +1882,15 @@ mod tests {
         assert!(work.is_empty());
     }
     #[test]
-    fn face_budget_always_fits_gpu_triangles_and_picking() {
-        assert!(MAX_RENDER_FACES * 2 <= 350_000);
+    fn all_projected_faces_remain_available_to_picking_and_gpu() {
         let view = example();
-        assert!(view.faces(Size::new(800.0, 440.0)).len() <= MAX_RENDER_FACES);
+        let faces = view.faces(Size::new(800.0, 440.0));
+        assert!(!faces.is_empty());
+        assert!(faces.iter()
+            .all(|face| face.voxel_index < view.surface.voxels.len()));
+        let mut retained = faces.clone();
+        prune_scene_faces(&mut retained, &view.surface, faces.len());
+        assert_eq!(retained.len(), faces.len());
     }
     #[test]
     fn offscreen_faces_are_skipped_without_changing_source_voxels() {

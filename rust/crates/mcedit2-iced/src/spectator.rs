@@ -221,6 +221,11 @@ fn internally_occluded(parts: &[models::Part], index: usize, face: Face) -> bool
 pub(crate) fn build(view: &SpectatorScene) -> Vec<Vertex> {
     build_cancellable(view, &|| false).expect("uninterruptible spectator mesh")
 }
+fn source_chunk_group(voxel: &SurfaceVoxel) -> Option<(i32, i32)> {
+    (voxel.span == 1).then(|| (
+        voxel.x.div_euclid(16), voxel.z.div_euclid(16),
+    ))
+}
 /// Abandon stale meshes between source voxels. An interrupted build returns
 /// no vertices at all: incomplete geometry must never be cached or uploaded.
 pub(crate) fn build_cancellable(
@@ -271,31 +276,22 @@ pub(crate) fn build_cancellable(
         .collect::<std::collections::HashSet<_>>();
     view.chunk_cache.lock().unwrap_or_else(|e| e.into_inner())
         .retain_visible(&visible_chunks);
-    // Preserve source draw order and layered LOD visibility. Contiguous exact
-    // samples of an original chunk can reuse their own complete vertex block.
-    let mut runs: Vec<(Option<(i32, i32)>, Vec<&SurfaceVoxel>)> = Vec::new();
-    for voxel in &view.surface.voxels {
-        let chunk = (voxel.span == 1).then(|| (
-            voxel.x.div_euclid(16), voxel.z.div_euclid(16),
-        ));
-        if let Some(last) = runs.last_mut() {
-            if last.0 == chunk {
-                last.1.push(voxel);
-                continue;
-            }
-        }
-        runs.push((chunk, vec![voxel]));
-    }
-    for (chunk, run) in runs {
+    // Borrow contiguous source-chunk slices in place. Building Vec<&Voxel>
+    // for every block of every chunk doubled temporary allocations and made
+    // 128-chunk-radius renders especially expensive.
+    for run in view.surface.voxels.chunk_by(|left, right|
+        source_chunk_group(left) == source_chunk_group(right))
+    {
+        let chunk = source_chunk_group(&run[0]);
         if cancelled() { return None; }
         let id = chunk.map(|(cx, cz)| {
-            let first = run[0];
+            let first = &run[0];
             (cx, cz, first.x, first.y, first.z)
         });
         let before = out.len();
         if let Some(id) = id {
             let cached = view.chunk_cache.lock().unwrap_or_else(|e| e.into_inner())
-                .get(style, id, &run);
+                .get(style, id, run);
             if let Some((vertices, from_origin)) = cached {
                 crate::chunk_mesh_cache::ChunkMeshCache::append_rebased(
                     &mut out, &vertices, from_origin, origin,
@@ -303,7 +299,7 @@ pub(crate) fn build_cancellable(
                 continue;
             }
         }
-        for voxel in &run {
+        for voxel in run {
             if cancelled() { return None; }
         // Only witnessed height transitions, without a global face cap.
         let wall_parts = if voxel.span > 1 {
@@ -501,7 +497,7 @@ pub(crate) fn build_cancellable(
         if let Some(id) = id {
             if !cancelled() {
                 view.chunk_cache.lock().unwrap_or_else(|e| e.into_inner())
-                    .insert(style, id, &run, origin, out[before..].to_vec());
+                    .insert(style, id, run, origin, out[before..].to_vec());
             }
         }
     }
@@ -598,6 +594,30 @@ impl canvas::Program<Message> for Controls {
 mod tests {
     use super::*;
 
+    #[test]
+    fn chunk_slices_preserve_negative_coordinates_and_far_lod_boundaries() {
+        use mcedit2_world::sections::State;
+        use mcedit2_world::surface::ALL_FACES;
+        let voxel = |x, span| SurfaceVoxel {
+            x, y: 72, z: 0, span,
+            state: State { name: "minecraft:stone".into(), properties: vec![] },
+            biome: None, staged: false, original_block_entity: false,
+            faces: ALL_FACES, kind: VoxelMaterial::Solid,
+        };
+        let voxels = vec![
+            voxel(-1, 1), voxel(0, 1), voxel(15, 1), voxel(16, 1),
+            voxel(32, 4), voxel(48, 8),
+        ];
+        let grouped: Vec<_> = voxels.chunk_by(|left, right|
+            source_chunk_group(left) == source_chunk_group(right))
+            .map(|run| (source_chunk_group(&run[0]), run.len())).collect();
+        assert_eq!(grouped, vec![
+            (Some((-1, 0)), 1),
+            (Some((0, 0)), 2),
+            (Some((1, 0)), 1),
+            (None, 2),
+        ]);
+    }
     #[test]
     fn spectator_mesh_uses_original_thin_connection_shapes_without_json_assets() {
         use mcedit2_world::sections::State;

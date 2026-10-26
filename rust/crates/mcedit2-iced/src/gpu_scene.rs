@@ -268,6 +268,9 @@ pub(crate) struct Pipeline {
     /// Hold the original Arc to make mesh identity pointer comparisons safe:
     /// dropping it would let a later allocator reuse the same address.
     last_source_mesh: Option<Arc<Vec<Vertex>>>,
+    /// Immutable for a given source-mesh Arc; a camera move should not scan
+    /// every opaque face just to rediscover whether sorting is necessary.
+    has_transparent_world_faces: bool,
     atlas: Option<Arc<TextureAtlas>>,
     atlas_texture: wgpu::Texture,
     atlas_layout: wgpu::BindGroupLayout,
@@ -314,6 +317,62 @@ fn mesh_upload_suffix(
         first_upload.is_some() || previous.len() != current.len(),
         first_upload,
     )
+}
+/// Return byte-aligned GPU ranges rather than uploading everything after
+/// the first changed chunk. For equal-length meshes, compare whole faces so
+/// two unchanged source chunks around a dirty chunk retain their GPU bytes.
+///
+/// Nearby dirty faces are coalesced when fewer bytes are transferred than the
+/// overhead of issuing many queue.write_buffer calls. If the length changes,
+/// fall back to the safe shifted suffix: offsets following inserted/removed
+/// geometry are no longer stable. No visible vertices are discarded.
+fn mesh_upload_ranges(
+    previous: Option<&[Vertex]>,
+    current: &[Vertex],
+    buffer_resized: bool,
+) -> (bool, Vec<std::ops::Range<usize>>) {
+    // The common equal-length edit case needs only one linear comparison
+    // pass; calling the old suffix finder first doubled the scan bandwidth.
+    if buffer_resized || previous.is_none_or(|old|
+        old.len() != current.len() || current.len() % 6 != 0)
+    {
+        let (changed, first) = mesh_upload_suffix(previous, current, buffer_resized);
+        return (changed, first.map(|i| vec![i..current.len()]).unwrap_or_default());
+    }
+    let previous = previous.expect("validated equal-length mesh above");
+    let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
+    for begin in (0..current.len()).step_by(6) {
+        let end = begin + 6;
+        let changed = bytemuck::cast_slice::<Vertex, u8>(&previous[begin..end])
+            != bytemuck::cast_slice::<Vertex, u8>(&current[begin..end]);
+        if !changed {
+            continue;
+        }
+        if let Some(last) = ranges.last_mut() {
+            // Each GPU write has a staging and dispatch cost. Merge dirty
+            // faces separated by at most 4 KiB of unchanged source vertices.
+            let unchanged_bytes =
+                (begin - last.end) * std::mem::size_of::<Vertex>();
+            if unchanged_bytes <= 4096 {
+                last.end = end;
+                continue;
+            }
+        }
+        ranges.push(begin..end);
+    }
+    if ranges.is_empty() {
+        return (false, ranges);
+    }
+    // If fragmentation outweighs the bytes saved, one suffix write is
+    // cheaper. This is an upload heuristic, never a geometry budget.
+    if ranges.len() > 1
+        && ranges.len().saturating_mul(4096)
+            > current.len().saturating_mul(std::mem::size_of::<Vertex>())
+    {
+        let first = ranges[0].start;
+        return (true, vec![first..current.len()]);
+    }
+    (true, ranges)
 }
 /// Perspective transparency is emitted as exactly two adjacent triangles
 /// per model face. Sort whole six-vertex quads, never individual triangles:
@@ -668,6 +727,7 @@ impl shader::Pipeline for Pipeline {
             segments: Vec::new(),
             last_uploaded_vertices: None,
             last_source_mesh: None,
+            has_transparent_world_faces: false,
             atlas: None,
             atlas_texture,
             atlas_layout,
@@ -699,11 +759,12 @@ impl shader::Primitive for Primitive {
             .as_ref()
             .is_none_or(|previous| !Arc::ptr_eq(previous, &self.vertices));
         let changed_camera = pipeline.last_camera != self.camera;
-        let needs_transparent_sort = self.camera.is_some()
-            && self
-                .vertices
-                .iter()
+        if mesh_identity_changed {
+            pipeline.has_transparent_world_faces = self.vertices.iter()
                 .any(|v| (v.mode & 3) == 2 && v.world_mode == 1);
+        }
+        let needs_transparent_sort = self.camera.is_some()
+            && pipeline.has_transparent_world_faces;
         let resort = needs_transparent_sort && (changed_camera || mesh_identity_changed);
         // Transparent ordering is itself the uploaded representation. Reuse
         // it across unchanged camera frames instead of replacing it with
@@ -772,22 +833,24 @@ impl shader::Primitive for Primitive {
                     mapped_at_creation: false,
                 });
             }
-            let (modified, first_upload) = if unchanged_scene && !resized_mesh && !was_segmented {
-                (false, None)
+            let (modified, upload_ranges) = if unchanged_scene && !resized_mesh && !was_segmented {
+                (false, Vec::new())
             } else {
                 let current = uploaded.as_ref().unwrap_or(&self.vertices);
-                mesh_upload_suffix(
+                mesh_upload_ranges(
                     pipeline.last_uploaded_vertices.as_deref().map(Vec::as_slice),
                     current,
                     resized_mesh || was_segmented,
                 )
             };
-            if let Some(first) = first_upload {
+            if !upload_ranges.is_empty() {
                 let current = uploaded.as_ref().unwrap_or(&self.vertices);
-                let offset = first * std::mem::size_of::<Vertex>();
-                let bytes = bytemuck::cast_slice::<Vertex, u8>(&current[first..]);
-                if !bytes.is_empty() {
-                    queue.write_buffer(&pipeline.buffer, offset as u64, bytes);
+                for range in upload_ranges {
+                    let offset = range.start * std::mem::size_of::<Vertex>();
+                    let bytes = bytemuck::cast_slice::<Vertex, u8>(&current[range]);
+                    if !bytes.is_empty() {
+                        queue.write_buffer(&pipeline.buffer, offset as u64, bytes);
+                    }
                 }
             }
             if let Some(vertices) = uploaded {
@@ -1172,6 +1235,36 @@ mod tests {
             mesh_upload_suffix(Some(&original), &original, true),
             (true, Some(0))
         );
+    }
+    #[test]
+    fn equal_length_chunk_edits_only_upload_local_dirty_faces() {
+        let original: Vec<Vertex> = (0..256)
+            .flat_map(|i| gpu_test_quad(i as f32))
+            .collect();
+        let mut updated = original.clone();
+        updated[6].atlas_page = 12;
+        updated[255 * 6].atlas_page = 34;
+        let (changed, ranges) = mesh_upload_ranges(Some(&original), &updated, false);
+        assert!(changed);
+        assert_eq!(ranges, vec![6..12, 255 * 6..256 * 6]);
+        assert!(ranges.iter().map(|r| r.len()).sum::<usize>() < updated.len());
+        assert_eq!(mesh_upload_ranges(Some(&updated), &updated, false), (false, vec![]));
+        assert_eq!(mesh_upload_ranges(None, &updated, false), (true, vec![0..updated.len()]));
+    }
+    #[test]
+    fn shifted_geometry_uploads_suffix_and_shrinking_only_updates_draw_count() {
+        let a = gpu_test_quad(1.0);
+        let b = gpu_test_quad(2.0);
+        let c = gpu_test_quad(3.0);
+        let old = [a.as_slice(), b.as_slice(), c.as_slice()].concat();
+        let shifted = [a.as_slice(), c.as_slice()].concat();
+        assert_eq!(mesh_upload_ranges(Some(&old), &shifted, false),
+            (true, vec![6..12]));
+        let removed_end = [a.as_slice(), b.as_slice()].concat();
+        assert_eq!(mesh_upload_ranges(Some(&old), &removed_end, false),
+            (true, vec![]));
+        assert_eq!(mesh_upload_ranges(Some(&old), &old, true),
+            (true, vec![0..old.len()]));
     }
     #[test]
     fn replacing_middle_chunk_uploads_entire_shifted_suffix() {

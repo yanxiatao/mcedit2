@@ -15,7 +15,6 @@ pub(crate) fn model_cache_key(state: &State, variant: u64) -> ModelCacheKey<'_> 
 use crate::textures::{AlphaMode, AtlasUv};
 use iced::{Color, Point, Size};
 use std::collections::HashMap;
-const MAX_TRIANGLES: usize = 350_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum Quality {
     Fast,
@@ -92,8 +91,8 @@ fn quad_uv(region: &AtlasUv) -> [[f32; 2]; 4] {
         region.sample(0.0, 1.0),
     ]
 }
-/// Conservative face and vertex limit; GPU path does not tessellate one
-/// Minecraft block into dozens of CPU-subdivided tiles anymore.
+/// One GPU quad per projected original face; no scene-wide polygon cap.
+
 /// The mesh worker can abandon obsolete camera views between individual
 /// source faces. Never return an incomplete mesh for caching or uploading.
 pub(crate) fn build_cancellable(
@@ -108,13 +107,13 @@ pub(crate) fn build_cancellable(
     if cancelled() {
         return None;
     }
-    let mut out = Vec::with_capacity(faces.len().min(MAX_TRIANGLES / 2) * 6);
+    let mut out = Vec::with_capacity(faces.len().saturating_mul(6));
     let atlas = view.texture_bank.as_ref().and_then(|bank| bank.atlas());
     let mut style_cache: HashMap<
         (String, Vec<(String, String)>, u8, usize, u64),
         Option<([[f32; 2]; 4], AlphaMode, u32)>,
     > = HashMap::new();
-    for face in faces.iter().take(MAX_TRIANGLES / 2) {
+    for face in faces.iter() {
         if cancelled() {
             return None;
         }
@@ -277,6 +276,7 @@ mod tests {
         assert_eq!(Quality::Fast.next(), Quality::Balanced);
         assert_eq!(Quality::Balanced.next(), Quality::Detailed);
         assert_eq!(Quality::Detailed.next(), Quality::Fast);
-        assert!(MAX_TRIANGLES * 3 < u32::MAX as usize);
+        // Full mesh arrays are split at hardware buffer and draw-call limits
+        // in gpu_scene, rather than clipped by this builder.
     }
 }
