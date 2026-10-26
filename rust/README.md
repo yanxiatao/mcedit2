@@ -260,3 +260,21 @@ Remaining gaps include full glTF scene node hierarchy, external buffer
 resolution, PBR/normal/metallic material shading, independent MTL map_d
 opacity images, arbitrary non-triangulated polygons and dynamic geometry.
 This pass deliberately does not add animation.
+
+## glTF 2.0 static scene hierarchy and pack-local buffers
+
+The static glTF/GLB loader traverses the **selected scene's actual root
+nodes**, composes parent/child TRS or column-major matrix transforms, and
+renders only reachable mesh instances. It rejects cycles, excessively deep
+trees, invalid node references and nonfinite/out-of-range geometry. glTF
+bufferViews may reference up to 32 declared buffers. Embedded GLB BIN and
+base64 buffers remain supported; external `.bin` references resolve strictly
+within the same loaded resource-pack model directory, from directory, ZIP,
+or JAR content. Resource member order is immaterial: source binaries are
+read-only cached and glTF meshes are assembled only after all layers load.
+Paths with traversal, absolute roots, backslashes or URI schemes are refused;
+no network or arbitrary filesystem reads are performed. Combined buffer
+memory is bounded and unresolved model references produce warnings, not
+world-save changes. Scene hierarchy, buffer bounds, traversal, and unordered
+ZIP references have Rust regression tests. Skinning and animation are
+intentionally excluded from this static renderer.

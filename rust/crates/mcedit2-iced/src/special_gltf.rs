@@ -58,7 +58,7 @@ struct Accessor<'a> {
     count: usize,
     kind: usize,
 }
-fn accessor<'a>(doc: &Value, bytes: &'a [u8], at: usize) -> Result<Accessor<'a>, String> {
+fn accessor<'a>(doc: &Value, buffers: &'a [Vec<u8>], at: usize) -> Result<Accessor<'a>, String> {
     let acc = item(field(doc, "accessors")?, at)?;
     if acc.get("sparse").is_some() {
         return Err("Sparse glTF accessors unsupported".into());
@@ -82,9 +82,8 @@ fn accessor<'a>(doc: &Value, bytes: &'a [u8], at: usize) -> Result<Accessor<'a>,
         field(doc, "bufferViews")?,
         number(field(acc, "bufferView")?)?,
     )?;
-    if number(field(view, "buffer")?)? != 0 {
-        return Err("Only one embedded glTF buffer supported".into());
-    }
+    let data=buffers.get(number(field(view,"buffer")?)?).ok_or("Invalid glTF buffer index")?;
+    let bytes=data.as_slice();
     let start = number(view.get("byteOffset").unwrap_or(&Value::Null))
         .unwrap_or(0)
         .checked_add(number(acc.get("byteOffset").unwrap_or(&Value::Null)).unwrap_or(0))
@@ -162,73 +161,116 @@ fn f64_val(v: Option<&Value>, default: f64) -> Result<f32, String> {
     }
     Ok(n as f32)
 }
-fn transform(node: &Value, point: [f32; 3]) -> Result<[f32; 3], String> {
-    if let Some(matrix) = node.get("matrix") {
-        let m = matrix
-            .as_array()
-            .filter(|m| m.len() == 16)
-            .ok_or("Invalid glTF matrix")?;
-        let mut out = [0.; 3];
-        for i in 0..3 {
-            out[i] = f64_val(m.get(12 + i), 0.)?;
-            for j in 0..3 {
-                out[i] += f64_val(m.get(4 * j + i), 0.)? * point[j];
-            }
+type Matrix = [f32; 16];
+fn identity() -> Matrix {
+    [1.,0.,0.,0., 0.,1.,0.,0., 0.,0.,1.,0., 0.,0.,0.,1.]
+}
+fn multiply(a: Matrix, b: Matrix) -> Matrix {
+    std::array::from_fn(|k| {
+        let (r,c) = (k % 4,k / 4);
+        (0..4).map(|i| a[i*4+r]*b[c*4+i]).sum()
+    })
+}
+fn transform(node: &Value) -> Result<Matrix,String> {
+    if let Some(matrix)=node.get("matrix") {
+        if node.get("translation").is_some() || node.get("rotation").is_some() || node.get("scale").is_some() {
+            return Err("glTF node cannot mix matrix and TRS".into());
         }
+        let arr=matrix.as_array().filter(|a|a.len()==16).ok_or("Invalid glTF matrix")?;
+        let mut out=[0.;16];
+        for (i,v) in arr.iter().enumerate() {out[i]=f64_val(Some(v),0.)?;}
         return Ok(out);
     }
-    let scale = node.get("scale").and_then(Value::as_array);
-    let mut p = point;
-    for (i, x) in p.iter_mut().enumerate() {
-        *x *= f64_val(scale.and_then(|v| v.get(i)), 1.)?;
+    let scale=node.get("scale").and_then(Value::as_array);
+    let rot=node.get("rotation").and_then(Value::as_array);
+    let trans=node.get("translation").and_then(Value::as_array);
+    if scale.is_some_and(|a|a.len()!=3) || rot.is_some_and(|a|a.len()!=4) || trans.is_some_and(|a|a.len()!=3) {
+        return Err("Invalid glTF TRS vector lengths".into());
     }
-    let q = node.get("rotation").and_then(Value::as_array);
-    let q = [
-        f64_val(q.and_then(|v| v.first()), 0.)?,
-        f64_val(q.and_then(|v| v.get(1)), 0.)?,
-        f64_val(q.and_then(|v| v.get(2)), 0.)?,
-        f64_val(q.and_then(|v| v.get(3)), 1.)?,
+    let s=[
+        f64_val(scale.and_then(|v|v.first()),1.)?,
+        f64_val(scale.and_then(|v|v.get(1)),1.)?,
+        f64_val(scale.and_then(|v|v.get(2)),1.)?,
     ];
-    let t = [
-        2. * (q[1] * p[2] - q[2] * p[1]),
-        2. * (q[2] * p[0] - q[0] * p[2]),
-        2. * (q[0] * p[1] - q[1] * p[0]),
+    let (x,y,z,w)=(
+        f64_val(rot.and_then(|v|v.first()),0.)?,
+        f64_val(rot.and_then(|v|v.get(1)),0.)?,
+        f64_val(rot.and_then(|v|v.get(2)),0.)?,
+        f64_val(rot.and_then(|v|v.get(3)),1.)?,
+    );
+    let n=x*x+y*y+z*z+w*w;
+    if !n.is_finite() || n<1e-12{return Err("Degenerate glTF quaternion".into());}
+    let q=n.sqrt().recip();
+    let (x,y,z,w)=(x*q,y*q,z*q,w*q);
+    let t=[
+        f64_val(trans.and_then(|v|v.first()),0.)?,
+        f64_val(trans.and_then(|v|v.get(1)),0.)?,
+        f64_val(trans.and_then(|v|v.get(2)),0.)?,
     ];
-    for i in 0..3 {
-        p[i] += q[3] * t[i] + (q[(i + 1) % 3] * t[(i + 2) % 3] - q[(i + 2) % 3] * t[(i + 1) % 3]);
-    }
-    let tr = node.get("translation").and_then(Value::as_array);
-    for (i, x) in p.iter_mut().enumerate() {
-        *x += f64_val(tr.and_then(|v| v.get(i)), 0.)?;
-    }
-    Ok(p)
+    Ok([
+        (1.-2.*(y*y+z*z))*s[0],2.*(x*y+z*w)*s[0],2.*(x*z-y*w)*s[0],0.,
+        2.*(x*y-z*w)*s[1],(1.-2.*(x*x+z*z))*s[1],2.*(y*z+x*w)*s[1],0.,
+        2.*(x*z+y*w)*s[2],2.*(y*z-x*w)*s[2],(1.-2.*(x*x+y*y))*s[2],0.,
+        t[0],t[1],t[2],1.,
+    ])
 }
-fn parse_document(doc: Value, data: &[u8]) -> Result<Vec<Triangle>, String> {
+fn apply_point(m:Matrix,p:[f32;3])->Result<[f32;3],String>{
+    let v=std::array::from_fn::<_,3,_>(|i|m[12+i]+(0..3).map(|j|m[4*j+i]*p[j]).sum::<f32>());
+    if v.iter().all(|x|x.is_finite() && (-1.0..=2.0).contains(x)){Ok(v)}
+    else{Err("glTF transformed point exceeds bounds".into())}
+}
+/// Scene traversal is limited to selected roots; transforms compose from
+/// parent to child. Repeated instances are legal, ancestry cycles are not.
+fn instances(doc:&Value, mesh_count:usize)->Result<Vec<(usize,Matrix)>,String>{
+    let Some(nodes)=doc.get("nodes").and_then(Value::as_array) else {
+        return Ok((0..mesh_count).map(|i|(i,identity())).collect());
+    };
+    if nodes.len()>4096{return Err("Too many glTF nodes".into());}
+    let roots:Vec<usize>=if let Some(scenes)=doc.get("scenes").and_then(Value::as_array){
+        let id=doc.get("scene").map(number).transpose()?.unwrap_or(0);
+        let scene=scenes.get(id).ok_or("Invalid scene index")?;
+        scene.get("nodes").and_then(Value::as_array).ok_or("Scene has no root nodes")?
+            .iter().map(number).collect::<Result<_,_>>()?
+    }else{
+        let mut child=vec![false;nodes.len()];
+        for node in nodes{
+            if let Some(children)=node.get("children").and_then(Value::as_array){
+                for id in children{*child.get_mut(number(id)?).ok_or("Invalid child")?=true;}
+            }
+        }
+        child.iter().enumerate().filter_map(|(i,v)|(!v).then_some(i)).collect()
+    };
+    let mut out=Vec::new();
+    let mut visited=vec![false;nodes.len()];
+    fn walk(id:usize,parent:Matrix,nodes:&[Value],visited:&mut[bool],
+        out:&mut Vec<(usize,Matrix)>,depth:usize)->Result<(),String>{
+        if depth>64||out.len()>512{return Err("glTF scene depth/instance limit".into());}
+        let node=nodes.get(id).ok_or("Unknown glTF node")?;
+        if visited[id]{return Err("Cycle in glTF node graph".into());}
+        visited[id]=true;
+        let current=multiply(parent,transform(node)?);
+        if let Some(mesh)=node.get("mesh"){
+            out.push((number(mesh)?,current));
+            if out.len()>512{return Err("Too many glTF mesh instances".into());}
+        }
+        if let Some(children)=node.get("children").and_then(Value::as_array){
+            for child in children{walk(number(child)?,current,nodes,visited,out,depth+1)?;}
+        }
+        visited[id]=false;
+        Ok(())
+    }
+    for root in roots{walk(root,identity(),nodes,&mut visited,&mut out,0)?;}
+    Ok(out)
+}
+fn parse_document(doc: Value, buffers: &[Vec<u8>]) -> Result<Vec<Triangle>, String> {
     if field(&doc, "asset")?.get("version").and_then(Value::as_str) != Some("2.0") {
         return Err("glTF 2.0 required".into());
     }
     let meshes = field(&doc, "meshes")?
         .as_array()
         .ok_or("Missing glTF meshes")?;
-    let nodes = doc.get("nodes").and_then(Value::as_array);
     let mut out = Vec::new();
-    // Only explicit mesh nodes are rendered if the scene supplies nodes;
-    // without nodes, retain plain mesh asset fallback.
-    let instances: Vec<(usize, Option<&Value>)> = if let Some(nodes) = nodes {
-        nodes
-            .iter()
-            .filter_map(|n| {
-                n.get("mesh")
-                    .and_then(Value::as_u64)
-                    .map(|v| (v as usize, Some(n)))
-            })
-            .collect()
-    } else {
-        (0..meshes.len()).map(|i| (i, None)).collect()
-    };
-    if instances.len() > 512 {
-        return Err("Too many glTF mesh instances".into());
-    }
+    let instances = instances(&doc,meshes.len())?;
     for (id, node) in instances {
         let mesh = meshes.get(id).ok_or("Unknown glTF mesh")?;
         for prim in field(mesh, "primitives")?
@@ -239,14 +281,14 @@ fn parse_document(doc: Value, data: &[u8]) -> Result<Vec<Triangle>, String> {
                 return Err("Only glTF TRIANGLES supported".into());
             }
             let attrs = field(prim, "attributes")?;
-            let positions = accessor(&doc, data, number(field(attrs, "POSITION")?)?)?;
-            let uvs = accessor(&doc, data, number(field(attrs, "TEXCOORD_0")?)?)?;
+            let positions = accessor(&doc, buffers, number(field(attrs, "POSITION")?)?)?;
+            let uvs = accessor(&doc, buffers, number(field(attrs, "TEXCOORD_0")?)?)?;
             if uvs.count != positions.count {
                 return Err("glTF position/UV count mismatch".into());
             }
             let indices = prim
                 .get("indices")
-                .map(|v| accessor(&doc, data, number(v)?))
+                .map(|v| accessor(&doc, buffers, number(v)?))
                 .transpose()?;
             let count = indices.as_ref().map_or(positions.count, |i| i.count);
             if count % 3 != 0 || out.len() + count / 3 > MAX_TRIANGLES {
@@ -272,11 +314,7 @@ fn parse_document(doc: Value, data: &[u8]) -> Result<Vec<Triangle>, String> {
                     let i = indices.as_ref().map_or(Ok(f + k), |a| a.index(f + k))?;
                     let position = positions.point(i, 3)?;
                     let point = [position[0], position[1], position[2]];
-                    let transformed = if let Some(n) = node {
-                        transform(n, point)?
-                    } else {
-                        point
-                    };
+                    let transformed = apply_point(node, point)?;
                     for c in 0..3 {
                         if !(-1.0..=2.0).contains(&transformed[c]) {
                             return Err("glTF mesh exceeds block bounds".into());
@@ -299,56 +337,97 @@ fn parse_document(doc: Value, data: &[u8]) -> Result<Vec<Triangle>, String> {
     }
     Ok(out)
 }
-/// Read either GLB 2.0 (embedded BIN chunk) or self-contained glTF JSON with
-/// one base64 data URI buffer. External files/network are refused.
-pub(crate) fn parse(bytes: &[u8]) -> Result<Vec<Triangle>, String> {
-    if bytes.len() > MAX_BYTES {
-        return Err("glTF source exceeds 8 MiB".into());
-    }
-    let (doc, embedded) = if bytes.starts_with(b"glTF") {
-        if bytes.len() < 20
-            || u32::from_le_bytes(bytes[4..8].try_into().unwrap()) != 2
-            || u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize != bytes.len()
-        {
-            return Err("Invalid GLB 2.0 header".into());
+fn safe_external_uri(uri:&str)->bool{
+    !uri.is_empty() && uri.len()<=160 && !uri.starts_with('/')
+        && !uri.contains('\\') && uri.split('/').all(|part|
+            !part.is_empty() && part!="." && part!=".."
+            && part.bytes().all(|c|c.is_ascii_lowercase()||c.is_ascii_digit()||b"._-".contains(&c)))
+}
+/// External buffer reads must be supplied by the already-ingested
+/// resource-pack content. URLs, absolute paths and parent traversal are
+/// forbidden; no network access or arbitrary filesystem reads.
+pub(crate) fn parse_with_resolver(
+    bytes:&[u8], resolve:&impl Fn(&str)->Option<Vec<u8>>
+)->Result<Vec<Triangle>,String>{
+    if bytes.len()>MAX_BYTES{return Err("glTF source exceeds 8 MiB".into());}
+    let (doc,embedded)=if bytes.starts_with(b"glTF"){
+        if bytes.len()<20 || u32::from_le_bytes(bytes[4..8].try_into().unwrap())!=2
+            || u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize!=bytes.len(){
+            return Err("Invalid GLB header".into())
         }
-        let len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
-        if len > bytes.len() - 20 || &bytes[16..20] != b"JSON" {
-            return Err("Missing GLB JSON chunk".into());
+        let len=u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+        if len>bytes.len()-20 || &bytes[16..20]!=b"JSON"{return Err("Missing GLB JSON chunk".into());}
+        let doc:Value=serde_json::from_slice(&bytes[20..20+len]).map_err(|e|e.to_string())?;
+        let offset=20+len;
+        if bytes.len()<offset+8 || &bytes[offset+4..offset+8]!=b"BIN\0"{
+            return Err("Missing GLB BIN chunk".into())
         }
-        let json: Value =
-            serde_json::from_slice(&bytes[20..20 + len]).map_err(|e| e.to_string())?;
-        let offset = 20 + len;
-        if bytes.len() < offset + 8 || &bytes[offset + 4..offset + 8] != b"BIN\0" {
-            return Err("Missing GLB BIN chunk".into());
-        }
-        let size = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
-        if size > bytes.len() - offset - 8 {
-            return Err("GLB BIN exceeds file".into());
-        }
-        (json, bytes[offset + 8..offset + 8 + size].to_vec())
-    } else {
-        let json: Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
-        let buffer = item(field(&json, "buffers")?, 0)?;
-        let uri = field(buffer, "uri")?
-            .as_str()
-            .ok_or("glTF buffer URI not a string")?;
-        let encoded = uri
-            .strip_prefix("data:application/octet-stream;base64,")
-            .or_else(|| uri.strip_prefix("data:application/gltf-buffer;base64,"))
-            .ok_or("External glTF buffer URI not supported")?;
-        let blob = decode_base64(encoded)?;
-        (json, blob)
+        let size=u32::from_le_bytes(bytes[offset..offset+4].try_into().unwrap()) as usize;
+        if size>bytes.len()-offset-8{return Err("Invalid GLB BIN length".into())}
+        (doc,Some(bytes[offset+8..offset+8+size].to_vec()))
+    }else{
+        (serde_json::from_slice(bytes).map_err(|e|e.to_string())?,None)
     };
-    let declared = number(field(item(field(&doc, "buffers")?, 0)?, "byteLength")?)?;
-    if declared > embedded.len() {
-        return Err("glTF declared buffer exceeds source bytes".into());
+    let declared=field(&doc,"buffers")?.as_array().ok_or("Missing glTF buffers")?;
+    if declared.is_empty()||declared.len()>32{return Err("glTF buffer count limit".into())}
+    let mut loaded=Vec::new();
+    let mut total=0usize;
+    for (i,buffer) in declared.iter().enumerate(){
+        let bytes_needed=number(field(buffer,"byteLength")?)?;
+        total=total.checked_add(bytes_needed).ok_or("glTF buffer size overflow")?;
+        if bytes_needed>MAX_BYTES || total>32*1024*1024{
+            return Err("glTF external buffer memory budget".into())
+        }
+        let bytes=if let Some(uri)=buffer.get("uri").and_then(Value::as_str){
+            if let Some(encoded)=uri.strip_prefix("data:application/octet-stream;base64,")
+                .or_else(||uri.strip_prefix("data:application/gltf-buffer;base64,")){
+                decode_base64(encoded)?
+            }else if safe_external_uri(uri){
+                resolve(uri).ok_or("Missing pack-local glTF buffer")?
+            }else{return Err("Unsafe external glTF buffer URI".into())}
+        }else if i==0{
+            embedded.clone().ok_or("Missing embedded GLB buffer")?
+        }else{return Err("Only first GLB buffer may be embedded".into())};
+        if bytes.len()<bytes_needed || bytes.len()>MAX_BYTES{
+            return Err("glTF declared buffer length mismatch".into())
+        }
+        loaded.push(bytes);
     }
-    parse_document(doc, &embedded)
+    parse_document(doc,&loaded)
+}
+pub(crate) fn parse(bytes:&[u8])->Result<Vec<Triangle>,String>{
+    parse_with_resolver(bytes,&|_|None)
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn hierarchical_scene_uses_parent_child_transforms_and_filters_unreachable(){
+        let d=serde_json::json!({"asset":{"version":"2.0"},"meshes":[{}],
+            "nodes":[{"translation":[1,0,0],"children":[1]},
+                     {"mesh":0,"translation":[0,1,0]},
+                     {"mesh":0,"translation":[99,0,0]}],
+            "scenes":[{"nodes":[0]}],"scene":0});
+        let nodes=instances(&d,1).unwrap();
+        assert_eq!(nodes.len(),1);
+        assert_eq!(apply_point(nodes[0].1,[0.,0.,0.]).unwrap(),[1.,1.,0.]);
+    }
+    #[test]
+    fn scene_cycles_and_bad_child_ids_fail_closed(){
+        let cyclic=serde_json::json!({"nodes":[{"children":[1]},{"children":[0]}],
+            "scenes":[{"nodes":[0]}]});
+        assert!(instances(&cyclic,1).is_err());
+        let malformed=serde_json::json!({"nodes":[{"children":[88]}],
+            "scenes":[{"nodes":[0]}]});
+        assert!(instances(&malformed,1).is_err());
+    }
+    #[test]
+    fn external_buffer_safety_refuses_remote_and_traversal(){
+        for path in ["../escape.bin","https://remote/a.bin","/absolute.bin","a//b.bin"]{
+            assert!(!safe_external_uri(path));
+        }
+        assert!(safe_external_uri("meshes/points.bin"));
+    }
     #[test]
     fn rejects_remote_external_and_malformed_sources() {
         assert!(parse(

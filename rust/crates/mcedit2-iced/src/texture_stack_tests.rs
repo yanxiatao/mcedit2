@@ -486,3 +486,53 @@ fn custom_mod_loader_static_renderer_adapter_is_declarative_and_id_independent()
                 .is_none()
     );
 }
+
+#[test]
+fn nested_gltf_scene_uses_external_buffers_in_unordered_zip_pack(){
+    let temp=Fixture::new();
+    let archive=temp.path("gltf_buffers.zip");
+    let mut positions=Vec::new();
+    for n in [0f32,0.,0.,1.,0.,0.,0.,1.,0.] {
+        positions.extend_from_slice(&n.to_le_bytes());
+    }
+    let mut tex=Vec::new();
+    for n in [0f32,0.,1.,0.,0.,1.] {
+        tex.extend_from_slice(&n.to_le_bytes());
+    }
+    let doc=serde_json::json!({
+        "asset":{"version":"2.0"},
+        "buffers":[{"uri":"position.bin","byteLength":36},{"uri":"uv.bin","byteLength":24}],
+        "bufferViews":[{"buffer":0,"byteLength":36},{"buffer":1,"byteLength":24}],
+        "accessors":[
+            {"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"},
+            {"bufferView":1,"componentType":5126,"count":3,"type":"VEC2"}],
+        "meshes":[{"primitives":[{"attributes":{"POSITION":0,"TEXCOORD_0":1}}]}],
+        "nodes":[{"translation":[0.25,0,0],"children":[1]},{"mesh":0,"translation":[0,0.5,0]}],
+        "scenes":[{"nodes":[0]}],"scene":0
+    });
+    let mut zip=zip::ZipWriter::new(File::create(&archive).unwrap());
+    for (name,data) in [
+        ("assets/example/models/block/assembly.gltf",serde_json::to_vec(&doc).unwrap()),
+        ("assets/example/models/block/uv.bin",tex),
+        ("assets/example/models/block/position.bin",positions),
+        ("assets/example/blockstates/assembly.json",
+            br#"{"variants":{"":{"model":"example:block/assembly"}}}"#.to_vec()),
+        ("assets/example/models/block/assembly.json",
+            br#"{"loader":"mcedit2:gltf","model":"example:models/block/assembly.gltf",
+                "textures":{"particle":"example:item/assembly"}}"#.to_vec()),
+        ("assets/example/textures/item/assembly.png",png(&[95,175,241,255],1))
+    ] {
+        zip.start_file(name,zip::write::SimpleFileOptions::default()).unwrap();
+        zip.write_all(&data).unwrap();
+    }
+    zip.finish().unwrap();
+    let bank=TextureBank::open(&archive).unwrap();
+    let state=mcedit2_world::sections::State{
+        name:"example:assembly".into(),properties:vec![]
+    };
+    let selected=bank.static_obj_at(&state,(0,70,0)).unwrap();
+    assert_eq!(selected.len(),1);
+    assert_eq!(selected[0].xyz[0],[-0.25,0.,-0.5]);
+    assert_eq!(selected[0].xyz[1],[0.75,0.,-0.5]);
+    assert!(!bank.warnings.iter().any(|x|x.contains("glTF")));
+}

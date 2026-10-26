@@ -828,6 +828,7 @@ enum PackAsset {
     Model,
     Obj,
     Gltf,
+    GltfBuffer,
     Mtl,
     Metadata(String),
     Texture(String),
@@ -846,6 +847,9 @@ impl PackAsset {
         if let Some(id) = texture_id(name) {
             return Some(Self::Texture(id));
         }
+        if name.ends_with(".bin") && name.contains("/models/") {
+            return Some(Self::GltfBuffer);
+        }
         if (name.ends_with(".gltf") || name.ends_with(".glb")) && name.contains("/models/") {
             return Some(Self::Gltf);
         }
@@ -862,7 +866,7 @@ impl PackAsset {
     fn max_bytes(&self) -> u64 {
         match self {
             Self::Model | Self::Obj | Self::Mtl => 2 * 1024 * 1024,
-            Self::Gltf => 8 * 1024 * 1024,
+            Self::Gltf | Self::GltfBuffer => 8 * 1024 * 1024,
             Self::Metadata(_) => MAX_ANIMATION_META as u64,
             Self::Colormap(_) | Self::Texture(_) => MAX_TEXTURE_BYTES,
         }
@@ -890,6 +894,11 @@ impl TextureBank {
             PackAsset::Gltf => {
                 if let Err(e) = Arc::make_mut(&mut self.models).insert_gltf(name, &bytes) {
                     self.warnings.push(format!("Skipped glTF {name}: {e}"));
+                }
+            }
+            PackAsset::GltfBuffer => {
+                if let Err(e)=Arc::make_mut(&mut self.models).insert_gltf_buffer(name,&bytes) {
+                    self.warnings.push(format!("Skipped glTF buffer {name}: {e}"));
                 }
             }
             PackAsset::Mtl => {
@@ -1214,6 +1223,9 @@ impl TextureBank {
             return Err("Packs contain no supported assets/*/textures/block/*.png".into());
         }
         Arc::make_mut(&mut out.tiles).insert(MISSING_TEXTURE_ID.into(), missing_texture());
+        // Resolve pack-local external .bin references only after all ZIP/JAR
+        // entries and overlay layers have been added, independent of order.
+        out.warnings.extend(Arc::make_mut(&mut out.models).finish_gltf());
         out.finalize_animations();
         let chosen = mixed_layout(&out.tiles)?;
         let source_max = out

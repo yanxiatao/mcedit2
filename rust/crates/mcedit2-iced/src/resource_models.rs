@@ -34,6 +34,9 @@ pub(crate) struct ModelBank {
     files: BTreeMap<String, Value>,
     obj_meshes: BTreeMap<String, Vec<special_obj::Triangle>>,
     gltf_meshes: BTreeMap<String, Vec<special_obj::Triangle>>,
+    gltf_sources: BTreeMap<String, (String, Vec<u8>)>,
+    gltf_buffers: BTreeMap<String, Vec<u8>>,
+    gltf_buffer_bytes: usize,
     obj_materials: BTreeMap<String, BTreeMap<String, special_mtl::Material>>,
     json_sizes: BTreeMap<String, usize>,
     total_json_bytes: usize,
@@ -775,8 +778,47 @@ impl ModelBank {
             parts[1],
             name.strip_prefix("block/").unwrap_or(name)
         );
-        self.gltf_meshes.insert(key, special_gltf::parse(bytes)?);
+        // Defer glTF decoding until the complete pack stack is ingested.
+        // A .bin member may precede or follow the referring model in ZIPs.
+        self.gltf_sources.insert(key, (path.to_owned(), bytes.to_vec()));
         Ok(true)
+    }
+    /// External .bin blobs are only resolved as exact, same-pack resource
+    /// members after loading all layers. They are never opened by URI.
+    pub fn insert_gltf_buffer(&mut self, path:&str, bytes:&[u8])->Result<bool,String>{
+        let parts:Vec<_>=path.split('/').collect();
+        if parts.len()<5 || parts[0]!="assets" || parts[2]!="models"
+            || !resource_ids::namespace(parts[1]) {return Ok(false);}
+        let relative=parts[3..].join("/");
+        if !relative.ends_with(".bin") || !resource_ids::path(&relative,160){
+            return Ok(false);
+        }
+        if bytes.len()>8*1024*1024{return Err("glTF buffer exceeds 8 MiB".into());}
+        let old=self.gltf_buffers.get(path).map_or(0,Vec::len);
+        let total=self.gltf_buffer_bytes.saturating_sub(old)
+            .checked_add(bytes.len()).ok_or("glTF buffer total overflow")?;
+        if total>128*1024*1024{return Err("glTF buffer total exceeds 128 MiB".into());}
+        self.gltf_buffer_bytes=total;
+        self.gltf_buffers.insert(path.to_owned(),bytes.to_vec());
+        Ok(true)
+    }
+    /// Compile loaded models only when all resource pack layers are present.
+    /// Missing/unsupported models are skipped with an explicit diagnostic.
+    pub fn finish_gltf(&mut self)->Vec<String>{
+        let mut errors=Vec::new();
+        self.gltf_meshes.clear();
+        for (id,(source,bytes)) in &self.gltf_sources{
+            let folder=source.rsplit_once('/').map(|(dir,_)|dir).unwrap_or("");
+            let resolved=special_gltf::parse_with_resolver(bytes,&|uri|{
+                // The decoder has already validated relative URI components.
+                self.gltf_buffers.get(&format!("{folder}/{uri}")).cloned()
+            });
+            match resolved{
+                Ok(mesh)=>{self.gltf_meshes.insert(id.clone(),mesh);}
+                Err(e)=>errors.push(format!("{source}: {e}")),
+            }
+        }
+        errors
     }
     /// Select special models through the original blockstate JSON. Loader
     /// declarations are a data contract, not an arbitrary executable hook.
