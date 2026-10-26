@@ -1,0 +1,117 @@
+name: MCEdit2 Rust Windows x64 package
+
+# Explicit opt-in packaging workflow, separate from the check/test-only CI.
+# Ordinary pushes to rust-iced-rewrite never publish binaries.
+on:
+  workflow_dispatch:
+    inputs:
+      verify_tests:
+        description: 'Run full Rust release-profile tests before packaging'
+        required: true
+        type: boolean
+        default: true
+  push:
+    branches:
+      - rust-iced-rewrite
+    paths:
+      - .github/windows-package.trigger
+
+permissions:
+  contents: read
+
+jobs:
+  windows-x64:
+    name: Windows x64 Rust release ZIP
+    if: github.ref == 'refs/heads/rust-iced-rewrite'
+    runs-on: windows-2022
+    timeout-minutes: 100
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Checkout exact commit
+        uses: actions/checkout@v4
+      - name: Install stable MSVC Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Cache Rust release compilation
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          shared-key: windows-msvc-release
+          cache-on-failure: true
+      - name: Test complete original Rust workspace
+        if: github.event_name != 'workflow_dispatch' || inputs.verify_tests
+        working-directory: rust
+        shell: pwsh
+        run: cargo test --release --workspace
+      - name: Build native Windows x64 release GUI and CLI
+        working-directory: rust
+        shell: pwsh
+        run: cargo build --release -p mcedit2-iced -p mcedit2-cli
+      - name: Smoke test GUI and CLI release startup
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cli = (Resolve-Path 'rust/target/release/mcedit2-cli.exe').Path
+          $gui = (Resolve-Path 'rust/target/release/mcedit2.exe').Path
+          $cliProcess = Start-Process -FilePath $cli -ArgumentList '--help' -Wait -PassThru -NoNewWindow
+          if ($cliProcess.ExitCode -ne 0) { throw "CLI --help exited $($cliProcess.ExitCode)" }
+          # GUI subsystem is intentionally windowless for the --help path.
+          $process = Start-Process -FilePath $gui -ArgumentList '--help' -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "GUI --help exited $($process.ExitCode)" }
+      - name: Assemble standalone ZIP, source docs and SHA-256
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = 'dist/MCEdit2-Rust-Windows-x64'
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          Copy-Item 'rust/target/release/mcedit2.exe' "$root/MCEdit2.exe"
+          Copy-Item 'rust/target/release/mcedit2-cli.exe' "$root/MCEdit2-CLI.exe"
+          Copy-Item 'LICENSE.md' "$root/LICENSE.md"
+          Copy-Item 'rust/COMPATIBILITY.md' "$root/COMPATIBILITY.md"
+          $instructions = @'
+          MCEdit2 Rust Windows x64 — experimental standalone preview
+          
+          System: Windows 10/11 x64, supported graphics driver with wgpu.
+          No Python, Qt, Java or installed Rust toolchain is needed to launch.
+          On some older systems the Microsoft Visual C++ runtime may be required.
+          
+          1. Extract this entire ZIP into a directory you control.
+          2. Double-click MCEdit2.exe to open the native graphical application.
+          3. Extract your Minecraft Java save to a regular folder containing level.dat.
+          4. Enter that world folder in the app and select Inspect world.
+             Alternatively, invoke MCEdit2.exe -view "C:\Path\To\Minecraft\saves\World".
+          5. MCEdit2-CLI.exe --help prints command-line usage. The CLI can audit an
+             extracted Java world folder without opening the graphical interface.
+          
+          WARNING: This is a development preview of the Rust rewrite, not the
+          finished MCEdit2. Keep a full separate backup of every Minecraft save.
+          Opening an archive directly as a ZIP is not currently supported.
+          Display/model parity with actual Minecraft, and third-party mods,
+          are not guaranteed. Save modifications always require explicit preview
+          and confirmation in the graphical tool.
+          
+          Repository: https://github.com/yanxiatao/mcedit2
+          Branch: rust-iced-rewrite
+          Source commit: PLACEHOLDER
+          '@
+          $instructions.Replace('PLACEHOLDER', $env:GITHUB_SHA) |
+            Set-Content "$root/READ-ME-FIRST.txt" -Encoding UTF8
+          $zip = 'dist/MCEdit2-Rust-Windows-x64.zip'
+          Compress-Archive -Path $root -DestinationPath $zip -CompressionLevel Optimal -Force
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
+          $length = (Get-Item $zip).Length
+          Write-Host "Windows ZIP: $zip ($length bytes), SHA256=$hash"
+          "### Windows x64 ZIP release build" | Add-Content $env:GITHUB_STEP_SUMMARY
+          "Source SHA: $env:GITHUB_SHA" | Add-Content $env:GITHUB_STEP_SUMMARY
+          "Archive SHA-256: $hash" | Add-Content $env:GITHUB_STEP_SUMMARY
+          "Archive size: $length bytes" | Add-Content $env:GITHUB_STEP_SUMMARY
+      - name: Upload Windows ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MCEdit2-Rust-Windows-x64
+          path: dist/MCEdit2-Rust-Windows-x64.zip
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
