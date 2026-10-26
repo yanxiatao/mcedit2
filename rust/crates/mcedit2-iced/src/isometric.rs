@@ -143,17 +143,6 @@ impl Face {
             ],
         }
     }
-    fn camera_facing(self, yaw: f32, pitch: f32) -> bool {
-        const EPS: f32 = 0.00001;
-        match self {
-            Self::Top => pitch.sin() > EPS,
-            Self::Bottom => -pitch.sin() > EPS,
-            Self::PosX => yaw.sin() * pitch.cos() > EPS,
-            Self::NegX => -yaw.sin() * pitch.cos() > EPS,
-            Self::PosZ => yaw.cos() * pitch.cos() > EPS,
-            Self::NegZ => -yaw.cos() * pitch.cos() > EPS,
-        }
-    }
     fn axis_positive(self) -> (usize, bool) {
         match self {
             Self::Top => (1, true),
@@ -164,6 +153,7 @@ impl Face {
             Self::NegZ => (2, false),
         }
     }
+    #[cfg(test)]
     pub(crate) fn shade(self) -> f32 {
         match self {
             Self::Top => 1.0,
@@ -190,7 +180,9 @@ pub(crate) struct RenderFace {
     /// Only a painter-order hint; not a substitute for GPU depth/OIT.
     pub(crate) translucent: bool,
     pub(crate) color: Color,
+    #[cfg(test)]
     pub(crate) selected: bool,
+    #[cfg(test)]
     pub(crate) hovered: bool,
     pub(crate) block_entity: bool,
     pub(crate) staged: bool,
@@ -397,17 +389,6 @@ fn outside_projected_envelope(point: Point, radius_x: f32, radius_y: f32, size: 
         || point.x - radius_x > size.width
         || point.y + radius_y < 0.0
         || point.y - radius_y > size.height
-}
-fn point_in_face(p: Point, face: &[Point; 4]) -> bool {
-    let mut hits = 0u8;
-    for n in 0..4 {
-        let a = face[n];
-        let b = face[(n + 1) % 4];
-        if (a.y > p.y) != (b.y > p.y) && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x {
-            hits += 1;
-        }
-    }
-    hits % 2 == 1
 }
 /// Evaluate a precise depth at the cursor for one projected face triangle.
 /// Barycentric interpolation uses the identical (0,1,2)/(0,2,3)
@@ -829,6 +810,7 @@ impl IsometricSurface {
         *cache = Some((size, Arc::clone(&faces)));
         Some(faces)
     }
+    #[cfg(test)]
     pub(crate) fn faces(&self, size: Size) -> Vec<RenderFace> {
         self.faces_cancellable(size, &|| false)
             .expect("uninterruptible isometric face projection")
@@ -1089,6 +1071,7 @@ impl IsometricSurface {
                     // Fullbright/high-gamma preview deliberately omits diffuse
                     // face shading while retaining original model geometry/UV.
                     let brightness = 1.0;
+                    #[cfg(test)]
                     let highlight = self.selected == Some((voxel.x, voxel.y, voxel.z));
                     let translucent = matches!(
                         voxel.kind,
@@ -1110,7 +1093,9 @@ impl IsometricSurface {
                             base.b * brightness,
                             base.a,
                         ),
+                        #[cfg(test)]
                         selected: highlight,
+                        #[cfg(test)]
                         hovered: self.hovered == Some((voxel.x, voxel.y, voxel.z)),
                         block_entity: voxel.original_block_entity,
                         staged: voxel.staged,

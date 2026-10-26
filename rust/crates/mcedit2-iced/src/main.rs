@@ -218,6 +218,7 @@ fn parse_region_name(name: &str) -> Result<(i32, i32, &str), String> {
     }
     Ok((rx, rz, ext))
 }
+#[cfg(test)]
 fn slice_cell_label(cell: &SliceCell) -> String {
     match cell {
         SliceCell::MissingChunk => "·".into(),

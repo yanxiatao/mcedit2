@@ -94,9 +94,6 @@ fn quad_uv(region: &AtlasUv) -> [[f32; 2]; 4] {
 }
 /// Conservative face and vertex limit; GPU path does not tessellate one
 /// Minecraft block into dozens of CPU-subdivided tiles anymore.
-pub(crate) fn build(view: &IsometricSurface, size: Size) -> Vec<Vertex> {
-    build_cancellable(view, size, &|| false).expect("uninterruptible isometric mesh")
-}
 /// The mesh worker can abandon obsolete camera views between individual
 /// source faces. Never return an incomplete mesh for caching or uploading.
 pub(crate) fn build_cancellable(

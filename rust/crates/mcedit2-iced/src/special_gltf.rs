@@ -397,6 +397,7 @@ pub(crate) fn parse_with_resolver(
     }
     parse_document(doc,&loaded)
 }
+#[cfg(test)]
 pub(crate) fn parse(bytes:&[u8])->Result<Vec<Triangle>,String>{
     parse_with_resolver(bytes,&|_|None)
 }
@@ -404,8 +405,11 @@ pub(crate) fn parse(bytes:&[u8])->Result<Vec<Triangle>,String>{
 #[derive(Clone, Debug)]
 pub(crate) struct StaticPbrMaterial {
     pub base_color: [f32;4],
+    #[cfg_attr(not(test), expect(dead_code, reason = "retain parsed PBR factors until dynamic lighting is supported"))]
     pub metallic: f32,
+    #[cfg_attr(not(test), expect(dead_code, reason = "retain parsed PBR factors until dynamic lighting is supported"))]
     pub roughness: f32,
+    #[expect(dead_code, reason = "retain parsed emissive factor until emissive rendering is supported")]
     pub emissive: [f32;3],
     pub alpha_mode: String,
     pub alpha_cutoff: f32,

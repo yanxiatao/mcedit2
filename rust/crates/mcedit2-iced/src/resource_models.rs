@@ -441,15 +441,6 @@ fn implicit_face_uv(element: &Value, face: Face) -> Option<[f32; 4]> {
         Face::PosX => [16.0 - z1, 16.0 - y1, 16.0 - z0, 16.0 - y0],
     })
 }
-fn variant_model(value: &Value) -> Option<&str> {
-    // Deterministic first entry for weighted variants; no RNG or invented geometry.
-    let value = if let Some(list) = value.as_array() {
-        list.first()?
-    } else {
-        value
-    };
-    value.get("model")?.as_str()
-}
 fn face_keys(face: Face, parent: &str) -> &'static [&'static str] {
     const TOP: &[&str] = &["up", "top", "end", "all"];
     const BOTTOM: &[&str] = &["down", "bottom", "end", "all"];
@@ -469,6 +460,7 @@ fn face_keys(face: Face, parent: &str) -> &'static [&'static str] {
     }
 }
 impl ModelBank {
+    #[cfg(test)]
     fn selections(&self, state: &State) -> Option<Vec<ChosenModel>> {
         self.selections_at(state, (0, 0, 0))
     }
@@ -524,9 +516,6 @@ impl ModelBank {
                 .unwrap_or(false),
         }])
     }
-    fn chosen_element(&self, state: &State, index: usize) -> Option<(ChosenModel, &Value)> {
-        self.chosen_element_at(state, index, (0, 0, 0))
-    }
     fn chosen_element_at(
         &self,
         state: &State,
@@ -558,6 +547,7 @@ impl ModelBank {
     }
     /// Elements may deliberately disable directional shading, notably the
     /// zero-thickness crossed planes used by flowers and saplings.
+    #[cfg(test)]
     pub fn element_unshaded(&self, state: &State, index: usize) -> Option<bool> {
         self.element_unshaded_at(state, index, (0, 0, 0))
     }
@@ -577,6 +567,7 @@ impl ModelBank {
     /// Some(false) means an explicit Java model face is absent and must NOT
     /// be rendered as a synthetic palette-textured side. None means that
     /// the model/element is not resolved and the fallback remains active.
+    #[cfg(test)]
     pub fn face_defined(&self, state: &State, face: Face, index: usize) -> Option<bool> {
         self.face_defined_at(state, face, index, (0, 0, 0))
     }
@@ -603,6 +594,7 @@ impl ModelBank {
     /// Some(None) is an explicitly rendered face without cullface: it must
     /// not be removed just because an adjacent block fills the cell.
     /// None means no reliable JSON face metadata was found.
+    #[cfg(test)]
     pub fn face_cull_direction(
         &self,
         state: &State,
@@ -963,6 +955,7 @@ impl ModelBank {
     /// original voxel identity for picking.
     /// Native visual parts support vanilla 22.5/45 degree element axes
     /// without collapsing the source geometry into a larger AABB.
+    #[cfg(test)]
     pub fn parts(&self, state: &State) -> Option<Vec<Part>> {
         self.parts_at(state, (0, 0, 0))
     }
@@ -1039,6 +1032,7 @@ impl ModelBank {
             Some(out)
         }
     }
+    #[cfg(test)]
     pub fn elements(&self, state: &State) -> Option<Vec<Box3>> {
         let chosen = self.selections(state)?;
         let mut out = Vec::new();
@@ -1075,6 +1069,7 @@ impl ModelBank {
     }
     /// A specific Java model element face's texture and declared UV.
     /// This is more precise than the older block-global texture map.
+    #[cfg(test)]
     pub fn element_face(&self, state: &State, face: Face, index: usize) -> Option<FaceSpec> {
         self.element_face_at(state, face, index, (0, 0, 0))
     }
@@ -1178,6 +1173,7 @@ impl ModelBank {
             uvlock,
         })
     }
+    #[cfg(test)]
     pub fn texture(&self, state: &State, face: Face) -> Option<String> {
         self.texture_at(state, face, (0, 0, 0))
     }

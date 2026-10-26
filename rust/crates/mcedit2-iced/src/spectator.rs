@@ -218,6 +218,7 @@ fn internally_occluded(parts: &[models::Part], index: usize, face: Face) -> bool
         other_index != index && parts[index].occluded_by(other, axis, positive)
     })
 }
+#[cfg(test)]
 pub(crate) fn build(view: &SpectatorScene) -> Vec<Vertex> {
     build_cancellable(view, &|| false).expect("uninterruptible spectator mesh")
 }

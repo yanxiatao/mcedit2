@@ -142,10 +142,6 @@ fn to_clip(vertex: &mut Vertex, size: Size, min_depth: f32, max_depth: f32) {
     };
 }
 impl IsometricSurface {
-    pub(crate) fn gpu_vertices_cached(&self, size: Size) -> Arc<Vec<Vertex>> {
-        self.gpu_vertices_cancellable(size, &|| false)
-            .expect("uninterruptible isometric GPU mesh")
-    }
     /// Only committed complete meshes enter the shared per-view cache.
     pub(crate) fn gpu_vertices_cancellable(
         &self,

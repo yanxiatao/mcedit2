@@ -101,19 +101,6 @@ impl Box3 {
         };
         (v - if positive { 0.5 } else { -0.5 }).abs() < 0.0001
     }
-    pub fn face_center(&self, axis: usize, positive: bool) -> [f32; 3] {
-        let mut p = [
-            (self.min[0] + self.max[0]) * 0.5,
-            (self.min[1] + self.max[1]) * 0.5,
-            (self.min[2] + self.max[2]) * 0.5,
-        ];
-        p[axis] = if positive {
-            self.max[axis]
-        } else {
-            self.min[axis]
-        };
-        p
-    }
     pub fn occluded_by(&self, other: &Self, axis: usize, positive: bool) -> bool {
         let pos = if positive {
             self.max[axis]
@@ -237,13 +224,6 @@ impl Part {
             ],
             true,
         )
-    }
-    pub fn center(&self) -> [f32; 3] {
-        self.point([
-            (self.bounds.min[0] + self.bounds.max[0]) * 0.5,
-            (self.bounds.min[1] + self.bounds.max[1]) * 0.5,
-            (self.bounds.min[2] + self.bounds.max[2]) * 0.5,
-        ])
     }
     pub fn boundary(&self, axis: usize, positive: bool) -> bool {
         self.rotation.is_none() && self.bounds.face_on_boundary(axis, positive)

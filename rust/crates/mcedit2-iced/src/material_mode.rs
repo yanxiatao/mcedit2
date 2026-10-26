@@ -7,6 +7,7 @@ pub(crate) const FORCE_OPAQUE_ALPHA: u32 = 1 << 3;
 pub(crate) const CUSTOM_ALPHA_CUTOFF: u32 = 1 << 4;
 const CUTOFF_SHIFT: u32 = 8;
 
+#[cfg(test)]
 pub(crate) fn kind(value: u32) -> u32 {
     value & KIND_MASK
 }

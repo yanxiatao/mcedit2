@@ -36,6 +36,7 @@ const MAX_IMAGE_RGBA: u64 = 128 * 1024 * 1024;
 const MAX_RGBA_MEMORY: usize = 512 * 1024 * 1024;
 const MAX_ANIMATION_META: usize = 32 * 1024;
 const MAX_ANIMATION_STEPS: usize = 4096;
+#[cfg(test)]
 const MIN_ATLAS_CELL: u32 = 16;
 const MAX_ATLAS_CELL: u32 = 4096;
 /// Rendering semantics, derived from actual PNG alpha instead of block ID
@@ -248,6 +249,7 @@ impl AtlasUv {
 pub(crate) struct TextureAtlas {
     pub pages: Vec<Arc<AtlasPage>>,
     pub entries: BTreeMap<String, AtlasUv>,
+    #[cfg(test)]
     slots: BTreeMap<String, SlotPlacement>,
     cell: u32,
     pub white: AtlasUv,
@@ -385,6 +387,7 @@ fn mixed_layout(tiles: &BTreeMap<String, Tile>) -> Result<MixedLayout, String> {
     }
     Err("Mixed-resolution texture atlas exceeds GPU page/memory budget".into())
 }
+#[cfg(test)]
 #[derive(Debug, Clone, Copy)]
 struct PagePlan {
     columns: u32,
@@ -396,6 +399,7 @@ struct PagePlan {
     cell: u32,
     stride: u32,
 }
+#[cfg(test)]
 fn page_plan(slots: usize, cell: u32) -> Result<PagePlan, String> {
     if slots == 0 {
         return Err("Atlas requires a white tile".into());
@@ -429,24 +433,6 @@ fn page_plan(slots: usize, cell: u32) -> Result<PagePlan, String> {
         cell,
         stride,
     })
-}
-fn suitable_plan(tiles: &BTreeMap<String, Tile>) -> Result<PagePlan, String> {
-    let largest = tiles
-        .values()
-        .map(|t| t.width.max(t.height))
-        .max()
-        .unwrap_or(16)
-        .max(MIN_ATLAS_CELL);
-    let mut cell = largest.next_power_of_two().min(MAX_ATLAS_CELL);
-    loop {
-        if let Ok(plan) = page_plan(tiles.len() + 1, cell) {
-            return Ok(plan);
-        }
-        if cell == MIN_ATLAS_CELL {
-            return Err("Block texture pages cannot fit within GPU safety limits".into());
-        }
-        cell /= 2;
-    }
 }
 fn padded_tile(tile: &Tile, cell: u32) -> Vec<[u8; 4]> {
     let n = cell as usize;
@@ -486,28 +472,8 @@ fn padded_tile(tile: &Tile, cell: u32) -> Vec<[u8; 4]> {
     }
     data
 }
-fn write_slot(
-    page: &mut AtlasPage,
-    local_slot: usize,
-    columns: u32,
-    cell: u32,
-    stride: u32,
-    tile: &Tile,
-) {
-    let x0 = (local_slot as u32 % columns) * stride;
-    let y0 = (local_slot as u32 / columns) * stride;
-    let padded = padded_tile(tile, cell);
-    for y in 0..stride {
-        for x in 0..stride {
-            let sx = (x as i32 - 1).clamp(0, cell as i32 - 1) as usize;
-            let sy = (y as i32 - 1).clamp(0, cell as i32 - 1) as usize;
-            let source = padded[sy * cell as usize + sx];
-            let offset = (((y0 + y) * page.width + x0 + x) * 4) as usize;
-            page.rgba[offset..offset + 4].copy_from_slice(&source);
-        }
-    }
-}
 impl TextureAtlas {
+    #[cfg(test)]
     fn create(tiles: &BTreeMap<String, Tile>) -> Self {
         Self::create_at(tiles, &BTreeMap::new(), 0)
     }
@@ -546,6 +512,7 @@ impl TextureAtlas {
         };
         write_placement(&mut pages[0], layout.slots[0], &white);
         let mut entries = BTreeMap::new();
+        #[cfg(test)]
         let mut slots = BTreeMap::new();
         for (index, (name, tile)) in tiles.iter().enumerate() {
             let slot = layout.slots[index + 1];
@@ -555,16 +522,19 @@ impl TextureAtlas {
                 .unwrap_or(tile);
             write_placement(&mut pages[slot.page], slot, source);
             entries.insert(name.clone(), uv(slot));
+            #[cfg(test)]
             slots.insert(name.clone(), slot);
         }
         Self {
             pages: pages.into_iter().map(Arc::new).collect(),
             entries,
+            #[cfg(test)]
             slots,
             white: uv(layout.slots[0]),
             cell: layout.max_cell,
         }
     }
+    #[cfg(test)]
     fn advance(
         &self,
         animations: &BTreeMap<String, SpriteAnimation>,
@@ -614,7 +584,6 @@ pub(crate) struct StaticObjTriangle {
     pub xyz: [[f32; 3]; 3],
     pub uv: [[f32; 2]; 3],
     pub page: u32,
-    pub alpha: AlphaMode,
     pub tint: [f32;4],
     /// Low two bits are opaque/cutout/blend; high bits encode static glTF
     /// sidedness, cutoff and OPAQUE alpha semantics.
@@ -639,7 +608,9 @@ pub(crate) struct TextureBank {
     layer_png: BTreeSet<String>,
     layer_metadata: BTreeSet<String>,
     atlas: Option<Arc<TextureAtlas>>,
+    #[cfg(test)]
     animation_tick: u64,
+    #[cfg(test)]
     pub source: String,
     pub warnings: Vec<String>,
 }
@@ -1212,6 +1183,7 @@ impl TextureBank {
         // archives and modded high-resolution resource packs.
         self.animations = Arc::new(BTreeMap::new());
     }
+    #[cfg(test)]
     pub fn has_animation(&self) -> bool {
         !self.animations.is_empty()
     }
@@ -1222,6 +1194,7 @@ impl TextureBank {
     }
     /// Advance only if a frame actually changes. The source atlas UV slots,
     /// model JSON and texture data stay immutable between scene frames.
+    #[cfg(test)]
     pub fn advance_animation(&self, ticks: u64) -> Option<Self> {
         if !self.animations.iter().any(|(name, animation)| {
             self.tiles.contains_key(name)
@@ -1252,6 +1225,7 @@ impl TextureBank {
             return Err("Resource-pack stack exceeds 32 layers".into());
         }
         let mut out = Self {
+            #[cfg(test)]
             source: paths
                 .iter()
                 .map(|path| path.display().to_string())
@@ -1350,9 +1324,6 @@ impl TextureBank {
     /// Resolve GPU UV and material alpha once per source state/face/element.
     /// The fallback may use old per-block named textures, but never another
     /// namespace with a coincidentally matching resource path.
-    pub fn element_unshaded(&self, state: &State, element_index: usize) -> Option<bool> {
-        self.element_unshaded_at(state, element_index, (0, 0, 0))
-    }
     pub fn element_unshaded_at(
         &self,
         state: &State,
@@ -1360,14 +1331,6 @@ impl TextureBank {
         pos: (i32, i32, i32),
     ) -> Option<bool> {
         self.models.element_unshaded_at(state, element_index, pos)
-    }
-    pub fn face_cull_direction(
-        &self,
-        state: &State,
-        face: crate::isometric::Face,
-        element_index: usize,
-    ) -> Option<Option<crate::isometric::Face>> {
-        self.face_cull_direction_at(state, face, element_index, (0, 0, 0))
     }
     pub fn face_cull_direction_at(
         &self,
@@ -1379,14 +1342,6 @@ impl TextureBank {
         self.models
             .face_cull_direction_at(state, face, element_index, pos)
     }
-    pub fn face_defined(
-        &self,
-        state: &State,
-        face: crate::isometric::Face,
-        element_index: usize,
-    ) -> Option<bool> {
-        self.face_defined_at(state, face, element_index, (0, 0, 0))
-    }
     pub fn face_defined_at(
         &self,
         state: &State,
@@ -1396,6 +1351,7 @@ impl TextureBank {
     ) -> Option<bool> {
         self.models.face_defined_at(state, face, element_index, pos)
     }
+    #[cfg(test)]
     pub fn atlas_face_style(
         &self,
         state: &State,
@@ -1477,6 +1433,7 @@ impl TextureBank {
     /// Vanilla block tint is an independent multiplier over the texture.
     /// Until original biome sampling is wired in, use documented neutral
     /// grass/foliage defaults; un-tinted faces remain at full brightness.
+    #[cfg(test)]
     pub fn face_tint_at(
         &self,
         state: &State,
@@ -1544,6 +1501,7 @@ impl TextureBank {
                 .unwrap_or_else(|| biome_color(biome, "grass"))
         }
     }
+    #[cfg(test)]
     pub fn alpha_mode(&self, state: &State, face: crate::isometric::Face) -> Option<AlphaMode> {
         let id = self.resolve_id(state, face)?;
         self.animations
@@ -1551,6 +1509,7 @@ impl TextureBank {
             .map(SpriteAnimation::alpha_mode)
             .or_else(|| self.tiles.get(&id).map(Tile::alpha_mode))
     }
+    #[cfg(test)]
     pub fn atlas_face_corners(
         &self,
         state: &State,
@@ -1560,6 +1519,7 @@ impl TextureBank {
         self.atlas_face_style_at(state, face, element_index, (0, 0, 0))
             .map(|(corners, _, _)| corners)
     }
+    #[cfg(test)]
     pub fn atlas_uv(&self, state: &State, face: crate::isometric::Face) -> Option<AtlasUv> {
         let id = self.resolve_id(state, face)?;
         self.atlas.as_ref()?.entries.get(&id).cloned()
@@ -1595,7 +1555,6 @@ impl TextureBank {
                         xyz,
                         uv,
                         page: slot.page,
-                        alpha,
                         mode,
                         tint: tri.tint,
                     });
@@ -1629,9 +1588,11 @@ impl TextureBank {
     pub fn model_variant_key(&self, state: &State, pos: (i32, i32, i32)) -> u64 {
         self.models.weighted_selection_key(state, pos)
     }
+    #[cfg(test)]
     pub fn get(&self, id: &str) -> Option<&Tile> {
         self.tiles.get(id)
     }
+    #[cfg(test)]
     pub fn resolve_id(&self, state: &State, face: crate::isometric::Face) -> Option<String> {
         self.resolve_id_at(state, face, (0, 0, 0))
     }
@@ -1738,6 +1699,7 @@ impl TextureBank {
         }
         None
     }
+    #[cfg(test)]
     pub fn resolve<'a>(&'a self, state: &State, face: crate::isometric::Face) -> Option<&'a Tile> {
         self.get(&self.resolve_id(state, face)?)
     }
