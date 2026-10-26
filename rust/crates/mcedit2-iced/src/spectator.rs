@@ -118,6 +118,9 @@ pub(crate) struct SpectatorScene {
     /// Pan/look only changes the small GPU camera uniform.
     pub cache: Arc<Mutex<Option<Arc<Vec<Vertex>>>>>,
     pub pending: Arc<Mutex<bool>>,
+    /// Last *complete* spectator snapshot kept visible until the next mesh
+    /// finishes. The matching source origin is necessary for camera uniforms.
+    pub fallback: Option<(Arc<Vec<Vertex>>, Arc<SurfaceView>)>,
     /// Source-exact chunk fragment cache shared across streamed scenes.
     pub chunk_cache: Arc<Mutex<crate::chunk_mesh_cache::ChunkMeshCache>>,
 }
@@ -656,6 +659,7 @@ mod tests {
                 quality: Quality::Balanced,
                 cache: Arc::new(Mutex::new(None)),
                 pending: Arc::new(Mutex::new(false)),
+                fallback: None,
                 chunk_cache: Arc::new(Mutex::new(
                     crate::chunk_mesh_cache::ChunkMeshCache::default(),
                 )),
@@ -733,6 +737,7 @@ mod tests {
                 quality: Quality::Balanced,
                 cache: Arc::new(Mutex::new(None)),
                 pending: Arc::new(Mutex::new(false)),
+                fallback: None,
                 chunk_cache: Arc::new(Mutex::new(
                     crate::chunk_mesh_cache::ChunkMeshCache::default(),
                 )),
@@ -799,6 +804,7 @@ mod tests {
                 quality: Quality::Balanced,
                 cache: Arc::new(Mutex::new(None)),
                 pending: Arc::new(Mutex::new(false)),
+                fallback: None,
                 chunk_cache: Arc::new(Mutex::new(
                     crate::chunk_mesh_cache::ChunkMeshCache::default(),
                 )),
@@ -881,6 +887,7 @@ mod tests {
             quality: Quality::Balanced,
             cache: Arc::new(Mutex::new(None)),
             pending: Arc::new(Mutex::new(false)),
+            fallback: None,
             chunk_cache: Arc::new(Mutex::new(crate::chunk_mesh_cache::ChunkMeshCache::default())),
         };
         let vertices = build(&scene);
@@ -922,6 +929,7 @@ mod tests {
             show_textures:false,camera:Camera::default(),
             quality:Quality::Balanced,cache:Arc::new(Mutex::new(None)),
             pending:Arc::new(Mutex::new(false)),
+            fallback: None,
             chunk_cache:Arc::new(Mutex::new(crate::chunk_mesh_cache::ChunkMeshCache::default())),
         };
         let mesh=build(&scene);
@@ -978,6 +986,7 @@ mod tests {
             quality: Quality::Balanced,
             cache: Arc::new(Mutex::new(None)),
             pending: Arc::new(Mutex::new(false)),
+            fallback: None,
             chunk_cache: Arc::new(Mutex::new(crate::chunk_mesh_cache::ChunkMeshCache::default())),
         };
         let vertices = build(&scene);
@@ -1070,6 +1079,7 @@ mod tests {
             quality: Quality::Balanced,
             cache: Arc::new(Mutex::new(None)),
             pending: Arc::new(Mutex::new(false)),
+            fallback: None,
             chunk_cache: Arc::new(Mutex::new(crate::chunk_mesh_cache::ChunkMeshCache::default())),
         };
         assert!(build_cancellable(&renderer, &|| true).is_none());
@@ -1117,6 +1127,7 @@ mod tests {
             quality: Quality::Balanced,
             cache: Arc::new(Mutex::new(None)),
             pending: Arc::new(Mutex::new(false)),
+            fallback: None,
             chunk_cache: Arc::new(Mutex::new(crate::chunk_mesh_cache::ChunkMeshCache::default())),
         };
         let first = build(&scene);

@@ -231,6 +231,7 @@ fn spectator_emits_real_extended_modded_model_vertices_with_valid_atlas_uv() {
         quality:crate::gpu_mesh::Quality::Balanced,
         cache:Arc::new(Mutex::new(None)),
         pending:Arc::new(Mutex::new(false)),
+        fallback: None,
         chunk_cache:Arc::new(Mutex::new(
             crate::chunk_mesh_cache::ChunkMeshCache::default()
         )),
@@ -325,6 +326,7 @@ fn original_json_repeating_uvs_emit_real_atlas_safe_spectator_faces() {
         camera:crate::spectator::Camera::default(),
         quality:crate::gpu_mesh::Quality::Balanced,
         cache:Arc::new(Mutex::new(None)),pending:Arc::new(Mutex::new(false)),
+        fallback: None,
         chunk_cache:Arc::new(Mutex::new(crate::chunk_mesh_cache::ChunkMeshCache::default())),
     };
     let mesh = crate::spectator::build(&scene);
@@ -369,6 +371,7 @@ fn declared_obj_loader_emits_generic_static_mesh_via_gpu_path() {
         camera:crate::spectator::Camera::default(),
         quality:crate::gpu_mesh::Quality::Balanced,
         cache:Arc::new(Mutex::new(None)),pending:Arc::new(Mutex::new(false)),
+        fallback: None,
         chunk_cache:Arc::new(Mutex::new(crate::chunk_mesh_cache::ChunkMeshCache::default())),
     };
     let vertices = crate::spectator::build(&scene);
@@ -701,6 +704,7 @@ fn gltf_base_color_texture_autobinds_and_spectator_instances_are_distinct() {
         camera:crate::spectator::Camera::default(),
         quality:crate::gpu_mesh::Quality::Balanced,
         cache:Arc::new(Mutex::new(None)),pending:Arc::new(Mutex::new(false)),
+        fallback: None,
         chunk_cache:Arc::new(Mutex::new(
             crate::chunk_mesh_cache::ChunkMeshCache::default()
         )),

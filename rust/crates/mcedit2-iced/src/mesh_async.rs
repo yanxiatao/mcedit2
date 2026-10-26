@@ -213,6 +213,7 @@ mod tests {
             quality: crate::gpu_mesh::Quality::Fast,
             cache: Arc::new(Mutex::new(None)),
             pending: Arc::new(Mutex::new(false)),
+            fallback: None,
             chunk_cache: Arc::new(Mutex::new(crate::chunk_mesh_cache::ChunkMeshCache::default())),
         };
         let old_token = Arc::new(AtomicBool::new(false));

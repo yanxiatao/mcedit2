@@ -362,3 +362,29 @@ two distinct static scene nodes and spectator vertices, and source
 chunk LOD transition preferences/voxel budgets. The latest GitHub
 workspace still requires dedicated full-head Cargo and real-save GPU
 visual testing before declaring rendering equivalence.
+
+## Fullbright spectator flicker and missing-texture diagnostics
+
+The compact 3D sidebar now distinguishes the **Textures on** preference
+from a successful resource-pack load. If no original client JAR or resource
+pack is installed/recognized, it explicitly reports that the current view
+is a palette-only preview and offers the existing **Open ZIP/JAR** or folder
+controls. When assets are loaded, it reports the PNG, atlas-page and model
+counts and shows any asset discovery/decode error in the compact sidebar.
+Original block textures cannot be inferred from saved Java block IDs alone.
+
+The streaming GPU viewport preserves the **last complete spectator mesh and
+its matching source coordinate origin** until a newly streamed source scene
+has finished meshing. Source updates are coalesced while the single GPU mesh
+worker is active; this prevents every incoming chunk batch from cancelling
+the only work in progress and leaving a blank frame. The newest ready mesh
+takes priority automatically, and original world/texture-source invalidation
+discards any stale fallback so it cannot display wrong atlas pages or worlds.
+Camera movement continues to update the camera uniform rather than
+rebuilding complete meshes. The handoff regression checks both the old
+origin while waiting and new origin when the replacement arrives.
+
+This fixes empty-frame mesh handoff artifacts; it does not claim full
+Minecraft client rendering fidelity from distant sampled LOD, nor does it
+invent PNG textures when none have been supplied. Full 3D visual validation
+against a real world, client resource JAR, and GPU remains a separate task.

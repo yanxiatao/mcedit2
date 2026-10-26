@@ -380,6 +380,9 @@ struct App {
     spectator_cache:
         std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<Vec<gpu_mesh::Vertex>>>>>,
     spectator_pending: std::sync::Arc<std::sync::Mutex<bool>>,
+    /// Last completed GPU mesh and the source origin under which it was
+    /// generated. Display it while asynchronous streaming prepares the next.
+    spectator_fallback: Option<(std::sync::Arc<Vec<gpu_mesh::Vertex>>, std::sync::Arc<SurfaceView>)>,
     spectator_chunk_cache: std::sync::Arc<std::sync::Mutex<chunk_mesh_cache::ChunkMeshCache>>,
     spectator_stream: Option<SpectatorStream>,
     spectator_stream_view: Option<std::sync::Arc<SurfaceView>>,
@@ -724,7 +727,24 @@ impl App {
             }
         }
         stream.orient(self.spectator_camera.yaw);
-        if stream.dirty || self.spectator_stream_near != Some(near_identity) {
+        // Incremental chunk batches must not repeatedly cancel the only GPU
+        // worker while it is generating a complete source mesh. Coalesce
+        // updates until that worker has finished publishing one full frame.
+        let mesh_in_flight = *self.spectator_pending.lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if (stream.dirty || self.spectator_stream_near != Some(near_identity))
+            && !mesh_in_flight
+        {
+            let ready = self.spectator_cache.lock()
+                .unwrap_or_else(|e| e.into_inner()).as_ref().cloned();
+            if let (Some(mesh), Some(old_surface)) =
+                (ready, self.spectator_stream_view.as_ref())
+            {
+                // Keep *both* the vertices and their original source
+                // coordinates until new geometry has finished meshing.
+                self.spectator_fallback =
+                    Some((mesh, std::sync::Arc::clone(old_surface)));
+            }
             let scene = std::sync::Arc::new(stream.combined(&near));
             self.spectator_stream_view = Some(scene);
             self.spectator_stream_near = Some(near_identity);
@@ -1997,6 +2017,7 @@ fn update(app: &mut App, message: Message) -> iced::Task<Message> {
         app.spectator_chunk_cache = Default::default();
         app.spectator_stream = None;
         app.spectator_stream_view = None;
+        app.spectator_fallback = None;
         app.spectator_stream_near = None;
     }
     let task = update_impl(app, message);
@@ -2007,6 +2028,7 @@ fn update(app: &mut App, message: Message) -> iced::Task<Message> {
         {
             app.spectator_cache = std::sync::Arc::new(std::sync::Mutex::new(None));
             app.spectator_pending = std::sync::Arc::new(std::sync::Mutex::new(false));
+            app.spectator_fallback = None;
         }
         let cache = app
             .render_face_cache
@@ -3342,6 +3364,7 @@ fn render_surface<'a>(
             quality: app.gpu_quality,
             cache: std::sync::Arc::clone(&app.spectator_cache),
             pending: std::sync::Arc::clone(&app.spectator_pending),
+            fallback: app.spectator_fallback.clone(),
             chunk_cache: std::sync::Arc::clone(&app.spectator_chunk_cache),
         };
         iced::widget::stack![
@@ -3542,6 +3565,28 @@ fn workspace_view(app: &App) -> Element<'_, Message> {
         ]
         .spacing(5),
     );
+    // The toggle reports user preference; the atlas might still be missing.
+    // A Minecraft model cannot gain authentic textures from palette colors.
+    if let Some(bank) = &app.texture_bank {
+        panel = panel.push(text(format!(
+            "{}: {} PNG / {} atlas pages / {} models",
+            l.pick("已加载材质", "Textures loaded"),
+            bank.count(), bank.atlas().map_or(0, |a| a.page_count()),
+            bank.model_count(),
+        )).size(12));
+    } else {
+        panel = panel.push(text(if app.texture_loading {
+            l.pick("正在加载资源包材质…", "Loading resource-pack textures…")
+        } else if app.show_textures {
+            l.pick("未加载材质！当前是纯色预览。请选择原版客户端 JAR 或资源包 ZIP。",
+                "No textures loaded: palette-only preview. Select a client JAR or resource-pack ZIP.")
+        } else {
+            l.pick("纹理已禁用，显示纯色预览。", "Textures disabled: palette preview.")
+        }).size(12));
+    }
+    if !app.texture_report.is_empty() {
+        panel = panel.push(text(&app.texture_report).size(12));
+    }
     panel = panel.push(text(l.pick("精确坐标", "Exact coordinates")).size(16));
     panel = panel.push(
         text_input("X, Y, Z", &app.query_coordinates)

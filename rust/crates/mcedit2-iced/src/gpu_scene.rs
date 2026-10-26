@@ -196,6 +196,21 @@ impl IsometricSurface {
         Some(vertices)
     }
 }
+/// Render only complete world-space geometry and preserve its original
+/// source coordinate basis while the next streamed mesh builds.
+fn choose_spectator_mesh(
+    current: Option<Arc<Vec<Vertex>>>,
+    current_surface: &Arc<mcedit2_world::surface::SurfaceView>,
+    fallback: Option<&(Arc<Vec<Vertex>>, Arc<mcedit2_world::surface::SurfaceView>)>,
+) -> (Arc<Vec<Vertex>>, Arc<mcedit2_world::surface::SurfaceView>) {
+    if let Some(vertices) = current {
+        (vertices, Arc::clone(current_surface))
+    } else if let Some((vertices, original_surface)) = fallback {
+        (Arc::clone(vertices), Arc::clone(original_surface))
+    } else {
+        (Arc::new(Vec::new()), Arc::clone(current_surface))
+    }
+}
 impl shader::Program<Message> for GpuScene {
     type State = ();
     type Primitive = Primitive;
@@ -221,18 +236,15 @@ impl shader::Program<Message> for GpuScene {
             }
             SceneSource::Spectator(scene) => {
                 crate::mesh_async::enqueue_spectator(scene);
-                let vertices = scene
-                    .cache
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .as_ref()
-                    .cloned()
-                    .unwrap_or_else(|| Arc::new(Vec::new()));
+                let ready = scene.cache.lock()
+                    .unwrap_or_else(|e| e.into_inner()).as_ref().cloned();
+                let (vertices, source) = choose_spectator_mesh(
+                    ready, &scene.surface, scene.fallback.as_ref());
                 Primitive {
                     vertices,
                     atlas: scene.texture_bank.as_ref().and_then(|b| b.atlas()).cloned(),
                     quality: scene.quality,
-                    camera: Some(scene.camera.uniform(scene.surface.as_ref(), size)),
+                    camera: Some(scene.camera.uniform(source.as_ref(), size)),
                 }
             }
         }
@@ -956,6 +968,30 @@ impl shader::Primitive for Primitive {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn spectator_mesh_handoff_retains_previous_complete_vertices_and_origin() {
+        use mcedit2_world::surface::SurfaceView;
+        let source = |x: i32| Arc::new(SurfaceView {
+            x, z: 0, y_min: 64, y_max: 111, width: 16, depth: 16,
+            voxels: vec![], source_tiles: vec![], source_chunks: 0,
+            missing_columns: 0,
+        });
+        let old_origin = source(0);
+        let new_origin = source(64);
+        let old_mesh = Arc::new(vec![Vertex {
+            xy: [0.0;2], depth: 0.0, rgba: [1.0;4], uv: [0.0;2],
+            mode: 0, xyz: [0.5, 0.0, 0.0], world_mode: 1, atlas_page: 0,
+        }]);
+        let fallback = (Arc::clone(&old_mesh), Arc::clone(&old_origin));
+        let (during, origin) = choose_spectator_mesh(None, &new_origin, Some(&fallback));
+        assert!(Arc::ptr_eq(&during, &old_mesh));
+        assert!(Arc::ptr_eq(&origin, &old_origin));
+        let replacement = Arc::new(vec![old_mesh[0], old_mesh[0]]);
+        let (ready, origin) = choose_spectator_mesh(
+            Some(Arc::clone(&replacement)), &new_origin, Some(&fallback));
+        assert!(Arc::ptr_eq(&ready, &replacement));
+        assert!(Arc::ptr_eq(&origin, &new_origin));
+    }
     fn test_camera(forward: [f32; 3]) -> crate::spectator::CameraUniform {
         crate::spectator::CameraUniform {
             forward: [forward[0], forward[1], forward[2], 0.0],
