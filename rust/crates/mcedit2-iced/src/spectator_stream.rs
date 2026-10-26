@@ -7,7 +7,7 @@ use mcedit2_world::{
     editing::Session,
     far_view::{self, FarChunkPatch, FarChunkRequest},
     surface::{
-        exact_face_exposed_against, SurfaceView, SurfaceVoxel, VoxelMaterial, FACE_BOTTOM,
+        exact_face_exposed_against, SurfaceView, VoxelMaterial, FACE_BOTTOM,
         FACE_NEG_X, FACE_NEG_Z, FACE_POS_X, FACE_POS_Z, FACE_TOP,
     },
     WorldError,
@@ -617,6 +617,7 @@ impl Drop for Stream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mcedit2_world::surface::SurfaceVoxel;
     #[test]
     fn exact_cached_chunk_wins_over_requested_coarse_lod() {
         let req = FarChunkRequest { cx: 29, cz: -7, span: 16 };

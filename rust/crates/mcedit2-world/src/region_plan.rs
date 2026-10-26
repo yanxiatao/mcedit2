@@ -243,6 +243,7 @@ pub struct NativeRegionCandidate {
     /// Full candidate image; NEVER write this directly without a transaction.
     pub image: Vec<u8>,
 }
+#[cfg(test)]
 fn plan_region_image(
     original: &[u8],
     region_x: i32,

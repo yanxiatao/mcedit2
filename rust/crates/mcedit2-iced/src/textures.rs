@@ -609,7 +609,7 @@ fn write_placement(page: &mut AtlasPage, slot: SlotPlacement, tile: &Tile) {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub(crate) struct StaticObjTriangle {
     pub xyz: [[f32; 3]; 3],
     pub uv: [[f32; 2]; 3],
@@ -620,6 +620,7 @@ pub(crate) struct StaticObjTriangle {
     /// sidedness, cutoff and OPAQUE alpha semantics.
     pub mode: u32,
 }
+#[derive(Clone, Debug, Default)]
 pub(crate) struct TextureBank {
     // Original PNG/JSON source is immutable and shared across animation.
     // Only changed RGBA pages are cloned on a sprite frame transition.
@@ -1744,6 +1745,16 @@ impl TextureBank {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn texture_bank_retains_clone_debug_and_default_contracts() {
+        fn require_traits<T: Clone + std::fmt::Debug + Default>() {}
+        require_traits::<TextureBank>();
+        let bank = TextureBank::default();
+        let copy = bank.clone();
+        assert_eq!(copy.source, "");
+        assert!(copy.atlas.is_none());
+        assert!(format!("{copy:?}").contains("TextureBank"));
+    }
     use crate::isometric::Face;
     fn state(name: &str, properties: Vec<(String, String)>) -> State {
         State {
