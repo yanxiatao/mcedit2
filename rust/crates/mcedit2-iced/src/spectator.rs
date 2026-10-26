@@ -109,6 +109,7 @@ pub(crate) struct CameraUniform {
 #[derive(Clone)]
 pub(crate) struct CompletedFrame {
     pub vertices: Arc<Vec<Vertex>>,
+    pub stream_mesh: Option<Arc<StreamMesh>>,
     pub surface: Arc<SurfaceView>,
     pub atlas: Option<Arc<crate::textures::TextureAtlas>>,
 }
@@ -235,16 +236,51 @@ fn source_chunk_group(voxel: &SurfaceVoxel) -> Option<(i32, i32)> {
         voxel.x.div_euclid(16), voxel.z.div_euclid(16),
     ))
 }
+/// Complete source-owned chunk geometry, without a flattened scene mesh.
+#[derive(Clone, Debug)]
+pub(crate) struct MeshChunk {
+    pub key: (i32, i32, u8, usize, usize),
+    pub vertices: Arc<Vec<Vertex>>,
+}
+#[derive(Clone, Debug)]
+pub(crate) struct StreamMesh {
+    pub chunks: Vec<MeshChunk>,
+    pub origin: [i32; 3],
+}
+pub(crate) fn build_stream_cancellable(
+    view: &SpectatorScene,
+    snapshot: &crate::spectator_stream::SceneSnapshot,
+    cancelled: &impl Fn() -> bool,
+) -> Option<StreamMesh> {
+    let sources = snapshot.sources().collect::<Vec<_>>();
+    let neighbors = crate::spectator_stream::ExactNeighbors::new(&sources);
+    let chunks = build_sources(view, &sources, snapshot.origin(),
+        snapshot.y_max(), Some(&neighbors), cancelled)?;
+    Some(StreamMesh { chunks, origin: snapshot.origin() })
+}
 /// Abandon stale meshes between source voxels. An interrupted build returns
 /// no vertices at all: incomplete geometry must never be cached or uploaded.
 pub(crate) fn build_cancellable(
     view: &SpectatorScene,
     cancelled: &impl Fn() -> bool,
 ) -> Option<Vec<Vertex>> {
-    if cancelled() {
-        return None;
-    }
-    let mut out = Vec::new();
+    let sources = [view.surface.voxels.as_slice()];
+    let origin = [view.surface.x, view.surface.y_min, view.surface.z];
+    build_sources(view, &sources, origin, view.surface.y_max, None, cancelled)
+        .map(|chunks| chunks.into_iter()
+            .flat_map(|part| part.vertices.as_ref().clone().into_iter())
+            .collect())
+}
+fn build_sources(
+    view: &SpectatorScene,
+    sources: &[&[SurfaceVoxel]],
+    origin: [i32; 3],
+    y_max: i32,
+    neighbors: Option<&crate::spectator_stream::ExactNeighbors<'_>>,
+    cancelled: &impl Fn() -> bool,
+) -> Option<Vec<MeshChunk>> {
+    if cancelled() { return None; }
+    let mut chunks = Vec::new();
     let mut cache: HashMap<ModelCacheKey<'_>, Vec<models::Part>> = HashMap::new();
     let atlas = view.texture_bank.as_ref().and_then(|b| b.atlas());
     let default_uv = atlas
@@ -258,11 +294,11 @@ pub(crate) fn build_cancellable(
         })
         .unwrap_or([[0.5, 0.5]; 4]);
     let bank = view.texture_bank.as_deref();
-    let distant = models::DistantElevation::new(&view.surface);
-    let liquid_cells: HashMap<(i32, i32, i32), &mcedit2_world::sections::State> = view
-        .surface
-        .voxels
-        .iter()
+    let distant = models::DistantElevation::from_sources(
+        || sources.iter().flat_map(|part| (*part).iter()), y_max,
+    );
+    let liquid_cells: HashMap<(i32, i32, i32), &mcedit2_world::sections::State> = sources
+        .iter().flat_map(|part| part.iter())
         .filter(|v| v.span == 1 && v.kind == VoxelMaterial::Liquid)
         .map(|v| ((v.x, v.y, v.z), &v.state))
         .collect();
@@ -275,11 +311,10 @@ pub(crate) fn build_cancellable(
     > = HashMap::new();
     // Include every original visible face; never budget away valid chunks.
     // The per-chunk cache is invalidated only by source or style changes.
-    let origin = [view.surface.x, view.surface.y_min, view.surface.z];
     let style = crate::chunk_mesh_cache::ChunkMeshCache::style(
         view.texture_bank.as_ref(), view.show_textures, view.quality,
     );
-    let visible_chunks = view.surface.voxels.iter()
+    let visible_chunks = sources.iter().flat_map(|part| (*part).iter())
         .filter(|voxel| voxel.span == 1)
         .map(|voxel| (voxel.x.div_euclid(16), voxel.z.div_euclid(16)))
         .collect::<std::collections::HashSet<_>>();
@@ -288,27 +323,46 @@ pub(crate) fn build_cancellable(
     // Borrow contiguous source-chunk slices in place. Building Vec<&Voxel>
     // for every block of every chunk doubled temporary allocations and made
     // 128-chunk-radius renders especially expensive.
-    for run in view.surface.voxels.chunk_by(|left, right|
-        source_chunk_group(left) == source_chunk_group(right))
-    {
-        let chunk = source_chunk_group(&run[0]);
+    for (source_index, source) in sources.iter().enumerate() {
+      for (run_index, original) in source.chunk_by(|left, right|
+          source_chunk_group(left) == source_chunk_group(right)).enumerate()
+      {
         if cancelled() { return None; }
-        let id = chunk.map(|(cx, cz)| {
-            let first = &run[0];
-            (cx, cz, first.x, first.y, first.z)
+        // Keep original source arrays immutable; only rewrite a chunk's
+        // affected face flags if exact neighboring chunks prove occlusion.
+        let corrected = neighbors.and_then(|index| {
+            original.iter().any(|v| index.faces(v) != v.faces).then(|| {
+                original.iter().map(|v| {
+                    let mut voxel = v.clone();
+                    voxel.faces = index.faces(v);
+                    voxel
+                }).collect::<Vec<_>>()
+            })
         });
-        let before = out.len();
+        let run = corrected.as_deref().unwrap_or(original);
+        let chunk = source_chunk_group(&run[0]);
+        let first = &run[0];
+        let chunk_id = (first.x.div_euclid(16), first.z.div_euclid(16),
+            first.span, source_index, run_index);
+        let mut out = Vec::new();
+        let id = chunk.map(|(cx, cz)| (cx, cz, first.x, first.y, first.z));
         if let Some(id) = id {
             let cached = view.chunk_cache.lock().unwrap_or_else(|e| e.into_inner())
                 .get(style, id, run);
             if let Some((vertices, from_origin)) = cached {
-                crate::chunk_mesh_cache::ChunkMeshCache::append_rebased(
-                    &mut out, &vertices, from_origin, origin,
-                );
+                let vertices = if from_origin == origin {
+                    vertices
+                } else {
+                    let mut translated = Vec::with_capacity(vertices.len());
+                    crate::chunk_mesh_cache::ChunkMeshCache::append_rebased(
+                        &mut translated, &vertices, from_origin, origin);
+                    Arc::new(translated)
+                };
+                chunks.push(MeshChunk { key: chunk_id, vertices });
                 continue;
             }
         }
-        for voxel in run {
+        for (voxel_index, voxel) in run.iter().enumerate() {
             if cancelled() { return None; }
         // Only witnessed height transitions, without a global face cap.
         let wall_parts = if voxel.span > 1 {
@@ -359,7 +413,10 @@ pub(crate) fn build_cancellable(
         let variant = bank.map_or(0, |b| b.model_variant_key(&voxel.state, sample));
         // Borrow the original palette strings. Cloning the whole blockstate for
         // every face caused avoidable allocations during stream updates.
-        let key = model_cache_key(&voxel.state, variant);
+        // Cache keys always borrow immutable source palette entries. Seam
+        // corrections may be temporary chunk-local voxel copies; retaining
+        // references to those copies would outlive their storage.
+        let key = model_cache_key(&original[voxel_index].state, variant);
         let far = [models::fluid_part(&voxel.state, false)
             .unwrap_or_else(|| models::Part::cube(models::Box3::FULL))];
         let same_above = voxel
@@ -423,11 +480,11 @@ pub(crate) fn build_cancellable(
                 let corners = local_corners.map(|p| {
                     let span = voxel.span as f32;
                     [
-                        (voxel.x as i64 - view.surface.x as i64) as f32
+                        (voxel.x as i64 - origin[0] as i64) as f32
                             + (span - 1.0) * 0.5
                             + p[0] * span,
-                        (voxel.y as i64 - view.surface.y_min as i64) as f32 + p[1],
-                        (voxel.z as i64 - view.surface.z as i64) as f32
+                        (voxel.y as i64 - origin[1] as i64) as f32 + p[1],
+                        (voxel.z as i64 - origin[2] as i64) as f32
                             + (span - 1.0) * 0.5
                             + p[2] * span,
                     ]
@@ -506,11 +563,15 @@ pub(crate) fn build_cancellable(
         if let Some(id) = id {
             if !cancelled() {
                 view.chunk_cache.lock().unwrap_or_else(|e| e.into_inner())
-                    .insert(style, id, run, origin, out[before..].to_vec());
+                    .insert(style, id, run, origin, out.clone());
             }
         }
+        if !out.is_empty() {
+            chunks.push(MeshChunk { key: chunk_id, vertices: Arc::new(out) });
+        }
+      }
     }
-    (!cancelled()).then_some(out)
+    (!cancelled()).then_some(chunks)
 }
 pub(crate) struct Controls;
 #[derive(Default)]

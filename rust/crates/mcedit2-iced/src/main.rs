@@ -815,17 +815,17 @@ impl App {
         {
             let ready = self.spectator_cache.lock()
                 .unwrap_or_else(|e| e.into_inner()).as_ref().cloned();
-            if let (Some(mesh), Some(old_surface)) =
-                (ready, self.spectator_stream_view.as_ref())
-            {
-                // Geometry, atlas UVs and world origin belong to ONE
-                // committed generation. Never show old vertices with the
-                // next resource pack's GPU textures.
-                self.spectator_fallback = Some(spectator::CompletedFrame {
-                    vertices: mesh,
-                    surface: std::sync::Arc::clone(old_surface),
-                    atlas: self.texture_bank.as_ref().and_then(|b| b.atlas()).cloned(),
-                });
+            let streamed = self.spectator_stream_snapshot.as_ref().and_then(|old|
+                old.ready.lock().unwrap_or_else(|e| e.into_inner()).as_ref().cloned());
+            if let Some(old_surface) = self.spectator_stream_view.as_ref() {
+                if ready.is_some() || streamed.is_some() {
+                    self.spectator_fallback = Some(spectator::CompletedFrame {
+                        vertices: ready.unwrap_or_else(|| std::sync::Arc::new(Vec::new())),
+                        stream_mesh: streamed,
+                        surface: std::sync::Arc::clone(old_surface),
+                        atlas: self.texture_bank.as_ref().and_then(|b| b.atlas()).cloned(),
+                    });
+                }
             }
             // The UI only publishes Arc references to source patches.
             // The GPU worker composes exact seams away from the event loop.
@@ -2071,12 +2071,16 @@ fn update(app: &mut App, message: Message) -> iced::Task<Message> {
     let old_complete = if publishing_material {
         let mesh = app.spectator_cache.lock()
             .unwrap_or_else(|e| e.into_inner()).as_ref().cloned();
-        mesh.zip(app.spectator_stream_view.as_ref()).map(|(vertices, surface)|
-            spectator::CompletedFrame {
-                vertices,
+        let streamed = app.spectator_stream_snapshot.as_ref().and_then(|old|
+            old.ready.lock().unwrap_or_else(|e| e.into_inner()).as_ref().cloned());
+        app.spectator_stream_view.as_ref().and_then(|surface| {
+            (mesh.is_some() || streamed.is_some()).then(|| spectator::CompletedFrame {
+                vertices: mesh.unwrap_or_else(|| std::sync::Arc::new(Vec::new())),
+                stream_mesh: streamed,
                 surface: std::sync::Arc::clone(surface),
                 atlas: app.texture_bank.as_ref().and_then(|b| b.atlas()).cloned(),
             })
+        })
     } else {
         None
     };
@@ -2142,6 +2146,16 @@ fn update(app: &mut App, message: Message) -> iced::Task<Message> {
     let task = update_impl(app, message);
     let after = app.render_signature();
     if before != after {
+        if publishing_material && before.source == after.source {
+            // The previous snapshot's UVs belong to its original atlas.
+            // Start an entirely new immutable mesh generation for the new
+            // resource pack while preserving the last completed frame.
+            app.spectator_stream_near = None;
+            app.spectator_stream_snapshot = None;
+            if let Some(stream) = app.spectator_stream.as_mut() {
+                stream.dirty = true;
+            }
+        }
         if must_reset_spectator_mesh(&before, &after, read_only_near_publish) {
             app.spectator_cache = std::sync::Arc::new(std::sync::Mutex::new(None));
             app.spectator_pending = std::sync::Arc::new(std::sync::Mutex::new(false));

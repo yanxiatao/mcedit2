@@ -95,6 +95,26 @@ discard successfully read world chunks. The existing mixed-resolution atlas
 memory guard is still present and may downsample high-resolution textures in
 large packs. Improving multi-array atlas scalability remains separate work.
 
+The 3D stream now directly borrows the near view and individual far
+patches into the mesh worker. It builds a global **reference-only exact
+neighbor index** for cross-chunk face culling and water/LOD dependencies,
+but it does not allocate a combined scene-wide SurfaceView. Each original
+source chunk or LOD patch produces an immutable, independently owned
+`Arc<Vec<Vertex>>` with a stable source key. Exact unchanged chunks are
+reused from the source-exact mesh cache, while changes to an adjacent chunk
+invalidate its shared seam faces. The worker publishes a complete
+`StreamMesh` generation only on successful completion.
+
+GPU residency is now keyed directly by these source chunk identities.
+Unchanged `Arc` mesh parts reuse their existing device vertex buffers and
+page draw spans, with **no second whole-scene face regrouping pass**.
+Opaque/cutout chunk buffers are drawn independently. Only translucent
+faces are collected and sorted globally when needed, preserving the
+cross-chunk ordering required by glass and liquids. Texture atlas pages,
+source origin, and the chunk mesh generation remain paired during frame
+handoff. The legacy screen-space isometric and non-streamed preview paths
+remain separate for compatibility.
+
 The above Rust tests are source-level regressions, not a verified Windows
 GPU result. A full local `cargo check --workspace`, `cargo test --workspace`,
 and a large authentic Modded-world visual comparison against Amulet are
@@ -133,11 +153,10 @@ user-visible geometry quota. Cached layouts and atlases continue to require
 independent memory and device-capability checks.
 
 These changes were developed from the chunk/region lifecycle principles in
-Amulet Map Editor. They are not an Amulet port. In particular, the current
-`SurfaceView` still materializes a combined voxel list on publication,
-and the GPU still maintains a flattened scene buffer. Fully persistent
-per-chunk GPU buffers and multiple independent atlas bindings are future
-architectural work, not claimed capabilities of this commit.
+Amulet Map Editor. They are not an Amulet port. The newer stream renderer
+now preserves per-chunk geometry and GPU buffers without a combined scene
+mesh, while conventional isometric and non-stream preview code remains
+separate. Atlas page bindings use independently allocated GPU textures.
 
 No GitHub Actions/CI or Windows packaging runs were initiated for this
 change; offline source inspection and regression test additions are not a
@@ -163,14 +182,12 @@ hardware resource exhaustion must still be tested on actual devices.
 Non-power-of-two atlas page dimensions avoid allocating an 8192px square
 just to fit a single 4096px sprite with edge padding.
 
-For streaming scene publications, the UI now stores **immutable Arc-backed
-near views and chunk patch references**. The background mesh thread performs
-the exact seam reconciliation and materializes the flattened voxel view
-needed by the existing geometry builder; the UI itself no longer clones
-every far patch on each incremental update. This is an intermediate
-architecture: it removes UI-thread scene copies, but the worker still
-materializes a complete view when generating a new mesh. Future true
-zero-copy mesh generation can operate directly on the same source patches.
+For streaming scene publications, the UI stores **immutable Arc-backed
+near views and chunk patch references**. The background mesh builder
+consumes those source slices directly, using a shared reference-only neighbor
+index to reconcile exact original faces. It does not materialize a combined
+SurfaceView, even off the UI thread; output consists of independently cached
+chunk meshes. The orthographic/legacy preview path is retained separately.
 
 A previous completed frame comprises its vertex buffer, original coordinate
 basis and the exact atlas that produced its UVs. During a texture-pack or

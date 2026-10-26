@@ -16,7 +16,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex,
     },
 };
 
@@ -228,53 +228,52 @@ fn not_cancelled(flag: &AtomicBool) -> bool {
 ///
 /// Compute masks before mutating voxel flags so borrowed source states can
 /// be reused without cloning potentially tens of thousands of palettes.
+/// Shared exact-world seam occupancy for independently loaded source slices.
+/// It carries only references to original palette states, not cloned voxels.
+pub(crate) struct ExactNeighbors<'a> {
+    occupied: HashMap<(i32, i32, i32), (&'a mcedit2_world::sections::State, VoxelMaterial)>,
+}
+impl<'a> ExactNeighbors<'a> {
+    pub(crate) fn new(sources: &[&'a [SurfaceVoxel]]) -> Self {
+        let occupied = sources.iter().flat_map(|source| (*source).iter())
+            .filter(|v| v.span == 1)
+            .map(|v| ((v.x, v.y, v.z), (&v.state, v.kind)))
+            .collect();
+        Self { occupied }
+    }
+    /// Return only faces supported by the actual original neighbor state.
+    /// A missing source patch, uncertain Mod model, or sampled distant tile
+    /// cannot invent an occluding block at a chunk boundary.
+    pub(crate) fn faces(&self, voxel: &SurfaceVoxel) -> u8 {
+        if voxel.span != 1 { return voxel.faces; }
+        let mut faces = voxel.faces;
+        for (dx, dy, dz, face) in [
+            (0, 1, 0, FACE_TOP), (0, -1, 0, FACE_BOTTOM),
+            (1, 0, 0, FACE_POS_X), (-1, 0, 0, FACE_NEG_X),
+            (0, 0, 1, FACE_POS_Z), (0, 0, -1, FACE_NEG_Z),
+        ] {
+            if faces & face == 0 { continue; }
+            let (Some(x), Some(y), Some(z)) = (
+                voxel.x.checked_add(dx), voxel.y.checked_add(dy),
+                voxel.z.checked_add(dz),
+            ) else { continue };
+            if let Some(&(state, kind)) = self.occupied.get(&(x, y, z)) {
+                if !exact_face_exposed_against(&voxel.state, voxel.kind, Some((state, kind))) {
+                    faces &= !face;
+                }
+            }
+        }
+        faces
+    }
+}
+#[cfg(test)]
 fn reconcile_exact_seams(view: &mut SurfaceView) {
-    let hidden: Vec<u8> = {
-        // Face-neighbor lookup is independent of coordinate order. Hashing
-        // avoids six O(log N) BTreeMap probes per exact source voxel.
-        let occupied: HashMap<(i32, i32, i32), (&mcedit2_world::sections::State, VoxelMaterial)> =
-            view.voxels
-                .iter()
-                .filter(|v| v.span == 1)
-                .map(|v| ((v.x, v.y, v.z), (&v.state, v.kind)))
-                .collect();
-        view.voxels
-            .iter()
-            .map(|v| {
-                if v.span != 1 {
-                    return 0;
-                }
-                let mut mask = 0;
-                for (dx, dy, dz, face) in [
-                    (0, 1, 0, FACE_TOP),
-                    (0, -1, 0, FACE_BOTTOM),
-                    (1, 0, 0, FACE_POS_X),
-                    (-1, 0, 0, FACE_NEG_X),
-                    (0, 0, 1, FACE_POS_Z),
-                    (0, 0, -1, FACE_NEG_Z),
-                ] {
-                    if v.faces & face == 0 {
-                        continue;
-                    }
-                    let (Some(x), Some(y), Some(z)) = (
-                        v.x.checked_add(dx),
-                        v.y.checked_add(dy),
-                        v.z.checked_add(dz),
-                    ) else {
-                        continue;
-                    };
-                    if let Some(&(neighbor, kind)) = occupied.get(&(x, y, z)) {
-                        if !exact_face_exposed_against(&v.state, v.kind, Some((neighbor, kind))) {
-                            mask |= face;
-                        }
-                    }
-                }
-                mask
-            })
-            .collect()
+    let masks = {
+        let index = ExactNeighbors::new(&[view.voxels.as_slice()]);
+        view.voxels.iter().map(|v| index.faces(v)).collect::<Vec<_>>()
     };
-    for (voxel, mask) in view.voxels.iter_mut().zip(hidden) {
-        voxel.faces &= !mask;
+    for (voxel, faces) in view.voxels.iter_mut().zip(masks) {
+        voxel.faces = faces;
     }
 }
 /// Immutable incremental scene publication: the near view is shared and
@@ -285,9 +284,25 @@ fn reconcile_exact_seams(view: &mut SurfaceView) {
 pub(crate) struct SceneSnapshot {
     near: Arc<SurfaceView>,
     patches: Vec<Arc<FarChunkPatch>>,
+    /// The complete immutable chunk mesh generation is committed by the
+    /// worker only after every source part finishes successfully.
+    pub(crate) ready: Arc<Mutex<Option<Arc<crate::spectator::StreamMesh>>>>,
 }
 impl SceneSnapshot {
-    pub(crate) fn materialize(&self) -> SurfaceView {
+    /// All entries borrow their original backing Arc buffers. Consuming the
+    /// iterator does not build a global contiguous voxel array.
+    pub(crate) fn sources(&self) -> impl Iterator<Item = &[SurfaceVoxel]> {
+        std::iter::once(self.near.voxels.as_slice())
+            .chain(self.patches.iter().map(|patch| patch.voxels.as_slice()))
+    }
+    pub(crate) fn origin(&self) -> [i32; 3] {
+        [self.near.x, self.near.y_min, self.near.z]
+    }
+    pub(crate) fn y_max(&self) -> i32 { self.near.y_max }
+    #[cfg(test)]
+    fn patch_count(&self) -> usize { self.patches.len() }
+    #[cfg(test)]
+    pub(crate) fn materialize_for_test(&self) -> SurfaceView {
         let mut result = (*self.near).clone();
         for patch in &self.patches {
             result.voxels.extend(patch.voxels.iter().cloned());
@@ -298,8 +313,6 @@ impl SceneSnapshot {
         reconcile_exact_seams(&mut result);
         result
     }
-    #[cfg(test)]
-    fn patch_count(&self) -> usize { self.patches.len() }
 }
 pub(crate) struct Stream {
     pub key: (usize, usize),
@@ -602,11 +615,13 @@ impl Stream {
                 patches.push(Arc::clone(patch));
             }
         }
-        SceneSnapshot { near, patches }
+        SceneSnapshot { near, patches,
+            ready: Arc::new(Mutex::new(None)),
+        }
     }
     #[cfg(test)]
     pub fn combined(&self, near: &SurfaceView) -> SurfaceView {
-        self.snapshot(Arc::new(near.clone())).materialize()
+        self.snapshot(Arc::new(near.clone())).materialize_for_test()
     }
     pub fn status(&self) -> String {
         format!("Streaming real Java terrain: {}/{} chunks, {} errors, {} cached (exact caves/blocks nearby, textured LOD farther), radius {} chunks.",
@@ -623,6 +638,72 @@ impl Drop for Stream {
 mod tests {
     use super::*;
     use mcedit2_world::surface::SurfaceVoxel;
+    #[test]
+    fn direct_chunk_meshing_culls_original_seams_and_reuses_unchanged_parts() {
+        use mcedit2_world::{
+            sections::State,
+            surface::{SurfaceVoxel, SourceChunkTile, ALL_FACES, FACE_POS_X, FACE_NEG_X},
+        };
+        let voxel = |x: i32| SurfaceVoxel {
+            x, y: 70, z: 0, span: 1,
+            state: State { name: "minecraft:stone".into(), properties: vec![] },
+            biome: None, staged: false, original_block_entity: false,
+            kind: VoxelMaterial::Solid, faces: ALL_FACES,
+        };
+        let near = Arc::new(SurfaceView {
+            x: 0, z: 0, y_min: 64, y_max: 95, width: 16, depth: 16,
+            voxels: vec![voxel(15)], source_tiles: vec![],
+            source_chunks: 1, missing_columns: 0,
+        });
+        let patch = Arc::new(FarChunkPatch {
+            tile: SourceChunkTile {
+                chunk_x: 1, chunk_z: 0, source_present: true,
+                known_columns: 256, unknown_columns: 0, exposed_voxels: 1,
+            },
+            voxels: vec![voxel(16)],
+        });
+        let snapshot = SceneSnapshot {
+            near: Arc::clone(&near), patches: vec![Arc::clone(&patch)],
+            ready: Arc::new(Mutex::new(None)),
+        };
+        let sources = snapshot.sources().collect::<Vec<_>>();
+        let adjacent = ExactNeighbors::new(&sources);
+        assert_eq!(adjacent.faces(&near.voxels[0]) & FACE_POS_X, 0);
+        assert_eq!(adjacent.faces(&patch.voxels[0]) & FACE_NEG_X, 0);
+        assert_eq!(near.voxels[0].faces, ALL_FACES);
+        assert_eq!(patch.voxels[0].faces, ALL_FACES);
+        let scene = crate::spectator::SpectatorScene {
+            surface: Arc::clone(&near), texture_bank: None, show_textures: false,
+            camera: crate::spectator::Camera::default(),
+            quality: crate::gpu_mesh::Quality::Balanced,
+            cache: Arc::new(Mutex::new(None)),
+            pending: Arc::new(Mutex::new(false)),
+            fallback: None, snapshot: Some(Arc::new(snapshot.clone())),
+            chunk_cache: Arc::new(Mutex::new(
+                crate::chunk_mesh_cache::ChunkMeshCache::default())),
+        };
+        let first = crate::spectator::build_stream_cancellable(
+            &scene, &snapshot, &|| false).unwrap();
+        assert_eq!(first.chunks.len(), 2);
+        assert_eq!(first.chunks.iter().map(|c| c.vertices.len())
+            .collect::<Vec<_>>(), vec![30, 30]);
+        assert_eq!(first.origin, [0, 64, 0]);
+        let second = crate::spectator::build_stream_cancellable(
+            &scene, &snapshot, &|| false).unwrap();
+        assert!(first.chunks.iter().zip(&second.chunks).all(|(a,b)|
+            Arc::ptr_eq(&a.vertices, &b.vertices)));
+        // Losing the original neighboring chunk re-exposes the exact face
+        // and must invalidate just that affected source chunk's mesh.
+        let without_neighbor = SceneSnapshot {
+            near: Arc::clone(&near),
+            patches: Vec::new(),
+            ready: Arc::new(Mutex::new(None)),
+        };
+        let after = crate::spectator::build_stream_cancellable(
+            &scene, &without_neighbor, &|| false).unwrap();
+        assert_eq!(after.chunks.len(), 1);
+        assert_eq!(after.chunks[0].vertices.len(), 36);
+    }
     #[test]
     fn immutable_chunk_snapshot_reuses_patch_arcs_and_materializes_on_demand() {
         use mcedit2_world::surface::{SurfaceView, SourceChunkTile};
@@ -641,12 +722,13 @@ mod tests {
         let snapshot = SceneSnapshot {
             near: Arc::clone(&near),
             patches: vec![Arc::clone(&patch)],
+            ready: Arc::new(Mutex::new(None)),
         };
         let cloned = snapshot.clone();
         assert!(Arc::ptr_eq(&cloned.near, &near));
         assert!(Arc::ptr_eq(&cloned.patches[0], &patch));
         assert_eq!(snapshot.patch_count(), 1);
-        let materialized = snapshot.materialize();
+        let materialized = snapshot.materialize_for_test();
         assert_eq!(materialized.source_chunks, 1);
         assert_eq!(materialized.source_tiles.len(), 1);
         assert_eq!(near.source_chunks, 0);

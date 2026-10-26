@@ -129,6 +129,8 @@ pub(crate) struct Primitive {
     quality: Quality,
     camera: Option<crate::spectator::CameraUniform>,
     source_origin: Option<[i32; 3]>,
+    /// Direct source-owned chunk frame, never a flattened world vertex list.
+    stream_mesh: Option<Arc<crate::spectator::StreamMesh>>,
 }
 /// WebGPU depth runs 0 (nearest) to 1 (farthest); the isometric
 /// projector uses larger camera-space depth for nearer source blocks.
@@ -206,11 +208,20 @@ fn choose_spectator_mesh(
     current: Option<Arc<Vec<Vertex>>>,
     current_surface: &Arc<mcedit2_world::surface::SurfaceView>,
     current_atlas: Option<Arc<TextureAtlas>>,
+    current_stream: Option<Arc<crate::spectator::StreamMesh>>,
     fallback: Option<&crate::spectator::CompletedFrame>,
 ) -> crate::spectator::CompletedFrame {
-    if let Some(vertices) = current {
+    if let Some(stream_mesh) = current_stream {
+        crate::spectator::CompletedFrame {
+            vertices: Arc::new(Vec::new()),
+            stream_mesh: Some(stream_mesh),
+            surface: Arc::clone(current_surface),
+            atlas: current_atlas,
+        }
+    } else if let Some(vertices) = current {
         crate::spectator::CompletedFrame {
             vertices,
+            stream_mesh: None,
             surface: Arc::clone(current_surface),
             atlas: current_atlas,
         }
@@ -219,6 +230,7 @@ fn choose_spectator_mesh(
     } else {
         crate::spectator::CompletedFrame {
             vertices: Arc::new(Vec::new()),
+            stream_mesh: None,
             surface: Arc::clone(current_surface),
             atlas: current_atlas,
         }
@@ -246,18 +258,23 @@ impl shader::Program<Message> for GpuScene {
                     quality: scene.gpu_quality,
                     camera: None,
                     source_origin: None,
+                    stream_mesh: None,
                 }
             }
             SceneSource::Spectator(scene) => {
                 crate::mesh_async::enqueue_spectator(scene);
                 let ready = scene.cache.lock()
                     .unwrap_or_else(|e| e.into_inner()).as_ref().cloned();
+                let ready_stream = scene.snapshot.as_ref().and_then(|snapshot|
+                    snapshot.ready.lock()
+                        .unwrap_or_else(|e| e.into_inner()).as_ref().cloned());
                 let committed = choose_spectator_mesh(
                     ready, &scene.surface,
                     scene.texture_bank.as_ref().and_then(|b| b.atlas()).cloned(),
-                    scene.fallback.as_ref());
+                    ready_stream, scene.fallback.as_ref());
                 Primitive {
                     vertices: committed.vertices,
+                    stream_mesh: committed.stream_mesh,
                     atlas: committed.atlas,
                     quality: scene.quality,
                     camera: Some(scene.camera.uniform(committed.surface.as_ref(), size)),
@@ -285,6 +302,7 @@ pub(crate) struct Pipeline {
     /// Hold the original Arc to make mesh identity pointer comparisons safe:
     /// dropping it would let a later allocator reuse the same address.
     last_source_mesh: Option<Arc<Vec<Vertex>>>,
+    last_source_stream: Option<Arc<crate::spectator::StreamMesh>>,
     /// Immutable for a given source-mesh Arc; a camera move should not scan
     /// every opaque face just to rediscover whether sorting is necessary.
     has_transparent_world_faces: bool,
@@ -301,6 +319,10 @@ pub(crate) struct Pipeline {
     /// Unchanged chunks reuse their existing buffers even when other chunks
     /// are inserted, removed or remeshed.
     chunks: std::collections::BTreeMap<(i32, i32, u32), GpuChunk>,
+    /// Streaming source chunks are already independently meshed on the
+    /// background thread. Reuse their exact Arc vertex buffers at the GPU
+    /// without regrouping every face of every other chunk.
+    stream_chunks: std::collections::BTreeMap<(i32, i32, u8, usize, usize), GpuStreamChunk>,
     draw_spans: Vec<DrawSpan>,
     segment_spans: Vec<Vec<DrawSpan>>,
     quality: Quality,
@@ -327,6 +349,11 @@ struct DrawSpan {
 struct GpuChunk {
     source: Arc<Vec<Vertex>>,
     buffers: Vec<(wgpu::Buffer, u32)>,
+}
+struct GpuStreamChunk {
+    source: Arc<Vec<Vertex>>,
+    buffers: Vec<(wgpu::Buffer, u32)>,
+    spans: Vec<Vec<DrawSpan>>,
 }
 /// Preserve painter order in a draw stream while switching independently
 /// allocated atlas page bindings at complete six-vertex face boundaries.
@@ -811,6 +838,7 @@ impl shader::Pipeline for Pipeline {
             segments: Vec::new(),
             last_uploaded_vertices: None,
             last_source_mesh: None,
+            last_source_stream: None,
             has_transparent_world_faces: false,
             atlas: None,
             atlas_texture,
@@ -820,6 +848,7 @@ impl shader::Pipeline for Pipeline {
             linear,
             atlas_bind_group,
             chunks: std::collections::BTreeMap::new(),
+            stream_chunks: std::collections::BTreeMap::new(),
             draw_spans: Vec::new(),
             segment_spans: Vec::new(),
             quality: Quality::Balanced,
@@ -842,63 +871,122 @@ impl shader::Primitive for Primitive {
         bounds: &Rectangle,
         _: &Viewport,
     ) {
-        let mesh_identity_changed = pipeline
-            .last_source_mesh.as_ref()
-            .is_none_or(|old| !Arc::ptr_eq(old, &self.vertices));
+        let mesh_identity_changed = if let Some(stream) = &self.stream_mesh {
+            pipeline.last_source_stream.as_ref()
+                .is_none_or(|old| !Arc::ptr_eq(old, stream))
+        } else {
+            pipeline.last_source_stream.is_some()
+                || pipeline.last_source_mesh.as_ref()
+                    .is_none_or(|old| !Arc::ptr_eq(old, &self.vertices))
+        };
         let changed_camera = pipeline.last_camera != self.camera;
         if mesh_identity_changed {
-            pipeline.has_transparent_world_faces = self.vertices.iter()
-                .any(|v| (v.mode & 3) == 2 && v.world_mode == 1);
+            pipeline.has_transparent_world_faces = if let Some(stream) = &self.stream_mesh {
+                stream.chunks.iter().any(|part| part.vertices.iter()
+                    .any(|v| (v.mode & 3) == 2 && v.world_mode == 1))
+            } else {
+                self.vertices.iter().any(|v| (v.mode & 3) == 2 && v.world_mode == 1)
+            };
         }
         let resort = self.camera.is_some() && pipeline.has_transparent_world_faces
             && (changed_camera || mesh_identity_changed);
         let mut changed_mesh = false;
         if let Some(origin) = self.source_origin {
-            // Each independent resident GPU buffer belongs to a real source
-            // chunk and atlas page. A new chunk cannot shift any other
-            // chunk's GPU offsets. Only dirty chunks are uploaded.
-            if mesh_identity_changed || pipeline.chunks.is_empty() {
-                let mut groups: std::collections::BTreeMap<(i32, i32, u32), Vec<Vertex>> =
-                    std::collections::BTreeMap::new();
-                for quad in self.vertices.chunks_exact(6) {
-                    if quad.iter().all(|v| (v.mode & 3) == 2 && v.world_mode == 1) {
-                        continue;
+            if let Some(stream) = &self.stream_mesh {
+                // Direct GPU upload: no world-sized or per-page vertex
+                // regrouping. Unchanged source Arc pointers retain their
+                // existing resident buffers, even when a distant chunk
+                // finishes or another source chunk is remeshed.
+                if mesh_identity_changed || pipeline.stream_chunks.is_empty() {
+                    let mut old = std::mem::take(&mut pipeline.stream_chunks);
+                    let mut next = std::collections::BTreeMap::new();
+                    let capacity = gpu_segment_vertices(device.limits().max_buffer_size);
+                    if capacity == 0 { return; }
+                    for part in &stream.chunks {
+                        let key = part.key;
+                        let existing = old.remove(&key);
+                        let entry = match existing {
+                            Some(previous) if Arc::ptr_eq(&previous.source, &part.vertices) =>
+                                previous,
+                            _ => {
+                                changed_mesh = true;
+                                let buffers = make_chunk_buffers(device, queue, &part.vertices);
+                                let spans = part.vertices.chunks(capacity)
+                                    .map(page_spans).collect();
+                                GpuStreamChunk {
+                                    source: Arc::clone(&part.vertices),
+                                    buffers, spans,
+                                }
+                            }
+                        };
+                        next.insert(key, entry);
                     }
-                    groups.entry(chunk_bucket(quad, origin))
-                        .or_default().extend_from_slice(quad);
+                    if !old.is_empty() { changed_mesh = true; }
+                    pipeline.stream_chunks = next;
                 }
-                let mut previous = std::mem::take(&mut pipeline.chunks);
-                let mut next = std::collections::BTreeMap::new();
-                for (key, vertices) in groups {
-                    let entry = match previous.remove(&key) {
-                        Some(resident) if same_vertices(&resident.source, &vertices) => resident,
-                        _ => {
-                            changed_mesh = true;
-                            let buffers = make_chunk_buffers(device, queue, &vertices);
-                            GpuChunk { source: Arc::new(vertices), buffers }
+                if !pipeline.chunks.is_empty() {
+                    pipeline.chunks.clear();
+                    changed_mesh = true;
+                }
+            } else {
+                if !pipeline.stream_chunks.is_empty() {
+                    pipeline.stream_chunks.clear();
+                    changed_mesh = true;
+                }
+            // Each independent resident GPU buffer belongs to a real source
+                // chunk and atlas page. A new chunk cannot shift any other
+                // chunk's GPU offsets. Only dirty chunks are uploaded.
+                if mesh_identity_changed || pipeline.chunks.is_empty() {
+                    let mut groups: std::collections::BTreeMap<(i32, i32, u32), Vec<Vertex>> =
+                        std::collections::BTreeMap::new();
+                    for quad in self.vertices.chunks_exact(6) {
+                        if quad.iter().all(|v| (v.mode & 3) == 2
+                            && v.world_mode == 1) {
+                            continue;
                         }
-                    };
-                    next.insert(key, entry);
+                        groups.entry(chunk_bucket(quad, origin))
+                            .or_default().extend_from_slice(quad);
+                    }
+                    let mut previous = std::mem::take(&mut pipeline.chunks);
+                    let mut next = std::collections::BTreeMap::new();
+                    for (key, vertices) in groups {
+                        let entry = match previous.remove(&key) {
+                            Some(resident) if same_vertices(&resident.source, &vertices) => resident,
+                            _ => {
+                                changed_mesh = true;
+                                let buffers = make_chunk_buffers(device, queue, &vertices);
+                                GpuChunk { source: Arc::new(vertices), buffers }
+                            }
+                        };
+                        next.insert(key, entry);
+                    }
+                    if !previous.is_empty() { changed_mesh = true; }
+                    pipeline.chunks = next;
                 }
-                if !previous.is_empty() { changed_mesh = true; }
-                pipeline.chunks = next;
+    
             }
             // Translucent faces must still be globally sorted across chunks
             // (and across independently bound atlas pages). Keep only those
             // faces in the dynamic vertex buffer, never reupload opaque chunks
             // when the camera rotates.
             if mesh_identity_changed || resort {
-                let order = if self.camera.is_some() && pipeline.has_transparent_world_faces {
-                    ordered_transparent_vertices(self.vertices.as_slice(),
-                        self.camera.as_ref().expect("camera present"))
+                let translucent_only = if let Some(stream) = &self.stream_mesh {
+                    stream.chunks.iter()
+                        .flat_map(|part| part.vertices.chunks_exact(6))
+                        .filter(|quad| quad.iter()
+                            .all(|v| (v.mode & 3) == 2 && v.world_mode == 1))
+                        .flat_map(|quad| quad.iter().copied()).collect::<Vec<_>>()
                 } else {
-                    self.vertices.as_ref().clone()
+                    self.vertices.chunks_exact(6)
+                        .filter(|quad| quad.iter()
+                            .all(|v| (v.mode & 3) == 2 && v.world_mode == 1))
+                        .flat_map(|quad| quad.iter().copied()).collect::<Vec<_>>()
                 };
-                let transparent = order.chunks_exact(6)
-                    .filter(|quad| quad.iter()
-                        .all(|v| (v.mode & 3) == 2 && v.world_mode == 1))
-                    .flat_map(|quad| quad.iter().copied())
-                    .collect::<Vec<_>>();
+                let transparent = if let Some(camera) = &self.camera {
+                    ordered_transparent_vertices(&translucent_only, camera)
+                } else {
+                    translucent_only
+                };
                 let needed = transparent.len() as u64
                     * std::mem::size_of::<Vertex>() as u64;
                 let max_buffer = device.limits().max_buffer_size;
@@ -931,8 +1019,12 @@ impl shader::Primitive for Primitive {
             }
             pipeline.last_uploaded_vertices = None;
         } else {
-            let was_chunks = !pipeline.chunks.is_empty();
-            if was_chunks { pipeline.chunks.clear(); }
+            let was_chunks = !pipeline.chunks.is_empty()
+                || !pipeline.stream_chunks.is_empty();
+            if was_chunks {
+                pipeline.chunks.clear();
+                pipeline.stream_chunks.clear();
+            }
             // Existing isometric projection uses screen-space vertices.
             // Keep its suffix/range writes while the 3D spectator mode uses
             // independent per-chunk buffers.
@@ -1003,7 +1095,12 @@ impl shader::Primitive for Primitive {
                 changed_mesh = modified || was_segmented || was_chunks;
             }
         }
-        pipeline.last_source_mesh = Some(Arc::clone(&self.vertices));
+        pipeline.last_source_mesh = if self.stream_mesh.is_some() {
+            None
+        } else {
+            Some(Arc::clone(&self.vertices))
+        };
+        pipeline.last_source_stream = self.stream_mesh.clone();
         let changed_atlas = match (&pipeline.atlas, &self.atlas) {
             (Some(old), Some(new)) => !Arc::ptr_eq(old, new),
             (None, None) => false,
@@ -1128,7 +1225,19 @@ impl shader::Primitive for Primitive {
                 occlusion_query_set: None,
             });
             pass.set_pipeline(&pipeline.opaque);
-            if self.source_origin.is_some() {
+            if self.stream_mesh.is_some() {
+                for resident in pipeline.stream_chunks.values() {
+                    for ((buffer, _), spans) in resident.buffers.iter().zip(&resident.spans) {
+                        pass.set_vertex_buffer(0, buffer.slice(..));
+                        for span in spans {
+                            let binding = pipeline.atlas_pages.get(span.page)
+                                .map(|item| &item.1).unwrap_or(&pipeline.atlas_bind_group);
+                            pass.set_bind_group(0, binding, &[]);
+                            pass.draw(span.start..span.end, 0..1);
+                        }
+                    }
+                }
+            } else if self.source_origin.is_some() {
                 for ((_, _, page), chunk) in &pipeline.chunks {
                     let binding = pipeline.atlas_pages.get(*page as usize)
                         .map(|item| &item.1).unwrap_or(&pipeline.atlas_bind_group);
@@ -1263,17 +1372,44 @@ mod tests {
         }]);
         let fallback = crate::spectator::CompletedFrame {
             vertices: Arc::clone(&old_mesh),
+            stream_mesh: None,
             surface: Arc::clone(&old_origin),
             atlas: None,
         };
-        let during = choose_spectator_mesh(None, &new_origin, None, Some(&fallback));
+        let during = choose_spectator_mesh(None, &new_origin, None, None, Some(&fallback));
         assert!(Arc::ptr_eq(&during.vertices, &old_mesh));
         assert!(Arc::ptr_eq(&during.surface, &old_origin));
         let replacement = Arc::new(vec![old_mesh[0], old_mesh[0]]);
         let ready = choose_spectator_mesh(
-            Some(Arc::clone(&replacement)), &new_origin, None, Some(&fallback));
+            Some(Arc::clone(&replacement)), &new_origin, None, None, Some(&fallback));
         assert!(Arc::ptr_eq(&ready.vertices, &replacement));
         assert!(Arc::ptr_eq(&ready.surface, &new_origin));
+    }
+    #[test]
+    fn completed_stream_generation_keeps_separate_chunks_and_original_atlas() {
+        let original = Arc::new(crate::spectator::StreamMesh {
+            origin: [-16, 64, 0],
+            chunks: vec![
+                crate::spectator::MeshChunk {
+                    key: (-1, 0, 1, 0, 0),
+                    vertices: Arc::new(gpu_test_quad(1.0).to_vec()),
+                },
+                crate::spectator::MeshChunk {
+                    key: (0, 0, 4, 1, 0),
+                    vertices: Arc::new(gpu_test_quad(2.0).to_vec()),
+                },
+            ],
+        });
+        let source = Arc::new(mcedit2_world::surface::SurfaceView {
+            x: -16, z: 0, y_min: 64, y_max: 128, width: 16, depth: 16,
+            voxels: vec![], source_tiles: vec![], source_chunks: 0,
+            missing_columns: 0,
+        });
+        let committed = choose_spectator_mesh(None, &source, None,
+            Some(Arc::clone(&original)), None);
+        assert!(Arc::ptr_eq(committed.stream_mesh.as_ref().unwrap(), &original));
+        assert!(committed.vertices.is_empty());
+        assert_eq!(committed.stream_mesh.unwrap().chunks.len(), 2);
     }
     fn test_camera(forward: [f32; 3]) -> crate::spectator::CameraUniform {
         crate::spectator::CameraUniform {

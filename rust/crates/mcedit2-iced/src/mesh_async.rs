@@ -103,19 +103,21 @@ fn queue() -> &'static Queue {
                         let _ = view.gpu_vertices_cancellable(*size, &cancelled);
                     }
                     MeshRequest::Spectator { view, .. } => {
-                        // Arc-backed chunk snapshots are materialized only
-                        // by this mesh worker, never while iced builds a UI
-                        // frame. The patch data and near scene remain intact
-                        // and independently shareable across publications.
-                        let mut resolved = view.clone();
                         if let Some(snapshot) = &view.snapshot {
-                            if !cancelled() {
-                                resolved.surface = Arc::new(snapshot.materialize());
-                                resolved.snapshot = None;
+                            // The source has immutable per-chunk borrowed
+                            // arrays. No flat SurfaceView or world-sized
+                            // Vertex buffer is created on this path.
+                            if let Some(frame) = crate::spectator::build_stream_cancellable(
+                                view, snapshot, &cancelled,
+                            ) {
+                                if !cancelled() {
+                                    *snapshot.ready.lock()
+                                        .unwrap_or_else(|e| e.into_inner()) =
+                                        Some(Arc::new(frame));
+                                }
                             }
-                        }
-                        if let Some(vertices) =
-                            crate::spectator::build_cancellable(&resolved, &cancelled)
+                        } else if let Some(vertices) =
+                            crate::spectator::build_cancellable(view, &cancelled)
                         {
                             let mut cache = view.cache.lock().unwrap_or_else(|e| e.into_inner());
                             if !cancelled() {
@@ -186,6 +188,11 @@ pub(crate) fn enqueue(view: &IsometricSurface, size: Size) {
 /// World-space vertices stay identical when the observer moves.
 /// Only the tiny GPU uniform changes per frame, with no new face mesh.
 pub(crate) fn enqueue_spectator(view: &crate::spectator::SpectatorScene) {
+    if view.snapshot.as_ref().is_some_and(|snapshot|
+        snapshot.ready.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+    ) {
+        return;
+    }
     if view
         .cache
         .lock()

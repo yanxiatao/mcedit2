@@ -284,9 +284,17 @@ pub(crate) struct DistantElevation<'a> {
 }
 impl<'a> DistantElevation<'a> {
     pub fn new(surface: &'a SurfaceView) -> Self {
-        let samples = surface
-            .voxels
-            .iter()
+        Self::from_sources(|| surface.voxels.iter(), surface.y_max)
+    }
+    /// Build LOD cliff/ground lookup from independently borrowed chunks.
+    /// Both iterator passes share source voxel references; no combined
+    /// SurfaceView and no cloned global voxel array are needed.
+    pub fn from_sources<I, F>(source: F, y_max: i32) -> Self
+    where
+        F: Fn() -> I,
+        I: Iterator<Item = &'a SurfaceVoxel>,
+    {
+        let samples = source()
             .filter(|v| matches!(v.span, 4 | 8 | 16))
             .fold(HashMap::new(), |mut result, v| {
                 // Transparent tree crowns and glass are not solid cliffs.
@@ -307,10 +315,10 @@ impl<'a> DistantElevation<'a> {
                     .or_insert(v);
                 result
             });
-        let exact_ground = surface.voxels.iter()
+        let exact_ground = source()
             .filter(|v|v.span==1 && v.kind==VoxelMaterial::Solid
                 && v.faces & mcedit2_world::surface::FACE_TOP != 0
-                && v.y < surface.y_max)
+                && v.y < y_max)
             .fold(HashMap::new(),|mut index,voxel|{
                 index.entry((voxel.x,voxel.z))
                     .and_modify(|old:&mut &'a SurfaceVoxel|{
