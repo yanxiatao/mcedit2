@@ -1097,7 +1097,13 @@ impl TextureBank {
             return Err("ZIP exceeds 1,000,000 entries safety budget".into());
         }
         for i in 0..archive.len() {
-            let mut member = archive.by_index(i).map_err(|e| e.to_string())?;
+            let mut member = match archive.by_index(i) {
+                Ok(member) => member,
+                Err(error) => {
+                    self.warnings.push(format!("Skipped unreadable ZIP entry {i}: {error}"));
+                    continue;
+                }
+            };
             let name = member.name().to_string();
             let Some(asset) = PackAsset::classify(&name) else {
                 continue;
@@ -1108,11 +1114,13 @@ impl TextureBank {
                 continue;
             }
             let mut bytes = Vec::new();
-            member
+            if let Err(error) = member
                 .by_ref()
                 .take(max_size + 1)
-                .read_to_end(&mut bytes)
-                .map_err(|e| e.to_string())?;
+                .read_to_end(&mut bytes) {
+                self.warnings.push(format!("Skipped unreadable asset {name}: {error}"));
+                continue;
+            }
             if bytes.len() as u64 > max_size {
                 self.warnings.push(format!("Skipped oversize {name}"));
                 continue;
@@ -1221,8 +1229,11 @@ impl TextureBank {
         if paths.is_empty() || paths.iter().any(|p| p.as_os_str().is_empty()) {
             return Err("Select at least one resource-pack directory or ZIP".into());
         }
-        if paths.len() > 32 {
-            return Err("Resource-pack stack exceeds 32 layers".into());
+        // Large Prism/NeoForge modpacks may contain hundreds of active mod
+        // archives. The atlas has separate decoded-RGBA and GPU memory caps;
+        // the former 32-pack ceiling incorrectly excluded most mod assets.
+        if paths.len() > 1024 {
+            return Err("Resource-pack stack exceeds 1024 layers".into());
         }
         let mut out = Self {
             #[cfg(test)]
@@ -1246,10 +1257,10 @@ impl TextureBank {
                 let mut entries = 0;
                 out.walk(&root, &root.join("assets"), &mut memory, 0, &mut entries)?;
             } else if path.is_file() {
-                if !matches!(
-                    path.extension().and_then(|ext| ext.to_str()),
-                    Some("zip" | "jar")
-                ) {
+                if !path.extension().and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("zip")
+                        || ext.eq_ignore_ascii_case("jar"))
+                {
                     return Err(
                         "Only directories, .zip packs and .jar client assets are supported".into(),
                     );

@@ -393,7 +393,7 @@ struct App {
     spectator_radius: u16,
     gpu_quality: gpu_mesh::Quality,
     texture_bank: Option<std::sync::Arc<textures::TextureBank>>,
-    auto_assets_attempted: std::collections::BTreeSet<usize>,
+    auto_assets_attempted: std::collections::BTreeSet<(usize, PathBuf)>,
     manual_textures: bool,
     texture_load_nonce: u64,
     texture_loading: bool,
@@ -538,15 +538,21 @@ enum Message {
     LoadTextures,
     UnloadTextures,
     ToggleTextures,
+    RefreshInstanceAssets,
     ToggleGpu,
     CycleGpuQuality,
     ToggleTopDown,
     MeshWake,
     AutoAssetsLoaded(
         usize,
-        Option<Result<(PathBuf, textures::TextureBank), String>>,
+        PathBuf,
+        u64,
+        Option<Result<(auto_assets::AssetStack, textures::TextureBank), String>>,
     ),
-    TextureLoadFinished(u64, PathBuf, Result<textures::TextureBank, String>),
+    TextureLoadFinished(
+        u64, PathBuf,
+        Result<(textures::TextureBank, Option<auto_assets::AssetStack>), String>,
+    ),
     ToggleSpectator,
     SpectatorLook(f32, f32),
     SpectatorKey(iced::keyboard::Event),
@@ -695,6 +701,21 @@ impl App {
         self.surface
             .as_ref()
             .is_some_and(|(wi, di, _)| self.current_key() == Some((*wi, *di)))
+    }
+    /// Switching modpacks must invalidate the old atlas. Two worlds inside
+    /// the same Minecraft game directory share active mods and packs.
+    fn reset_assets_for_world(&mut self, next: &std::path::Path) {
+        let prior = self.current.and_then(|i| self.worlds.get(i))
+            .map(|world| world.root.clone());
+        if prior.as_deref().is_some_and(|old|
+            !auto_assets::same_instance(old, next)) {
+            self.texture_load_nonce = self.texture_load_nonce.wrapping_add(1);
+            self.texture_loading = false;
+            self.texture_bank = None;
+            self.manual_textures = false;
+            self.texture_report.clear();
+            self.auto_assets_attempted.clear();
+        }
     }
     fn invalidate_near(&mut self) {
         self.near_nonce = self.near_nonce.wrapping_add(1);
@@ -2126,13 +2147,14 @@ fn update(app: &mut App, message: Message) -> iced::Task<Message> {
         }
     }
     tasks.push(app.maintain_spectator_stream());
-    // Probe conventional local vanilla client JAR paths only once.
-    // Decode PNG/JSON off the UI thread; a manual pack always wins.
+    // One bounded read-only scan of the selected Minecraft instance.
     if app.spectator && !app.manual_textures && app.texture_bank.is_none() {
         if let Some(index) = app.current {
-            if app.surface.is_some() && app.auto_assets_attempted.insert(index) {
+            if app.surface.is_some() {
                 if let Some(world) = app.worlds.get(index) {
-                    tasks.push(auto_assets::load(index, world));
+                    if app.auto_assets_attempted.insert((index, world.root.clone())) {
+                        tasks.push(auto_assets::load(index, world, app.texture_load_nonce));
+                    }
                 }
             }
         }
@@ -2190,6 +2212,22 @@ fn update_impl(app: &mut App, message: Message) -> iced::Task<Message> {
             }
         },
         Message::ToggleTextures => app.show_textures = !app.show_textures,
+        Message::RefreshInstanceAssets => {
+            let Some(index) = app.current else {
+                app.texture_report = "Select a Java world before scanning instance resources.".into();
+                return iced::Task::none();
+            };
+            let Some(world) = app.worlds.get(index) else {
+                return iced::Task::none();
+            };
+            // Preserve the old completed atlas until the new one is ready.
+            app.manual_textures = false;
+            app.texture_loading = true;
+            app.texture_load_nonce = app.texture_load_nonce.wrapping_add(1);
+            app.auto_assets_attempted.insert((index, world.root.clone()));
+            app.texture_report = "Scanning this world's instance for vanilla, mod and enabled pack assets…".into();
+            return auto_assets::load(index, world, app.texture_load_nonce);
+        },
         Message::MeshWake => {} // redraw to collect completed GPU mesh
         Message::ToggleGpu => {
             // Never silently substitute a top-down/orthographic fallback
@@ -2306,16 +2344,16 @@ fn update_impl(app: &mut App, message: Message) -> iced::Task<Message> {
                         let result = if layers.iter().any(|p| p.as_os_str().is_empty()) {
                             Err("Resource-pack list contains an empty path".into())
                         } else {
-                            let mut stack = Vec::new();
-                            if let Some((root, version)) = &base_world {
-                                if let Some(vanilla) = auto_assets::discover(root, version) {
-                                    if !layers.contains(&vanilla) {
-                                        stack.push(vanilla);
-                                    }
-                                }
-                            }
+                            let detected = base_world.as_ref().and_then(|(root, version)|
+                                auto_assets::discover_stack(root, version));
+                            let mut stack = detected.as_ref()
+                                .map(|assets| assets.paths.clone())
+                                .unwrap_or_default();
+                            // Explicit packs are always highest priority.
+                            stack.retain(|base| !layers.contains(base));
                             stack.extend(layers);
                             textures::TextureBank::open_stack(&stack)
+                                .map(|bank| (bank, detected))
                         };
                         let _ = sender.send((path, result));
                     });
@@ -2333,14 +2371,21 @@ fn update_impl(app: &mut App, message: Message) -> iced::Task<Message> {
             }
             app.texture_loading = false;
             match result {
-                Ok(bank) => {
-                    app.texture_report=format!(
-                        "Loaded {} PNGs on {} GPU pages ({}px sprite resolution), {} animated sprites, {} models, {} warnings from {}. {}",
-                        bank.count(),bank.atlas().map_or(0,|a|a.page_count()),
-                        bank.atlas().map_or(0,|a|a.tile_resolution()),
-                        bank.animation_count(),bank.model_count(),
-                        bank.warnings.len(),path.display(),
-                        bank.warnings.first().map(String::as_str).unwrap_or(""));
+                Ok((bank, detected)) => {
+                    let sources = detected.as_ref().map(|local| format!(
+                        " (instance: {} mod JARs / {} enabled packs / {} generated, {})",
+                        local.mod_count, local.selected_count, local.generated_count,
+                        local.instance.as_ref().map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "unknown game directory".into())
+                    )).unwrap_or_default();
+                    app.texture_report = format!(
+                        "Loaded {} PNGs / {} GPU pages ({}px) / {} animated sprites / {} models, manual {}{}. {}",
+                        bank.count(), bank.atlas().map_or(0, |a| a.page_count()),
+                        bank.atlas().map_or(0, |a| a.tile_resolution()),
+                        bank.animation_count(), bank.model_count(), path.display(), sources,
+                        bank.warnings.first().map(String::as_str).or_else(||
+                            detected.as_ref().and_then(|s| s.warnings.first().map(String::as_str)))
+                            .unwrap_or(""));
                     app.texture_bank = Some(std::sync::Arc::new(bank));
                     app.show_textures = true;
                 }
@@ -2350,27 +2395,38 @@ fn update_impl(app: &mut App, message: Message) -> iced::Task<Message> {
                 }
             }
         }
-        Message::AutoAssetsLoaded(index, result) => {
-            if app.current == Some(index) && !app.manual_textures && app.texture_bank.is_none() {
-                if let Some(result) = result {
-                    match result {
-                        Ok((path, bank)) => {
-                            app.texture_report=format!(
-                                "Loaded vanilla textures: {} ({} PNGs, {} atlas pages, {}px sprites, {} models)",
-                                path.display(),bank.count(),
-                                bank.atlas().map_or(0,|a|a.page_count()),
-                                bank.atlas().map_or(0,|a|a.tile_resolution()),
-                                bank.model_count());
-                            app.texture_bank = Some(std::sync::Arc::new(bank));
-                            app.show_textures = true;
-                        }
-                        Err(error) => {
-                            app.texture_report=format!(
-                                "Installed vanilla textures could not be loaded: {error}. Choose a ZIP/JAR or folder manually.");
-                        }
+        Message::AutoAssetsLoaded(index, root, nonce, result) => {
+            if app.current == Some(index)
+                && app.worlds.get(index).is_some_and(|world| world.root == root)
+                && nonce == app.texture_load_nonce
+                && !app.manual_textures
+            {
+                app.texture_loading = false;
+                match result {
+                    Some(Ok((sources, bank))) => {
+                        app.texture_report = format!(
+                            "Instance {}: vanilla {}, {} mod JARs, {} generated packs, {} enabled packs; {} PNG / {} atlas pages / {} models. {}",
+                            sources.instance.as_ref().map(|p| p.display().to_string())
+                                .unwrap_or_else(|| "unknown game directory".into()),
+                            if sources.vanilla { "found" } else { "missing" },
+                            sources.mod_count, sources.generated_count, sources.selected_count,
+                            bank.count(), bank.atlas().map_or(0, |a| a.page_count()),
+                            bank.model_count(),
+                            sources.warnings.first().map(String::as_str)
+                                .or_else(|| bank.warnings.first().map(String::as_str))
+                                .unwrap_or("")
+                        );
+                        app.texture_bank = Some(std::sync::Arc::new(bank));
+                        app.show_textures = true;
                     }
-                } else {
-                    app.texture_report = "No matching installed vanilla client JAR found. Select a resource pack or local Minecraft client ZIP/JAR manually.".into();
+                    Some(Err(error)) => {
+                        app.texture_report = format!(
+                            "Instance resource loading failed (prior textures retained): {error}"
+                        );
+                    }
+                    None => {
+                        app.texture_report = "No readable instance assets found; choose a client JAR or resource pack manually.".into();
+                    }
                 }
             }
         }
@@ -2697,6 +2753,9 @@ fn update_impl(app: &mut App, message: Message) -> iced::Task<Message> {
             if nonce == app.open_nonce {
                 match result {
                     Ok((world, terrain_y)) => {
+                        // Capture the previous world before replacing current,
+                        // otherwise the new index has no corresponding entry.
+                        app.reset_assets_for_world(&world.root);
                         app.current = Some(app.worlds.len());
                         app.dimension_index = 0;
                         app.block_result.clear();
@@ -2724,6 +2783,8 @@ fn update_impl(app: &mut App, message: Message) -> iced::Task<Message> {
             app.slice_grid = None;
             app.vertical_grid = None;
             if index < app.worlds.len() {
+                let next_root = app.worlds[index].root.clone();
+                app.reset_assets_for_world(&next_root);
                 app.current = Some(index);
                 app.dimension_index = 0;
                 app.block_result.clear();
@@ -3390,6 +3451,12 @@ fn update_impl(app: &mut App, message: Message) -> iced::Task<Message> {
             app.recovery_phrase.clear();
             app.save_phrase.clear();
             app.path.clear();
+            app.texture_load_nonce = app.texture_load_nonce.wrapping_add(1);
+            app.texture_loading = false;
+            app.texture_bank = None;
+            app.manual_textures = false;
+            app.auto_assets_attempted.clear();
+            app.texture_report.clear();
             app.worlds.clear();
             app.sessions.clear();
             app.prepared = None;
@@ -3652,6 +3719,10 @@ fn workspace_view(app: &App) -> Element<'_, Message> {
         .spacing(5),
     );
     panel = panel.push(text(l.pick("资源包（按顺序叠加）", "Resource packs (ordered overlays)")).size(16));
+    panel = panel.push(
+        button(l.pick("重新发现当前实例资源", "Rescan this instance's assets"))
+            .on_press(Message::RefreshInstanceAssets),
+    );
     panel = panel.push(
         row![
             button(l.pick("打开 ZIP / JAR", "Open ZIP / JAR")).on_press(Message::ChooseTextureFile),
@@ -3921,8 +3992,13 @@ fn view(app: &App) -> Element<'_, Message> {
         }
         if app.advanced_section == AdvancedSection::Viewer {
             body = body.push(text(l.pick("材质与 GPU", "Texture resources & GPU")).size(22));
-            body = body.push(text(l.pick("原版贴图需加载客户端 JAR 或资源包；可叠加多个资源包。",
-                "Load a matching client JAR or resource pack for real textures; multiple overlays supported.")));
+            body = body.push(text(l.pick(
+                "打开世界后自动发现原版 JAR、同实例 Mod JAR、KubeJS 资源和启用的资源包；手动资源包优先级最高。",
+                "Automatically use this world's client, Mod JARs, KubeJS assets and enabled packs; manual overrides take priority."
+            )));
+            body = body.push(button(
+                l.pick("扫描并重新加载实例资源", "Rescan and reload instance assets")
+            ).on_press(Message::RefreshInstanceAssets));
         body = body.push(
             row![
                 text_input(
