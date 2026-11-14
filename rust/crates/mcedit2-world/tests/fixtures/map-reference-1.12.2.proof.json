@@ -1,0 +1,10 @@
+{
+  "client_sha256": "8ada07da5ee77dad3527bd7278fbd05ee1fc8a597813b216a871a2d7d64cc64f",
+  "omitted_signature_entries_in_analysis_copy": [
+    "META-INF/MOJANGCS.SF",
+    "META-INF/MOJANGCS.RSA"
+  ],
+  "all_other_members_identical": true,
+  "output_sha256": "64e78078885f48e79062bdbcd045cd994395152f246adc6603bee734e4b884c9",
+  "generator_source_sha256": "50b163b563cdf5884dc809078e22b7ad0e559ebfbafa9c2cbd4862661efc7fc8"
+}

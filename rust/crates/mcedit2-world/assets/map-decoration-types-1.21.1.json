@@ -1,0 +1,142 @@
+{
+  "minecraft:banner_black": {
+    "show_on_frame": true,
+    "asset_id": "minecraft:black_banner"
+  },
+  "minecraft:banner_blue": {
+    "show_on_frame": true,
+    "asset_id": "minecraft:blue_banner"
+  },
+  "minecraft:banner_brown": {
+    "show_on_frame": true,
+    "asset_id": "minecraft:brown_banner"
+  },
+  "minecraft:banner_cyan": {
+    "show_on_frame": true,
+    "asset_id": "minecraft:cyan_banner"
+  },
+  "minecraft:banner_gray": {
+    "show_on_frame": true,
+    "asset_id": "minecraft:gray_banner"
+  },
+  "minecraft:banner_green": {
+    "show_on_frame": true,
+    "asset_id": "minecraft:green_banner"
+  },
+  "minecraft:banner_light_blue": {
+    "show_on_frame": true,
+    "asset_id": "minecraft:light_blue_banner"
+  },
+  "minecraft:banner_light_gray": {
+    "show_on_frame": true,
+    "asset_id": "minecraft:light_gray_banner"
+  },
+  "minecraft:banner_lime": {
+    "show_on_frame": true,
+    "asset_id": "minecraft:lime_banner"
+  },
+  "minecraft:banner_magenta": {
+    "show_on_frame": true,
+    "asset_id": "minecraft:magenta_banner"
+  },
+  "minecraft:banner_orange": {
+    "show_on_frame": true,
+    "asset_id": "minecraft:orange_banner"
+  },
+  "minecraft:banner_pink": {
+    "show_on_frame": true,
+    "asset_id": "minecraft:pink_banner"
+  },
+  "minecraft:banner_purple": {
+    "show_on_frame": true,
+    "asset_id": "minecraft:purple_banner"
+  },
+  "minecraft:banner_red": {
+    "show_on_frame": true,
+    "asset_id": "minecraft:red_banner"
+  },
+  "minecraft:banner_white": {
+    "show_on_frame": true,
+    "asset_id": "minecraft:white_banner"
+  },
+  "minecraft:banner_yellow": {
+    "show_on_frame": true,
+    "asset_id": "minecraft:yellow_banner"
+  },
+  "minecraft:blue_marker": {
+    "show_on_frame": false,
+    "asset_id": "minecraft:blue_marker"
+  },
+  "minecraft:frame": {
+    "show_on_frame": true,
+    "asset_id": "minecraft:frame"
+  },
+  "minecraft:jungle_temple": {
+    "show_on_frame": true,
+    "asset_id": "minecraft:jungle_temple"
+  },
+  "minecraft:mansion": {
+    "show_on_frame": true,
+    "asset_id": "minecraft:woodland_mansion"
+  },
+  "minecraft:monument": {
+    "show_on_frame": true,
+    "asset_id": "minecraft:ocean_monument"
+  },
+  "minecraft:player": {
+    "show_on_frame": false,
+    "asset_id": "minecraft:player"
+  },
+  "minecraft:player_off_limits": {
+    "show_on_frame": false,
+    "asset_id": "minecraft:player_off_limits"
+  },
+  "minecraft:player_off_map": {
+    "show_on_frame": false,
+    "asset_id": "minecraft:player_off_map"
+  },
+  "minecraft:red_marker": {
+    "show_on_frame": false,
+    "asset_id": "minecraft:red_marker"
+  },
+  "minecraft:red_x": {
+    "show_on_frame": true,
+    "asset_id": "minecraft:red_x"
+  },
+  "minecraft:swamp_hut": {
+    "show_on_frame": true,
+    "asset_id": "minecraft:swamp_hut"
+  },
+  "minecraft:target_point": {
+    "show_on_frame": true,
+    "asset_id": "minecraft:target_point"
+  },
+  "minecraft:target_x": {
+    "show_on_frame": true,
+    "asset_id": "minecraft:target_x"
+  },
+  "minecraft:trial_chambers": {
+    "show_on_frame": true,
+    "asset_id": "minecraft:trial_chambers"
+  },
+  "minecraft:village_desert": {
+    "show_on_frame": true,
+    "asset_id": "minecraft:desert_village"
+  },
+  "minecraft:village_plains": {
+    "show_on_frame": true,
+    "asset_id": "minecraft:plains_village"
+  },
+  "minecraft:village_savanna": {
+    "show_on_frame": true,
+    "asset_id": "minecraft:savanna_village"
+  },
+  "minecraft:village_snowy": {
+    "show_on_frame": true,
+    "asset_id": "minecraft:snowy_village"
+  },
+  "minecraft:village_taiga": {
+    "show_on_frame": true,
+    "asset_id": "minecraft:taiga_village"
+  }
+}

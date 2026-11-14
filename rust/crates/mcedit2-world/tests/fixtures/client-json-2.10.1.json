@@ -1,0 +1,446 @@
+[
+  {
+    "input": "{textures:{SKIN:{url:\u0027http://textures.minecraft.net/texture/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\u0027}}}",
+    "accepted": true,
+    "shape": {
+      "type": "object",
+      "value": {
+        "textures": {
+          "type": "object",
+          "value": {
+            "SKIN": {
+              "type": "object",
+              "value": {
+                "url": {
+                  "type": "string",
+                  "value": "http://textures.minecraft.net/texture/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "input": "/* source */ { a\u003d\u003eTRUE; b\u003dfalse; c:NULL; a: 2 } # end",
+    "accepted": true,
+    "shape": {
+      "type": "object",
+      "value": {
+        "a": {
+          "type": "number",
+          "value": "2"
+        },
+        "b": {
+          "type": "boolean",
+          "value": "false"
+        },
+        "c": {
+          "type": "null"
+        }
+      }
+    }
+  },
+  {
+    "input": "[1,,2;]",
+    "accepted": true,
+    "shape": {
+      "type": "array",
+      "value": [
+        {
+          "type": "number",
+          "value": "1"
+        },
+        {
+          "type": "null"
+        },
+        {
+          "type": "number",
+          "value": "2"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  {
+    "input": "[,;]",
+    "accepted": true,
+    "shape": {
+      "type": "array",
+      "value": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "null"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  {
+    "input": "[]",
+    "accepted": true,
+    "shape": {
+      "type": "array",
+      "value": []
+    }
+  },
+  {
+    "input": "{}",
+    "accepted": true,
+    "shape": {
+      "type": "object",
+      "value": {}
+    }
+  },
+  {
+    "input": "{\u0027text\u0027:\u0027unicode \\uD83D\\uDE80; \\u4e2d\\u6587\u0027}",
+    "accepted": true,
+    "shape": {
+      "type": "object",
+      "value": {
+        "text": {
+          "type": "string",
+          "value": "unicode 🚀; 中文"
+        }
+      }
+    }
+  },
+  {
+    "input": "{a:\u0027double\\\" single\\\u0027 slash\\/ tab\\t line\\n\u0027}",
+    "accepted": true,
+    "shape": {
+      "type": "object",
+      "value": {
+        "a": {
+          "type": "string",
+          "value": "double\" single\u0027 slash/ tab\t line\n"
+        }
+      }
+    }
+  },
+  {
+    "input": "{a:\u0027actual\nline\u0027}",
+    "accepted": true,
+    "shape": {
+      "type": "object",
+      "value": {
+        "a": {
+          "type": "string",
+          "value": "actual\nline"
+        }
+      }
+    }
+  },
+  {
+    "input": "{a:\u0027escaped\\\nline\u0027}",
+    "accepted": true,
+    "shape": {
+      "type": "object",
+      "value": {
+        "a": {
+          "type": "string",
+          "value": "escaped\nline"
+        }
+      }
+    }
+  },
+  {
+    "input": "{a:\u0027\u0001\u0027}",
+    "accepted": true,
+    "shape": {
+      "type": "object",
+      "value": {
+        "a": {
+          "type": "string",
+          "value": "\u0001"
+        }
+      }
+    }
+  },
+  {
+    "input": "﻿)]}\u0027\n {x:1}",
+    "accepted": true,
+    "shape": {
+      "type": "object",
+      "value": {
+        "x": {
+          "type": "number",
+          "value": "1"
+        }
+      }
+    }
+  },
+  {
+    "input": "// only comment",
+    "accepted": false,
+    "error": "End of input at line 1 column 16 path $"
+  },
+  {
+    "input": "",
+    "accepted": false,
+    "error": "End of input at line 1 column 1 path $"
+  },
+  {
+    "input": "true",
+    "accepted": true,
+    "shape": {
+      "type": "boolean",
+      "value": "true"
+    }
+  },
+  {
+    "input": "FaLsE",
+    "accepted": true,
+    "shape": {
+      "type": "boolean",
+      "value": "false"
+    }
+  },
+  {
+    "input": "nUlL",
+    "accepted": true,
+    "shape": {
+      "type": "null"
+    }
+  },
+  {
+    "input": "01",
+    "accepted": true,
+    "shape": {
+      "type": "string",
+      "value": "01"
+    }
+  },
+  {
+    "input": "+1",
+    "accepted": true,
+    "shape": {
+      "type": "string",
+      "value": "+1"
+    }
+  },
+  {
+    "input": ".5",
+    "accepted": true,
+    "shape": {
+      "type": "string",
+      "value": ".5"
+    }
+  },
+  {
+    "input": "1.",
+    "accepted": true,
+    "shape": {
+      "type": "string",
+      "value": "1."
+    }
+  },
+  {
+    "input": "-0",
+    "accepted": true,
+    "shape": {
+      "type": "number",
+      "value": "-0"
+    }
+  },
+  {
+    "input": "1.25e+3",
+    "accepted": true,
+    "shape": {
+      "type": "number",
+      "value": "1.25e+3"
+    }
+  },
+  {
+    "input": "1e400",
+    "accepted": true,
+    "shape": {
+      "type": "number",
+      "value": "1e400"
+    }
+  },
+  {
+    "input": "NaN",
+    "accepted": true,
+    "shape": {
+      "type": "string",
+      "value": "NaN"
+    }
+  },
+  {
+    "input": "Infinity",
+    "accepted": true,
+    "shape": {
+      "type": "string",
+      "value": "Infinity"
+    }
+  },
+  {
+    "input": "-Infinity",
+    "accepted": true,
+    "shape": {
+      "type": "string",
+      "value": "-Infinity"
+    }
+  },
+  {
+    "input": "[9999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999, 9999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999]",
+    "accepted": true,
+    "shape": {
+      "type": "array",
+      "value": [
+        {
+          "type": "number",
+          "value": "9999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999"
+        },
+        {
+          "type": "string",
+          "value": "9999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999"
+        }
+      ]
+    }
+  },
+  {
+    "input": "{a:foo\"bar; b:\u0027x\u0027}",
+    "accepted": true,
+    "shape": {
+      "type": "object",
+      "value": {
+        "a": {
+          "type": "string",
+          "value": "foo\"bar"
+        },
+        "b": {
+          "type": "string",
+          "value": "x"
+        }
+      }
+    }
+  },
+  {
+    "input": "{\"a\":1} trailing",
+    "accepted": false,
+    "error": "single-document trailing data"
+  },
+  {
+    "input": "null trailing",
+    "accepted": false,
+    "error": "single-document trailing data"
+  },
+  {
+    "input": "{a:}",
+    "accepted": false,
+    "error": "com.google.gson.stream.MalformedJsonException: Expected value at line 1 column 4 path $.a"
+  },
+  {
+    "input": "{a:1,}",
+    "accepted": false,
+    "error": "com.google.gson.stream.MalformedJsonException: Expected name at line 1 column 7 path $.a"
+  },
+  {
+    "input": "[1 2]",
+    "accepted": false,
+    "error": "com.google.gson.stream.MalformedJsonException: Unterminated array at line 1 column 5 path $[1]"
+  },
+  {
+    "input": "{a:\u0027\\x20\u0027}",
+    "accepted": false,
+    "error": "com.google.gson.stream.MalformedJsonException: Invalid escape sequence at line 1 column 7 path $.a"
+  },
+  {
+    "input": "{a:\u0027unterminated}",
+    "accepted": false,
+    "error": "com.google.gson.stream.MalformedJsonException: Unterminated string at line 1 column 18 path $.a"
+  },
+  {
+    "input": "/* no end",
+    "accepted": false,
+    "error": "com.google.gson.stream.MalformedJsonException: Unterminated comment at line 1 column 9 path $"
+  },
+  {
+    "input": "{a\u003d\u003e 1; b: [1;;;3]}",
+    "accepted": true,
+    "shape": {
+      "type": "object",
+      "value": {
+        "a": {
+          "type": "number",
+          "value": "1"
+        },
+        "b": {
+          "type": "array",
+          "value": [
+            {
+              "type": "number",
+              "value": "1"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "number",
+              "value": "3"
+            }
+          ]
+        }
+      }
+    }
+  },
+  {
+    "input": "{a \u003d \u003e }",
+    "accepted": true,
+    "shape": {
+      "type": "object",
+      "value": {
+        "a": {
+          "type": "string",
+          "value": "\u003e"
+        }
+      }
+    }
+  },
+  {
+    "input": "{a:1# c\n,b:2}",
+    "accepted": true,
+    "shape": {
+      "type": "object",
+      "value": {
+        "a": {
+          "type": "number",
+          "value": "1"
+        },
+        "b": {
+          "type": "number",
+          "value": "2"
+        }
+      }
+    }
+  },
+  {
+    "input": "{1:one; true:yes}",
+    "accepted": true,
+    "shape": {
+      "type": "object",
+      "value": {
+        "1": {
+          "type": "string",
+          "value": "one"
+        },
+        "true": {
+          "type": "string",
+          "value": "yes"
+        }
+      }
+    }
+  }
+]

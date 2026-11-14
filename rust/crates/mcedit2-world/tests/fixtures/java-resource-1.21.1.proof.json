@@ -1,0 +1,23 @@
+{
+  "client_sha256": "499f6897d1837516680f3114072d8106e11c9adcd933fe5cf051b551089b0c99",
+  "omitted_signature_entries_in_analysis_copy": [
+    "META-INF/MOJANGCS.SF",
+    "META-INF/MOJANGCS.RSA"
+  ],
+  "all_other_members_identical": true,
+  "output_sha256": "01f26177b44dddda010c959b02fe614fd51f4e11c823f610414a0b45a07a9a44",
+  "libraries": [
+    {
+      "name": "com.google.code.gson:gson:2.10.1",
+      "sha256": "4241c14a7727c34feea6507ec801318a3d4a90f070e4525681079fb94ee4c593"
+    },
+    {
+      "name": "com.google.guava:guava:32.1.2-jre",
+      "sha256": "bc65dea7cfd9e4dacf8419d8af0e741655857d27885bb35d943d7187fc3a8fce"
+    },
+    {
+      "name": "org.apache.commons:commons-lang3:3.14.0",
+      "sha256": "7b96bf3ee68949abb5bc465559ac270e0551596fa34523fddf890ec418dde13c"
+    }
+  ]
+}

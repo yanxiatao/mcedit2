@@ -1,0 +1,535 @@
+{
+  "source": "准确客户端静态 EntityType 注册、builder 与 bootstrap；未执行客户端或编译参照类",
+  "client_sha256": "499f6897d1837516680f3114072d8106e11c9adcd933fe5cf051b551089b0c99",
+  "javap_sha256": {
+    "bsx$a": "91a07ef9f7ad8de5024f704d33fccb33b91dbd79d57e3aebe842249fef1c1c65",
+    "bsx.verbose": "b0830c1cc1177e1c318997a4fcb72af40a80248274c944ecb7a6f50d60bc0997"
+  },
+  "default_size": [
+    0.6000000238418579,
+    1.7999999523162842
+  ],
+  "origins": {
+    "minecraft:allay": {
+      "field": "a",
+      "class": "cgk"
+    },
+    "minecraft:area_effect_cloud": {
+      "field": "b",
+      "class": "bsn"
+    },
+    "minecraft:armadillo": {
+      "field": "c",
+      "class": "cgn"
+    },
+    "minecraft:armor_stand": {
+      "field": "d",
+      "class": "ciw"
+    },
+    "minecraft:arrow": {
+      "field": "e",
+      "class": "cnf"
+    },
+    "minecraft:axolotl": {
+      "field": "f",
+      "class": "cgq"
+    },
+    "minecraft:bat": {
+      "field": "g",
+      "class": "cez"
+    },
+    "minecraft:bee": {
+      "field": "h",
+      "class": "cff"
+    },
+    "minecraft:blaze": {
+      "field": "i",
+      "class": "cjm"
+    },
+    "minecraft:block_display": {
+      "field": "j",
+      "class": "bsq$b"
+    },
+    "minecraft:boat": {
+      "field": "k",
+      "class": "cov"
+    },
+    "minecraft:bogged": {
+      "field": "l",
+      "class": "cjn"
+    },
+    "minecraft:breeze": {
+      "field": "m",
+      "class": "ckz"
+    },
+    "minecraft:breeze_wind_charge": {
+      "field": "n",
+      "class": "cog"
+    },
+    "minecraft:camel": {
+      "field": "o",
+      "class": "cgv"
+    },
+    "minecraft:cat": {
+      "field": "p",
+      "class": "cfh"
+    },
+    "minecraft:cave_spider": {
+      "field": "q",
+      "class": "cjo"
+    },
+    "minecraft:chest_boat": {
+      "field": "r",
+      "class": "cow"
+    },
+    "minecraft:chest_minecart": {
+      "field": "s",
+      "class": "cpa"
+    },
+    "minecraft:chicken": {
+      "field": "t",
+      "class": "cfj"
+    },
+    "minecraft:cod": {
+      "field": "u",
+      "class": "cfk"
+    },
+    "minecraft:command_block_minecart": {
+      "field": "v",
+      "class": "cpb"
+    },
+    "minecraft:cow": {
+      "field": "w",
+      "class": "cfl"
+    },
+    "minecraft:creeper": {
+      "field": "x",
+      "class": "cjp"
+    },
+    "minecraft:dolphin": {
+      "field": "y",
+      "class": "cfm"
+    },
+    "minecraft:donkey": {
+      "field": "z",
+      "class": "chj"
+    },
+    "minecraft:dragon_fireball": {
+      "field": "A",
+      "class": "cng"
+    },
+    "minecraft:drowned": {
+      "field": "B",
+      "class": "cjr"
+    },
+    "minecraft:egg": {
+      "field": "C",
+      "class": "cny"
+    },
+    "minecraft:elder_guardian": {
+      "field": "D",
+      "class": "cjs"
+    },
+    "minecraft:end_crystal": {
+      "field": "E",
+      "class": "chz"
+    },
+    "minecraft:ender_dragon": {
+      "field": "F",
+      "class": "cia"
+    },
+    "minecraft:ender_pearl": {
+      "field": "G",
+      "class": "cnz"
+    },
+    "minecraft:enderman": {
+      "field": "H",
+      "class": "cjt"
+    },
+    "minecraft:endermite": {
+      "field": "I",
+      "class": "cju"
+    },
+    "minecraft:evoker": {
+      "field": "J",
+      "class": "cjw"
+    },
+    "minecraft:evoker_fangs": {
+      "field": "K",
+      "class": "cnh"
+    },
+    "minecraft:experience_bottle": {
+      "field": "L",
+      "class": "coa"
+    },
+    "minecraft:experience_orb": {
+      "field": "M",
+      "class": "btc"
+    },
+    "minecraft:eye_of_ender": {
+      "field": "N",
+      "class": "cni"
+    },
+    "minecraft:falling_block": {
+      "field": "O",
+      "class": "cjg"
+    },
+    "minecraft:firework_rocket": {
+      "field": "P",
+      "class": "cnk"
+    },
+    "minecraft:fox": {
+      "field": "Q",
+      "class": "cfo"
+    },
+    "minecraft:frog": {
+      "field": "R",
+      "class": "cgy"
+    },
+    "minecraft:furnace_minecart": {
+      "field": "S",
+      "class": "cpc"
+    },
+    "minecraft:ghast": {
+      "field": "T",
+      "class": "cjx"
+    },
+    "minecraft:giant": {
+      "field": "U",
+      "class": "cjy"
+    },
+    "minecraft:glow_item_frame": {
+      "field": "V",
+      "class": "ciy"
+    },
+    "minecraft:glow_squid": {
+      "field": "W",
+      "class": "bte"
+    },
+    "minecraft:goat": {
+      "field": "X",
+      "class": "che"
+    },
+    "minecraft:guardian": {
+      "field": "Y",
+      "class": "cjz"
+    },
+    "minecraft:hoglin": {
+      "field": "Z",
+      "class": "clh"
+    },
+    "minecraft:hopper_minecart": {
+      "field": "aa",
+      "class": "cpd"
+    },
+    "minecraft:horse": {
+      "field": "ab",
+      "class": "chk"
+    },
+    "minecraft:husk": {
+      "field": "ac",
+      "class": "cka"
+    },
+    "minecraft:illusioner": {
+      "field": "ad",
+      "class": "ckb"
+    },
+    "minecraft:interaction": {
+      "field": "ae",
+      "class": "bth"
+    },
+    "minecraft:iron_golem": {
+      "field": "af",
+      "class": "cfq"
+    },
+    "minecraft:item": {
+      "field": "ag",
+      "class": "cjh"
+    },
+    "minecraft:item_display": {
+      "field": "ah",
+      "class": "bsq$g"
+    },
+    "minecraft:item_frame": {
+      "field": "ai",
+      "class": "cja"
+    },
+    "minecraft:ominous_item_spawner": {
+      "field": "aj",
+      "class": "btu"
+    },
+    "minecraft:fireball": {
+      "field": "ak",
+      "class": "cnn"
+    },
+    "minecraft:leash_knot": {
+      "field": "al",
+      "class": "cjb"
+    },
+    "minecraft:lightning_bolt": {
+      "field": "am",
+      "class": "btm"
+    },
+    "minecraft:llama": {
+      "field": "an",
+      "class": "chl"
+    },
+    "minecraft:llama_spit": {
+      "field": "ao",
+      "class": "cno"
+    },
+    "minecraft:magma_cube": {
+      "field": "ap",
+      "class": "ckc"
+    },
+    "minecraft:marker": {
+      "field": "aq",
+      "class": "bto"
+    },
+    "minecraft:minecart": {
+      "field": "ar",
+      "class": "coz"
+    },
+    "minecraft:mooshroom": {
+      "field": "as",
+      "class": "cfr"
+    },
+    "minecraft:mule": {
+      "field": "at",
+      "class": "chn"
+    },
+    "minecraft:ocelot": {
+      "field": "au",
+      "class": "cfs"
+    },
+    "minecraft:painting": {
+      "field": "av",
+      "class": "cjc"
+    },
+    "minecraft:panda": {
+      "field": "aw",
+      "class": "cft"
+    },
+    "minecraft:parrot": {
+      "field": "ax",
+      "class": "cfu"
+    },
+    "minecraft:phantom": {
+      "field": "ay",
+      "class": "ckf"
+    },
+    "minecraft:pig": {
+      "field": "az",
+      "class": "cfv"
+    },
+    "minecraft:piglin": {
+      "field": "aA",
+      "class": "cln"
+    },
+    "minecraft:piglin_brute": {
+      "field": "aB",
+      "class": "clq"
+    },
+    "minecraft:pillager": {
+      "field": "aC",
+      "class": "ckg"
+    },
+    "minecraft:polar_bear": {
+      "field": "aD",
+      "class": "cfw"
+    },
+    "minecraft:potion": {
+      "field": "aE",
+      "class": "cob"
+    },
+    "minecraft:pufferfish": {
+      "field": "aF",
+      "class": "cfx"
+    },
+    "minecraft:rabbit": {
+      "field": "aG",
+      "class": "cfy"
+    },
+    "minecraft:ravager": {
+      "field": "aH",
+      "class": "cki"
+    },
+    "minecraft:salmon": {
+      "field": "aI",
+      "class": "cfz"
+    },
+    "minecraft:sheep": {
+      "field": "aJ",
+      "class": "cga"
+    },
+    "minecraft:shulker": {
+      "field": "aK",
+      "class": "ckj"
+    },
+    "minecraft:shulker_bullet": {
+      "field": "aL",
+      "class": "cns"
+    },
+    "minecraft:silverfish": {
+      "field": "aM",
+      "class": "ckk"
+    },
+    "minecraft:skeleton": {
+      "field": "aN",
+      "class": "ckl"
+    },
+    "minecraft:skeleton_horse": {
+      "field": "aO",
+      "class": "cho"
+    },
+    "minecraft:slime": {
+      "field": "aP",
+      "class": "ckm"
+    },
+    "minecraft:small_fireball": {
+      "field": "aQ",
+      "class": "cnt"
+    },
+    "minecraft:sniffer": {
+      "field": "aR",
+      "class": "chv"
+    },
+    "minecraft:snow_golem": {
+      "field": "aS",
+      "class": "cgc"
+    },
+    "minecraft:snowball": {
+      "field": "aT",
+      "class": "cnu"
+    },
+    "minecraft:spawner_minecart": {
+      "field": "aU",
+      "class": "cpe"
+    },
+    "minecraft:spectral_arrow": {
+      "field": "aV",
+      "class": "cnv"
+    },
+    "minecraft:spider": {
+      "field": "aW",
+      "class": "cko"
+    },
+    "minecraft:squid": {
+      "field": "aX",
+      "class": "cgd"
+    },
+    "minecraft:stray": {
+      "field": "aY",
+      "class": "ckp"
+    },
+    "minecraft:strider": {
+      "field": "aZ",
+      "class": "ckq"
+    },
+    "minecraft:tadpole": {
+      "field": "ba",
+      "class": "chb"
+    },
+    "minecraft:text_display": {
+      "field": "bb",
+      "class": "bsq$l"
+    },
+    "minecraft:tnt": {
+      "field": "bc",
+      "class": "cji"
+    },
+    "minecraft:tnt_minecart": {
+      "field": "bd",
+      "class": "cpf"
+    },
+    "minecraft:trader_llama": {
+      "field": "be",
+      "class": "chq"
+    },
+    "minecraft:trident": {
+      "field": "bf",
+      "class": "coc"
+    },
+    "minecraft:tropical_fish": {
+      "field": "bg",
+      "class": "cge"
+    },
+    "minecraft:turtle": {
+      "field": "bh",
+      "class": "cgf"
+    },
+    "minecraft:vex": {
+      "field": "bi",
+      "class": "ckr"
+    },
+    "minecraft:villager": {
+      "field": "bj",
+      "class": "cmk"
+    },
+    "minecraft:vindicator": {
+      "field": "bk",
+      "class": "cks"
+    },
+    "minecraft:wandering_trader": {
+      "field": "bl",
+      "class": "cmq"
+    },
+    "minecraft:warden": {
+      "field": "bm",
+      "class": "cmb"
+    },
+    "minecraft:wind_charge": {
+      "field": "bn",
+      "class": "coh"
+    },
+    "minecraft:witch": {
+      "field": "bo",
+      "class": "ckt"
+    },
+    "minecraft:wither": {
+      "field": "bp",
+      "class": "ciu"
+    },
+    "minecraft:wither_skeleton": {
+      "field": "bq",
+      "class": "cku"
+    },
+    "minecraft:wither_skull": {
+      "field": "br",
+      "class": "cod"
+    },
+    "minecraft:wolf": {
+      "field": "bs",
+      "class": "cgh"
+    },
+    "minecraft:zoglin": {
+      "field": "bt",
+      "class": "ckv"
+    },
+    "minecraft:zombie": {
+      "field": "bu",
+      "class": "ckw"
+    },
+    "minecraft:zombie_horse": {
+      "field": "bv",
+      "class": "chs"
+    },
+    "minecraft:zombie_villager": {
+      "field": "bw",
+      "class": "ckx"
+    },
+    "minecraft:zombified_piglin": {
+      "field": "bx",
+      "class": "cky"
+    },
+    "minecraft:player": {
+      "field": "by",
+      "class": null
+    },
+    "minecraft:fishing_bobber": {
+      "field": "bz",
+      "class": "cnl"
+    }
+  },
+  "output_sha256": "854452bd6c118fc788e420d49810492b5dd8bdef315fa70336c1e58028dc9a6e"
+}

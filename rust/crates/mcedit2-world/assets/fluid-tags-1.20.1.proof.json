@@ -1,0 +1,12 @@
+{
+  "version": "1.20.1",
+  "client_sha256": "56b71336d2b4fdffd197f56595b0da93e32a946f78f382a299b8f4b92758bb0f",
+  "registry": "tags/fluids",
+  "entries_sha256": {
+    "data/minecraft/tags/fluids/lava.json": "71f50fb9092d78260bc7434731fc5fd426a44e5284a6ad084ec71cb725630c6b",
+    "data/minecraft/tags/fluids/water.json": "dcfa69a748d03dbf788d8f7b0e5eb6c8de6355a527fcaf74b9210fe4be2a3004"
+  },
+  "extractor_sha256": "7e842b1f04c0910372f64f3f54ef938e062012c9b3d29a53f7b2b4b3d76c7888",
+  "output_sha256": "e5d5848aecb03c395e5c9adce1cdd0d96dc267bc74c8c049a3a16e2ddfbb731e",
+  "scope": "仅静态读取客户端归档中的原始 JSON 标签；无编译、客户端执行或测试"
+}

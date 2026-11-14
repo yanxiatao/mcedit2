@@ -1,0 +1,43 @@
+{
+  "skull": {
+    "loader":"mcedit2:entity_layer","space":"entity",
+    "layer":{"$param":"kind","map":{"skeleton":"minecraft:skeleton_skull#main","wither_skeleton":"minecraft:wither_skeleton_skull#main","zombie":"minecraft:zombie_head#main","creeper":"minecraft:creeper_head#main","dragon":"minecraft:dragon_skull#main","piglin":"minecraft:piglin_head#main","player":"minecraft:player_head#main"}},
+    "texture":{"$param":"kind","map":{"skeleton":"minecraft:entity/skeleton/skeleton","wither_skeleton":"minecraft:entity/skeleton/wither_skeleton","zombie":"minecraft:entity/zombie/zombie","creeper":"minecraft:entity/creeper/creeper","dragon":"minecraft:entity/enderdragon/dragon","piglin":"minecraft:entity/piglin/piglin","player":{"$param":"player_texture"}}},
+    "poses":{"/head":{"rotation":[0,{"$param":"yaw","scale":0.017453292519943295},0]}},
+    "layer_transform":[
+      {"origin":"corner","translation":{"$param":"offset"}},
+      {"origin":"corner","scale":[-1,-1,1]},
+      {"origin":"corner","translation":[0,{"$param":"kind","map":{"skeleton":0,"wither_skeleton":0,"zombie":0,"creeper":0,"dragon":-0.374375,"piglin":0,"player":0}},0]},
+      {"origin":"corner","scale":{"$param":"kind","map":{"skeleton":1,"wither_skeleton":1,"zombie":1,"creeper":1,"dragon":0.75,"piglin":1,"player":1}}}
+    ],
+    "material":{"alpha":{"$param":"alpha"},"double_sided":true,"mipmap":false,"view_offset_z":{"$param":"view_offset_z"}}
+  },
+  "sign": {
+    "loader":"mcedit2:entity_layer","space":"entity","layer":{"$param":"layer"},"texture":{"$param":"texture"},
+    "poses":{"/stick":{"visible":{"$param":"standing"}}},
+    "layer_transform":[
+      {"origin":"corner","translation":{"$param":"offset"}},
+      {"origin":"corner","rotation":{"y":{"$param":"yaw"}}},
+      {"origin":"corner","translation":[0,{"$param":"wall","map":{"true":-0.3125,"false":0}},{"$param":"wall","map":{"true":-0.4375,"false":0}}]},
+      {"origin":"corner","scale":[0.6666666666666666,-0.6666666666666666,-0.6666666666666666]}
+    ],"material":{"alpha":"MASK","double_sided":true,"mipmap":false}
+  },
+  "hanging_sign": {
+    "loader":"mcedit2:entity_layer","space":"entity","layer":{"$param":"layer"},"texture":{"$param":"texture"},
+    "poses":{"/plank":{"visible":{"$param":"wall_hanging"}},"/normalChains":{"visible":{"$param":"attached","map":{"true":false,"false":true}}},"/vChains":{"visible":{"$param":"attached"}}},
+    "layer_transform":[{"origin":"corner","translation":{"$param":"offset"}},{"origin":"corner","rotation":{"y":{"$param":"yaw"}}},{"origin":"corner","scale":[1,-1,-1]}],
+    "material":{"alpha":"MASK","double_sided":true,"mipmap":false}
+  },
+  "banner_flag": {
+    "loader":"mcedit2:entity_layer","space":"entity","layer":"minecraft:banner#main","texture":{"$param":"texture"},"parts":["/flag"],
+    "poses":{"/flag":{"pivot":[0,-32,0],"rotation":[0,0,0]},"/pole":{"visible":{"$param":"wall","map":{"true":false,"false":true}}}},
+    "layer_transform":[{"origin":"corner","translation":[0,{"$param":"wall","map":{"true":-0.6666667,"false":0}},0]},{"origin":"corner","rotation":{"y":{"$param":"yaw"}}},{"origin":"corner","translation":[0,{"$param":"wall","map":{"true":-0.3125,"false":0}},{"$param":"wall","map":{"true":-0.4375,"false":0}}]},{"origin":"corner","scale":[0.6666666666666666,-0.6666666666666666,-0.6666666666666666]}],
+    "material":{"alpha":"OPAQUE","double_sided":false,"mipmap":false,"texture_source":{"$param":"texture_source"}}
+  },
+  "banner_frame": {
+    "loader":"mcedit2:entity_layer","space":"entity","layer":"minecraft:banner#main","texture":{"$param":"texture"},"parts":["/pole","/bar"],
+    "poses":{"/flag":{"visible":false},"/pole":{"visible":{"$param":"wall","map":{"true":false,"false":true}}}},
+    "layer_transform":[{"origin":"corner","translation":[0,{"$param":"wall","map":{"true":-0.6666667,"false":0}},0]},{"origin":"corner","rotation":{"y":{"$param":"yaw"}}},{"origin":"corner","translation":[0,{"$param":"wall","map":{"true":-0.3125,"false":0}},{"$param":"wall","map":{"true":-0.4375,"false":0}}]},{"origin":"corner","scale":[0.6666666666666666,-0.6666666666666666,-0.6666666666666666]}],
+    "material":{"alpha":"OPAQUE","double_sided":false,"mipmap":false,"texture_source":{"$param":"texture_source"}}
+  }
+}

@@ -1,0 +1,60 @@
+name: Rust iced rewrite compile and tests
+
+# CI 只编译并执行测试，不打包、上传产品或运行 GUI。
+# Explicit manual trigger; local executable builds and packaging are user-managed.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'rust/**'
+      - '.github/workflows/rust-iced.yml'
+  push:
+    branches:
+      - rust-iced-rewrite
+    paths:
+      - 'rust/**'
+      - '.github/workflows/rust-iced.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  rust-linux:
+    name: Linux full Rust workspace check and tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Install native desktop test dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libffi-dev libwayland-dev libxkbcommon-dev \
+            libx11-dev libxcb1-dev libxrandr-dev \
+            libxi-dev libxcursor-dev libgl1-mesa-dev
+      - name: Check and test workspace
+        working-directory: rust
+        run: |
+          cargo check --locked --workspace
+          cargo test --locked --workspace
+
+  rust-windows:
+    name: Windows MSVC full Rust workspace check and tests
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Check and test workspace (no app build or packaging)
+        working-directory: rust
+        shell: pwsh
+        run: |
+          cargo check --locked --workspace
+          cargo test --locked --workspace

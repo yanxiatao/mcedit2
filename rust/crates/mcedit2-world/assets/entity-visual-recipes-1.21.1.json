@@ -1,0 +1,153 @@
+{
+  "living": {
+    "loader": "mcedit2:entity_layer",
+    "space": "entity",
+    "layer": {
+      "$param": "layer"
+    },
+    "texture": {
+      "$param": "texture"
+    },
+    "poses": {
+      "$param": "poses"
+    },
+    "part_transforms": {
+      "$param": "part_transforms"
+    },
+    "layer_transform": [
+      {
+        "origin": "corner",
+        "scale": {
+          "$param": "outer"
+        }
+      },
+      {
+        "origin": "corner",
+        "rotation": {
+          "y": {
+            "$param": "yaw",
+            "scale": -1,
+            "offset": 180
+          }
+        }
+      },
+      {
+        "origin": "corner",
+        "scale": [
+          -1,
+          -1,
+          1
+        ]
+      },
+      {
+        "origin": "corner",
+        "translation": [
+          0,
+          -1.501,
+          0
+        ]
+      }
+    ],
+    "material": {
+      "$param": "material"
+    }
+  },
+  "living_transformed": {
+    "loader": "mcedit2:entity_layer",
+    "space": "entity",
+    "layer": {"$param": "layer"},
+    "texture": {"$param": "texture"},
+    "poses": {"$param": "poses"},
+    "layer_transform": {"$param": "transform"},
+    "material": {"$param": "material"}
+  },
+  "shulker_entity": {
+    "loader": "mcedit2:entity_layer",
+    "space": "entity",
+    "layer": "minecraft:shulker#main",
+    "texture": {
+      "$param": "texture"
+    },
+    "poses": {
+      "$param": "poses"
+    },
+    "layer_transform": [
+      {
+        "origin": "corner",
+        "scale": {
+          "$param": "outer"
+        }
+      },
+      {
+        "origin": "corner",
+        "rotation": {
+          "y": {
+            "$param": "yaw",
+            "scale": -1
+          }
+        }
+      },
+      {
+        "origin": "corner",
+        "translation": [
+          0,
+          0.5,
+          0
+        ]
+      },
+      {
+        "origin": "corner",
+        "rotation": {
+          "x": {
+            "$param": "attach_face",
+            "map": {
+              "0": 0,
+              "1": 180,
+              "2": 90,
+              "3": 90,
+              "4": 90,
+              "5": 90
+            }
+          }
+        }
+      },
+      {
+        "origin": "corner",
+        "rotation": {
+          "z": {
+            "$param": "attach_face",
+            "map": {
+              "0": 0,
+              "1": 0,
+              "2": 0,
+              "3": 180,
+              "4": -90,
+              "5": 90
+            }
+          }
+        }
+      },
+      {
+        "origin": "corner",
+        "translation": [
+          0,
+          1.001,
+          0
+        ]
+      },
+      {
+        "origin": "corner",
+        "scale": [
+          -1,
+          -1,
+          1
+        ]
+      }
+    ],
+    "material": {
+      "alpha": "MASK",
+      "double_sided": true,
+      "mipmap": true
+    }
+  }
+}

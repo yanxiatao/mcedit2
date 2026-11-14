@@ -1,0 +1,48 @@
+[workspace]
+resolver = "2"
+exclude = ["vendor/iced_wgpu", "vendor/iced_runtime", "vendor/iced_winit"]
+members = [
+    "crates/mcedit2-world",
+    "crates/mcedit2-iced",
+    "crates/mcedit2-plugins",
+    "crates/mcedit2-python",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+
+[profile.dev]
+# false 仍会执行本地薄 LTO；开发迭代明确关闭该阶段，保留各包现有优化等级。
+lto = "off"
+debug = "line-tables-only"
+
+# 桌面开发版同样处理数百万源方块；保留调试信息和检查，优化渲染、读取及第三方依赖。
+[profile.dev.package."*"]
+opt-level = 2
+
+# 固定 debug 开发配置也优化资源解析、建模及渲染提交，保留调试断言与溢出检查。
+[profile.dev.package.mcedit2-iced]
+opt-level = 2
+debug = "line-tables-only"
+# 使用增量开发的细粒度代码单元，避免小改动反复优化整个大型应用。
+codegen-units = 256
+
+[profile.dev.package.mcedit2-world]
+opt-level = 1
+debug = "line-tables-only"
+
+[profile.dev.package.mcedit2-plugins]
+debug = "line-tables-only"
+
+[profile.dev.package.mcedit2-python]
+debug = "line-tables-only"
+
+# 原生 Iced 设备按适配器能力启用间接首实例，保持与应用实际绘制通道一致。
+[patch.crates-io]
+iced_wgpu = { path = "vendor/iced_wgpu" }
+# 队列事件先恢复实际光标，再由滚动容器转换；保留前一批和浮层的位置语义。
+iced_runtime = { path = "vendor/iced_runtime" }
+# 同一原生后端提供明确的逻辑坐标光标移动及错误返回，供粘滞转向回中 / 还原。
+iced_winit = { path = "vendor/iced_winit" }

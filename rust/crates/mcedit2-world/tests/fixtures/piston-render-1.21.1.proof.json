@@ -1,0 +1,22 @@
+{
+  "client_sha256": "499f6897d1837516680f3114072d8106e11c9adcd933fe5cf051b551089b0c99",
+  "omitted_signature_entries_in_analysis_copy": [
+    "META-INF/MOJANGCS.SF",
+    "META-INF/MOJANGCS.RSA"
+  ],
+  "all_other_members_identical": false,
+  "output_sha256": "559bfa59f1fde9b204b981b087e600620404ad9e6367bab04cd558a31e4b34ac",
+  "cpu_draw_adapters": [
+    {
+      "member": "ghl.class",
+      "original_sha256": "ec3ee695a46d453016cbf928847cdb04e520d6b63c78378209b98b649d9c0cd6",
+      "adapted_sha256": "9a3b6c93b4827046c67215e75d9a709f2d872bacbb28842e795cb8962988a3c2"
+    }
+  ],
+  "all_non_adapter_members_identical": true,
+  "source_sha256": "48069dea56097d392f9b103cecda542645bdcbaacbd46da43326400c6f069928",
+  "adapter_sha256": "f785cad41129bac84c4359db50bf33e89a8eb3fa97edd226b5a90e0f6d85e30e",
+  "scope": "原生渲染器分支与状态 / PoseStack / 采样坐标；构造和实际模型提交边界被截获；不包含 GPU、AO、照明或原生模型像素",
+  "compressed_sha256": "ffc4446c74ba44950c0df606c04405bfb1e44eab0fde7b69d2f661aa1090c8c9",
+  "model_documents_sha256": "cded9e2dec8bae597fedaef276800bc2b070eb41ce0bd45f24befe7a0d4590ce"
+}

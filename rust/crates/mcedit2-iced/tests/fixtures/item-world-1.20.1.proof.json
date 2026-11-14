@@ -1,0 +1,30 @@
+{
+  "client_sha256": "56b71336d2b4fdffd197f56595b0da93e32a946f78f382a299b8f4b92758bb0f",
+  "omitted_signature_entries_in_analysis_copy": [
+    "META-INF/MOJANGCS.SF",
+    "META-INF/MOJANGCS.RSA"
+  ],
+  "all_other_members_identical": false,
+  "output_sha256": "45851d31db05d4b424f585970a64d56325ab5e40366560a6917e2f5fac3b8925",
+  "cpu_draw_adapters": [
+    {
+      "member": "fub.class",
+      "original_sha256": "580e6aecd9fb5f346aabc4fa465ba1ba27f9404530973cc7d87f027315d5c822",
+      "adapted_sha256": "35476317e5906f56f094100d927311b858eff0c3804947318cb5aac4128209c7"
+    },
+    {
+      "member": "bva.class",
+      "original_sha256": "ff9e289343f0282cc4508930b23a65c218c7b4097890031f3f6a66355d7ab62c",
+      "adapted_sha256": "a9decacdaa7eac5b41c9ffb1432192748858fdbcfd4833f30f7eafe41468e496"
+    },
+    {
+      "member": "dfk.class",
+      "original_sha256": "036c04363447cb6085da1539b982bf06b9c736c73242cc7e820c05d15aa730b7",
+      "adapted_sha256": "6666019caf632080f010cf48985efa42ea9118b9f31a205b34bf564d3c32db59"
+    }
+  ],
+  "all_non_adapter_members_identical": true,
+  "extra_classpath": [],
+  "adapter_source_sha256": "386020701128373a55d5a4adc5cedd60f0e9f0d5301abbdb880be0ef4a138866",
+  "source_sha256": "1d5a731dc0ba8e6f8453705de27d2e8bfec262ef687b3cc3109acc3e7f18f149"
+}

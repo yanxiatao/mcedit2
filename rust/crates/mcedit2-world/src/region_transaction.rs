@@ -1,0 +1,697 @@
+//! Conservative, opt-in ONE-REGION transactional persistence for Java MCA/MCR.
+//!
+//! 保存入口在调用方经预览与确认后使用。不要在 Minecraft 或其他编辑器
+//! 同时写入世界时操作；不宣称跨 Region 对外原子可见。
+//!
+//! Safety state machine:
+//!  1. validate the original and proposed image; refuse any existing marker
+//!  2. write + fsync an IMMUTABLE original backup using create_new
+//!  3. write + fsync a same-directory staged replacement using create_new
+//!  4. write + fsync a recoverable "pending" JSON marker
+//!  5. re-read full source and compare the original SHA-256, then rename
+//!  6. caller finalizes ONLY after confirming new region, or rolls back
+//!
+//! A crash while the marker remains is recoverable through rollback_pending.
+//! Backup is never deleted by this module, including after rollback.
+use crate::region_plan::{verify_candidate, NativeRegionCandidate};
+use crate::{WorldError, WorldSummary};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::fs::File; // parent directory fsync is implemented only on Unix
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+
+mod group;
+mod history;
+pub use group::{
+    apply_region_group, apply_region_group_with_budget, finalize_region_group,
+    finalize_region_group_with_budget, finalize_region_group_with_history,
+    finalize_region_group_with_history_with_budget, rollback_region_group,
+    rollback_region_group_with_budget, rollback_region_group_with_history,
+    rollback_region_group_with_history_with_budget, validate_region_group,
+    validate_region_group_with_budget, RegionGroupReceipt,
+};
+
+const MARKER_VERSION: u32 = 1;
+fn refuse(text: impl Into<String>) -> WorldError {
+    WorldError::Invalid(text.into())
+}
+fn sha(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+fn suffix(original: &Path, added: &str) -> Result<PathBuf, WorldError> {
+    let filename = original
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| refuse("Region filename must be valid UTF-8"))?;
+    Ok(original.with_file_name(format!("{filename}{added}")))
+}
+fn ensure_regular(path: &Path) -> Result<(), WorldError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return Err(refuse(format!(
+            "Refusing symlink/nonregular transaction path: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+fn read_region_bytes(
+    path: &Path,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<Vec<u8>, WorldError> {
+    ensure_regular(path)?;
+    let file = fs::File::open(path)?;
+    if file.metadata()?.len() > budget.bytes() as u64 {
+        return Err(refuse("Region 或备份超过当前事务预算"));
+    }
+    let mut bytes = Vec::new();
+    file.take(budget.bytes() as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > budget.bytes() as u64 {
+        return Err(refuse("Region 在读取期间超过事务预算"));
+    }
+    Ok(bytes)
+}
+fn absent(path: &Path) -> Result<(), WorldError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Err(refuse(format!(
+            "Existing transaction path needs explicit recovery: {}",
+            path.display()
+        ))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+fn append_atomic_marker(path: &Path, bytes: &[u8]) -> Result<(), WorldError> {
+    let mut file = OpenOptions::new().create_new(true).write(true).open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
+/// Atomically replace the current Region file by a fully synced stage.
+/// Windows std::fs::rename cannot replace an existing destination. MoveFileExW
+/// with REPLACE_EXISTING handles that case without removing the destination
+/// first; both paths are in the same original Region directory.
+#[cfg(windows)]
+pub(crate) fn replace_existing(source: &Path, destination: &Path) -> Result<(), WorldError> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "Kernel32")]
+    extern "system" {
+        fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
+    }
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+    let src = wide(source);
+    let dst = wide(destination);
+    // MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
+    let result = unsafe { MoveFileExW(src.as_ptr(), dst.as_ptr(), 0x0000_0001 | 0x0000_0008) };
+    if result == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+#[cfg(not(windows))]
+pub(crate) fn replace_existing(source: &Path, destination: &Path) -> Result<(), WorldError> {
+    fs::rename(source, destination)?;
+    Ok(())
+}
+
+pub(crate) fn parent_sync(path: &Path) -> Result<(), WorldError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| refuse("Region has no parent directory"))?;
+    #[cfg(unix)]
+    {
+        File::open(parent)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = parent;
+    }
+    Ok(())
+}
+pub(crate) fn expected_region_path(
+    world: &WorldSummary,
+    dimension: &str,
+    rx: i32,
+    rz: i32,
+    extension: &str,
+) -> Result<PathBuf, WorldError> {
+    if !matches!(extension, "mca" | "mcr") {
+        return Err(refuse(
+            "Only original MCA/MCR Region files can be persisted",
+        ));
+    }
+    let source = world
+        .dimensions
+        .iter()
+        .find(|d| d.name == dimension)
+        .ok_or_else(|| refuse("Region transaction dimension does not belong to world"))?;
+    if source.extension.contains("c.x.z.dat") {
+        return Err(refuse(
+            "Alpha chunk files are excluded from Region transactions",
+        ));
+    }
+    let base = fs::canonicalize(&world.root)?;
+    let directory = fs::canonicalize(&source.region_dir)?;
+    if !directory.starts_with(&base) || directory == base {
+        return Err(refuse(
+            "Original region directory is not nested in source world",
+        ));
+    }
+    if !source.extension.split(", ").any(|s| s == extension) {
+        return Err(refuse("Region extension is not indexed in this dimension"));
+    }
+    let file = directory.join(format!("r.{rx}.{rz}.{extension}"));
+    ensure_regular(&file)?;
+    if fs::canonicalize(&file)? != file {
+        return Err(refuse("Region path is not the canonical original file"));
+    }
+    let other = directory.join(format!(
+        "r.{rx}.{rz}.{}",
+        if extension == "mca" { "mcr" } else { "mca" }
+    ));
+    if other.exists() {
+        return Err(refuse("Ambiguous source: MCA and MCR both exist"));
+    }
+    Ok(file)
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Marker {
+    version: u32,
+    original_sha256: String,
+    replacement_sha256: String,
+    original_size: u64,
+    replacement_size: u64,
+}
+#[derive(Debug, Clone)]
+pub struct RegionWriteReceipt {
+    pub region_path: PathBuf,
+    pub backup_path: PathBuf,
+    pub marker_path: PathBuf,
+    pub original_sha256: String,
+    pub replacement_sha256: String,
+    /// 真正读到过的替换文件版本；未安装且未保留该版本的回滚没有此凭据。
+    pub(crate) replacement_backup: Option<PathBuf>,
+}
+struct Paths {
+    region: PathBuf,
+    backup: PathBuf,
+    replacement_backup: PathBuf,
+    staged: PathBuf,
+    abandoned: PathBuf,
+    restore: PathBuf,
+    pending: PathBuf,
+    completed: PathBuf,
+    rolled_back: PathBuf,
+}
+fn paths(region: PathBuf, previous: &str, next: &str) -> Result<Paths, WorldError> {
+    if previous.len() != 64
+        || next.len() != 64
+        || !previous
+            .bytes()
+            .chain(next.bytes())
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(refuse("Transaction SHA-256 identifier malformed"));
+    }
+    Ok(Paths {
+        backup: suffix(&region, &format!(".mcedit2.{previous}.backup"))?,
+        replacement_backup: suffix(&region, &format!(".mcedit2.{next}.backup"))?,
+        staged: suffix(&region, ".mcedit2.stage")?,
+        abandoned: suffix(&region, &format!(".mcedit2.{next}.abandoned-stage"))?,
+        restore: suffix(&region, ".mcedit2.restore-stage")?,
+        pending: suffix(&region, ".mcedit2.pending.json")?,
+        completed: suffix(
+            &region,
+            &format!(".mcedit2.{previous}-{next}.committed.json"),
+        )?,
+        rolled_back: suffix(
+            &region,
+            &format!(".mcedit2.{previous}-{next}.rolled-back.json"),
+        )?,
+        region,
+    })
+}
+fn planned_marker(candidate: &NativeRegionCandidate) -> Marker {
+    Marker {
+        version: MARKER_VERSION,
+        original_sha256: candidate.original_region_sha256.clone(),
+        replacement_sha256: sha(&candidate.image),
+        original_size: candidate.original_bytes as u64,
+        replacement_size: candidate.image.len() as u64,
+    }
+}
+fn marker_bytes(marker: &Marker) -> Result<Vec<u8>, WorldError> {
+    serde_json::to_vec(marker).map_err(|error| refuse(format!("Region 日志序列化失败：{error}")))
+}
+fn verify_archives(files: &Paths, marker: &Marker) -> Result<(), WorldError> {
+    let bytes = marker_bytes(marker)?;
+    crate::transaction_artifacts::verify(&files.completed, &bytes)?;
+    crate::transaction_artifacts::verify(&files.rolled_back, &bytes)?;
+    crate::transaction_artifacts::verify_hash(
+        &files.replacement_backup,
+        &marker.replacement_sha256,
+    )?;
+    Ok(())
+}
+fn preflight_artifacts(files: &Paths, marker: &Marker) -> Result<(), WorldError> {
+    for path in [&files.pending, &files.staged, &files.restore] {
+        absent(path)?;
+    }
+    crate::transaction_artifacts::verify_hash(&files.backup, &marker.original_sha256)?;
+    crate::transaction_artifacts::verify_hash(&files.abandoned, &marker.replacement_sha256)?;
+    verify_archives(files, marker)
+}
+fn verify_marker(
+    marker: &Marker,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<(), WorldError> {
+    if marker.version != MARKER_VERSION
+        || marker.original_size < 8192
+        || marker.replacement_size <= marker.original_size
+        || marker.original_size > budget.bytes() as u64
+        || marker.replacement_size > budget.bytes() as u64
+    {
+        return Err(refuse("Invalid pending region transaction marker"));
+    }
+    if marker.original_sha256.len() != 64
+        || marker.replacement_sha256.len() != 64
+        || !marker
+            .original_sha256
+            .bytes()
+            .chain(marker.replacement_sha256.bytes())
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(refuse("Pending transaction contains malformed digests"));
+    }
+    Ok(())
+}
+fn read_pending(
+    region: PathBuf,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<(Marker, Paths), WorldError> {
+    let pending = suffix(&region, ".mcedit2.pending.json")?;
+    ensure_regular(&pending)?;
+    if fs::metadata(&pending)?.len() > 4096 {
+        return Err(refuse("Pending marker exceeds 4 KiB"));
+    }
+    let marker: Marker = serde_json::from_slice(&fs::read(&pending)?)
+        .map_err(|e| refuse(format!("Invalid pending region transaction marker: {e}")))?;
+    verify_marker(&marker, budget)?;
+    let related = paths(region, &marker.original_sha256, &marker.replacement_sha256)?;
+    ensure_regular(&related.backup)?;
+    let backup = read_region_bytes(&related.backup, budget)?;
+    if backup.len() as u64 != marker.original_size || sha(&backup) != marker.original_sha256 {
+        return Err(refuse(
+            "Original backup is missing, truncated or corrupted; manual recovery required",
+        ));
+    }
+    Ok((marker, related))
+}
+/// Install one fully verified Region candidate with backup and pending marker.
+/// This is a SINGLE-FILE atomic rename, not a multi-region world transaction.
+/// The caller must explicitly finalize or roll back; backups are immutable.
+pub fn apply_single_region(
+    world: &WorldSummary,
+    dimension: &str,
+    candidate: &NativeRegionCandidate,
+) -> Result<RegionWriteReceipt, WorldError> {
+    apply_single_region_with_budget(
+        world,
+        dimension,
+        candidate,
+        crate::editing::EditWorkBudget::default(),
+    )
+}
+pub fn apply_single_region_with_budget(
+    world: &WorldSummary,
+    dimension: &str,
+    candidate: &NativeRegionCandidate,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<RegionWriteReceipt, WorldError> {
+    let _guard = crate::world_write_lock::acquire(&world.root, false)?;
+    group::require_no_active_group(world)?;
+    apply_region_with_mode(world, dimension, candidate, false, budget)
+}
+/// Explicitly confirmed original-NBT-authenticated BE save route.
+/// This is the ONLY public write path that can accept existing BE scalar
+/// operations, and the candidate still passes full original-byte replay,
+/// immutable backup and pending-marker transaction checks.
+pub fn apply_authenticated_be_single_region(
+    world: &WorldSummary,
+    dimension: &str,
+    candidate: &NativeRegionCandidate,
+    confirmation: &str,
+) -> Result<RegionWriteReceipt, WorldError> {
+    apply_authenticated_be_single_region_with_budget(
+        world,
+        dimension,
+        candidate,
+        confirmation,
+        crate::editing::EditWorkBudget::default(),
+    )
+}
+pub fn apply_authenticated_be_single_region_with_budget(
+    world: &WorldSummary,
+    dimension: &str,
+    candidate: &NativeRegionCandidate,
+    confirmation: &str,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<RegionWriteReceipt, WorldError> {
+    let _guard = crate::world_write_lock::acquire(&world.root, false)?;
+    group::require_no_active_group(world)?;
+    if confirmation != "SAVE_BE_NBT"
+        || (candidate.be_replay.is_empty() && candidate.be_history.is_empty())
+    {
+        return Err(refuse(
+            "BE save requires an original BE scalar proof and exact SAVE_BE_NBT confirmation",
+        ));
+    }
+    apply_region_with_mode(world, dimension, candidate, true, budget)
+}
+fn apply_region_with_mode(
+    world: &WorldSummary,
+    dimension: &str,
+    candidate: &NativeRegionCandidate,
+    allow_be: bool,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<RegionWriteReceipt, WorldError> {
+    if !candidate.section_proofs.is_empty() {
+        return Err(refuse("新 section 须通过混合组复核维度合同并保存"));
+    }
+    if !allow_be && (!candidate.be_replay.is_empty() || !candidate.be_history.is_empty()) {
+        return Err(refuse(
+            "BE-aware Region previews need separate SAVE_BE_NBT confirmation",
+        ));
+    }
+    let ext = candidate
+        .path
+        .extension()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| refuse("Region candidate extension is missing"))?;
+    let region = expected_region_path(
+        world,
+        dimension,
+        candidate.region_x,
+        candidate.region_z,
+        ext,
+    )?;
+    // fs::canonicalize on Windows may add the \\?\ path prefix. The
+    // planner keeps the original user-entered absolute path, so lexical
+    // equality is not portable. Validate both files as non-symlink regular
+    // files, then compare canonical filesystem identities instead.
+    ensure_regular(&candidate.path)?;
+    if fs::canonicalize(&region)? != fs::canonicalize(&candidate.path)? {
+        return Err(refuse(
+            "Region candidate references an untrusted/noncanonical path",
+        ));
+    }
+    let original = read_region_bytes(&region, budget)?;
+    verify_candidate(&original, candidate)?;
+    let next = sha(&candidate.image);
+    let files = paths(region, &candidate.original_region_sha256, &next)?;
+    let marker = planned_marker(candidate);
+    preflight_artifacts(&files, &marker)?;
+    // Crash before pending marker means original region is still intact and
+    // orphaned stage/backup are preserved for manual examination.
+    crate::transaction_artifacts::store(&files.backup, &original)?;
+    let json = serde_json::to_vec(&marker)
+        .map_err(|e| refuse(format!("Cannot serialize region marker: {e}")))?;
+    append_atomic_marker(&files.pending, &json)?;
+    parent_sync(&files.region)?;
+    append_atomic_marker(&files.staged, &candidate.image)?;
+    parent_sync(&files.region)?;
+    // Re-check the whole source immediately before replacement. A game or
+    // other editor mutating the world during this operation is unsupported.
+    ensure_regular(&files.region)?;
+    if sha(&read_region_bytes(&files.region, budget)?) != marker.original_sha256 {
+        return Err(refuse(
+            "Original Region changed during staging; pending marker retained for recovery",
+        ));
+    }
+    replace_existing(&files.staged, &files.region)?;
+    parent_sync(&files.region)?;
+    Ok(RegionWriteReceipt {
+        region_path: files.region,
+        backup_path: files.backup,
+        marker_path: files.pending,
+        original_sha256: marker.original_sha256,
+        replacement_sha256: next,
+        replacement_backup: None,
+    })
+}
+/// Confirm a successful one-Region transaction; keep its original backup
+/// forever unless the user deletes it explicitly. A failed hash check keeps
+/// the pending marker and requires operator recovery.
+pub fn finalize_single_region(
+    world: &WorldSummary,
+    dimension: &str,
+    rx: i32,
+    rz: i32,
+    extension: &str,
+) -> Result<RegionWriteReceipt, WorldError> {
+    finalize_single_region_with_budget(
+        world,
+        dimension,
+        rx,
+        rz,
+        extension,
+        crate::editing::EditWorkBudget::default(),
+    )
+}
+pub fn finalize_single_region_with_budget(
+    world: &WorldSummary,
+    dimension: &str,
+    rx: i32,
+    rz: i32,
+    extension: &str,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<RegionWriteReceipt, WorldError> {
+    finalize_single_region_with_history_with_budget(world, dimension, rx, rz, extension, budget)
+        .map(|(receipt, _)| receipt)
+}
+/// 旧单文件事务的完成记录与真实来源同时返回，调用方可保留已有会话历史。
+pub fn finalize_single_region_with_history(
+    world: &WorldSummary,
+    dimension: &str,
+    rx: i32,
+    rz: i32,
+    extension: &str,
+) -> Result<(RegionWriteReceipt, crate::history_source::Archive), WorldError> {
+    finalize_single_region_with_history_with_budget(
+        world,
+        dimension,
+        rx,
+        rz,
+        extension,
+        crate::editing::EditWorkBudget::default(),
+    )
+}
+pub fn finalize_single_region_with_history_with_budget(
+    world: &WorldSummary,
+    dimension: &str,
+    rx: i32,
+    rz: i32,
+    extension: &str,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<(RegionWriteReceipt, crate::history_source::Archive), WorldError> {
+    let _guard = crate::world_write_lock::acquire(&world.root, false)?;
+    group::require_no_active_group(world)?;
+    let receipt = finalize_region(world, dimension, rx, rz, extension, budget)?;
+    let archive = history::resolved(world, dimension, std::slice::from_ref(&receipt), false, [])?;
+    Ok((receipt, archive))
+}
+fn finalize_region(
+    world: &WorldSummary,
+    dimension: &str,
+    rx: i32,
+    rz: i32,
+    extension: &str,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<RegionWriteReceipt, WorldError> {
+    let region = expected_region_path(world, dimension, rx, rz, extension)?;
+    let (marker, files) = read_pending(region, budget)?;
+    ensure_regular(&files.region)?;
+    let replacement = read_region_bytes(&files.region, budget)?;
+    if sha(&replacement) != marker.replacement_sha256 {
+        return Err(refuse(
+            "Cannot finalize: Region is not exactly the planned replacement",
+        ));
+    }
+    verify_archives(&files, &marker)?;
+    if files.staged.exists() {
+        return Err(refuse("Unresolved transaction stage blocks finalization"));
+    }
+    crate::transaction_artifacts::store(&files.replacement_backup, &replacement)?;
+    crate::transaction_artifacts::archive(&files.pending, &files.completed)?;
+    parent_sync(&files.region)?;
+    Ok(RegionWriteReceipt {
+        region_path: files.region,
+        backup_path: files.backup,
+        marker_path: files.completed,
+        original_sha256: marker.original_sha256,
+        replacement_sha256: marker.replacement_sha256,
+        replacement_backup: Some(files.replacement_backup),
+    })
+}
+/// Crash recovery ALWAYS selects the ORIGINAL backup (not the edited image).
+/// If the current file is neither original nor exact replacement, refuse
+/// restoration because another writer may have changed it. Backup is retained.
+pub fn rollback_pending_region(
+    world: &WorldSummary,
+    dimension: &str,
+    rx: i32,
+    rz: i32,
+    extension: &str,
+) -> Result<RegionWriteReceipt, WorldError> {
+    rollback_pending_region_with_budget(
+        world,
+        dimension,
+        rx,
+        rz,
+        extension,
+        crate::editing::EditWorkBudget::default(),
+    )
+}
+pub fn rollback_pending_region_with_budget(
+    world: &WorldSummary,
+    dimension: &str,
+    rx: i32,
+    rz: i32,
+    extension: &str,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<RegionWriteReceipt, WorldError> {
+    rollback_pending_region_with_history_with_budget(world, dimension, rx, rz, extension, budget)
+        .map(|(receipt, _)| receipt)
+}
+/// 回滚保持原始来源，恢复界面据同一归档观察实际磁盘头，不清除会话。
+pub fn rollback_pending_region_with_history(
+    world: &WorldSummary,
+    dimension: &str,
+    rx: i32,
+    rz: i32,
+    extension: &str,
+) -> Result<(RegionWriteReceipt, crate::history_source::Archive), WorldError> {
+    rollback_pending_region_with_history_with_budget(
+        world,
+        dimension,
+        rx,
+        rz,
+        extension,
+        crate::editing::EditWorkBudget::default(),
+    )
+}
+pub fn rollback_pending_region_with_history_with_budget(
+    world: &WorldSummary,
+    dimension: &str,
+    rx: i32,
+    rz: i32,
+    extension: &str,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<(RegionWriteReceipt, crate::history_source::Archive), WorldError> {
+    let _guard = crate::world_write_lock::acquire(&world.root, false)?;
+    group::require_no_active_group(world)?;
+    let receipt = rollback_region(world, dimension, rx, rz, extension, budget)?;
+    let archive = history::resolved(world, dimension, std::slice::from_ref(&receipt), true, [])?;
+    Ok((receipt, archive))
+}
+fn rollback_region(
+    world: &WorldSummary,
+    dimension: &str,
+    rx: i32,
+    rz: i32,
+    extension: &str,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<RegionWriteReceipt, WorldError> {
+    let region = expected_region_path(world, dimension, rx, rz, extension)?;
+    let (marker, files) = read_pending(region, budget)?;
+    ensure_regular(&files.region)?;
+    let current_bytes = read_region_bytes(&files.region, budget)?;
+    let current = sha(&current_bytes);
+    if current != marker.original_sha256 && current != marker.replacement_sha256 {
+        return Err(refuse(
+            "Region changed outside pending transaction; manual recovery required",
+        ));
+    }
+    verify_archives(&files, &marker)?;
+    if current == marker.replacement_sha256 {
+        crate::transaction_artifacts::store(&files.replacement_backup, &current_bytes)?;
+    }
+    drop(current_bytes);
+    if current == marker.replacement_sha256 {
+        // An interrupted rollback may leave a verified restore-stage.
+        if files.restore.exists() {
+            ensure_regular(&files.restore)?;
+            if sha(&fs::read(&files.restore)?) != marker.original_sha256 {
+                return Err(refuse("Interrupted restoration stage has invalid hash"));
+            }
+        } else {
+            let original = read_region_bytes(&files.backup, budget)?;
+            append_atomic_marker(&files.restore, &original)?;
+        }
+        // One-file replacement of verified backup; never regenerate original
+        // region bytes through NBT decoding.
+        replace_existing(&files.restore, &files.region)?;
+        parent_sync(&files.region)?;
+    }
+    if sha(&read_region_bytes(&files.region, budget)?) != marker.original_sha256 {
+        return Err(refuse(
+            "Rollback verification failed; pending marker preserved",
+        ));
+    }
+    // Crash before replacement leaves the write-stage behind. Retain it
+    // separately (never execute/delete it) so recovery can still complete.
+    if files.staged.exists() {
+        ensure_regular(&files.staged)?;
+        if sha(&fs::read(&files.staged)?) != marker.replacement_sha256 {
+            return Err(refuse(
+                "Abandoned write-stage differs from the planned replacement",
+            ));
+        }
+        crate::transaction_artifacts::archive(&files.staged, &files.abandoned)?;
+        parent_sync(&files.region)?;
+    }
+    if files.restore.exists() {
+        crate::transaction_artifacts::verify_hash(&files.restore, &marker.original_sha256)?;
+        crate::transaction_artifacts::archive(&files.restore, &files.backup)?;
+    }
+    crate::transaction_artifacts::archive(&files.pending, &files.rolled_back)?;
+    parent_sync(&files.region)?;
+    let replacement_backup = retained_replacement(&files, &marker.replacement_sha256, budget)?;
+    Ok(RegionWriteReceipt {
+        region_path: files.region,
+        backup_path: files.backup,
+        marker_path: files.rolled_back,
+        original_sha256: marker.original_sha256,
+        replacement_sha256: marker.replacement_sha256,
+        replacement_backup,
+    })
+}
+fn retained_replacement(
+    files: &Paths,
+    expected: &str,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<Option<PathBuf>, WorldError> {
+    match fs::symlink_metadata(&files.replacement_backup) {
+        Ok(_) => {
+            if sha(&read_region_bytes(&files.replacement_backup, budget)?) != expected {
+                return Err(refuse("旧 Region 替换版本备份的摘要改变"));
+            }
+            Ok(Some(files.replacement_backup.clone()))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}

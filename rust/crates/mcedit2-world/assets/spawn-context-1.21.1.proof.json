@@ -1,0 +1,12 @@
+{
+  "client_sha256": "499f6897d1837516680f3114072d8106e11c9adcd933fe5cf051b551089b0c99",
+  "omitted_signature_entries_in_analysis_copy": [
+    "META-INF/MOJANGCS.SF",
+    "META-INF/MOJANGCS.RSA"
+  ],
+  "all_other_members_identical": true,
+  "output_sha256": "eabe0d54520348dbdbe851550e9f6bcf427a42ad6be023176dd79ed3cd493053",
+  "source_sha256": "4099c48f4ff91a75860a3c20d42d46c441ebae826fa58cf9b33169d2790b28c0",
+  "mappings_sha256": "140c47931cccc8fc9e4c22d7603e2d714d1a953a146f51ea7397d95c955536ec",
+  "scope": "空碰撞上下文、保存后关闭的潜影盒、实际载入 NBT 的移动活塞支撑与身体谓词；没有运行时动画或游戏窗口"
+}

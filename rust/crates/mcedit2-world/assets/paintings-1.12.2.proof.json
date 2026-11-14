@@ -1,0 +1,20 @@
+{
+  "client_sha256": "8ada07da5ee77dad3527bd7278fbd05ee1fc8a597813b216a871a2d7d64cc64f",
+  "omitted_signature_entries_in_analysis_copy": [
+    "META-INF/MOJANGCS.SF",
+    "META-INF/MOJANGCS.RSA"
+  ],
+  "all_other_members_identical": false,
+  "output_sha256": "2be6647c8ef0ecf52a914dc449bfed7fbc3865c64e31e12dbaae82ffd947a0d7",
+  "cpu_draw_adapters": [
+    {
+      "member": "cai.class",
+      "original_sha256": "7eb9691c7de48fc3ff0b036de9f3e4ee2259e53de8108d60afa7e1576f6972af",
+      "adapted_sha256": "188b8002d8611aa6b4ded10db46334a91f2298fe2d2680747dd9a17922f9482c"
+    }
+  ],
+  "all_non_adapter_members_identical": true,
+  "adapter_source_sha256": "8d4da1cc6e5d61911a54c9710586a4a149334f6705f24624dfef99687775b9e6",
+  "catalog_sha256": "2f48779a13fab4bd5bd9ebe44fd0e44d084ddb79cbf66871e6d710dbc8ecb341",
+  "geometry_sha256": "9149dd3a8854a46c28915069837e8b54a01370345a7e96d088a0edd741f3842c"
+}

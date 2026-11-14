@@ -1,0 +1,34 @@
+{
+  "client_sha256": "56b71336d2b4fdffd197f56595b0da93e32a946f78f382a299b8f4b92758bb0f",
+  "omitted_signature_entries_in_analysis_copy": [
+    "META-INF/MOJANGCS.SF",
+    "META-INF/MOJANGCS.RSA"
+  ],
+  "all_other_members_identical": true,
+  "output_sha256": "d761ed327f1d233e4759136d963b31114b8446f5d07c73a6d4ba5f4425158aa5",
+  "source_sha256": "c01498b38319c1e291e3c5de739627be164899cc1476f581937f41bc5fe475a6",
+  "mappings_sha256": "67bfc33ef0c7103f002d6ac134f8eddd3d67e2ce45d266e83816d1a2e2c9b01d",
+  "native_methods": {
+    "net.minecraft.world.entity.monster.Monster": {
+      "class": "bwc",
+      "javap_sha256": "ee6eb2007a0a63353b65a9655d818ec9140b9561da96144b6a83efced6b513f3"
+    },
+    "net.minecraft.world.level.NaturalSpawner": {
+      "class": "cmx",
+      "javap_sha256": "5574faf0559a228dd89e5e816acb2aaf66bd22f72a0e2519797010e4aa6d5148"
+    },
+    "net.minecraft.world.level.lighting.SkyLightSectionStorage": {
+      "class": "dwy",
+      "javap_sha256": "52a5f1baa95fcb89ee7733aae70266ed74f1a031e190d2a13db985e4b84a46be"
+    }
+  },
+  "flag_bits": {
+    "support": 1,
+    "body_without_world_tags": 2,
+    "body_with_native_tags": 4,
+    "support_reads_world": 8,
+    "body_reads_world": 16,
+    "dynamic_shape": 32
+  },
+  "scope": "僵尸所代表的普通步行敌对生物表面 / 身体规则；动态形状单独标记；标签由实际来源解释"
+}

@@ -1,0 +1,39 @@
+{
+  "client_sha256": "8ada07da5ee77dad3527bd7278fbd05ee1fc8a597813b216a871a2d7d64cc64f",
+  "omitted_signature_entries_in_analysis_copy": [
+    "META-INF/MOJANGCS.SF",
+    "META-INF/MOJANGCS.RSA"
+  ],
+  "all_other_members_identical": false,
+  "output_sha256": "23ddbe18d1da9919c17e47cb20896e0ae1a6d81952f42a85445bff5122c9b8cb",
+  "cpu_draw_adapters": [
+    {
+      "member": "acb.class",
+      "original_sha256": "d339a0a6bc26317ffd0f83b1c7ce127638c9ce130880ec127655a37f780ab4d7",
+      "adapted_sha256": "4035a50a72ee8a50ae93e61deeaefa0a83e0e6c12bdce13ea20256e3e009e758"
+    },
+    {
+      "member": "ahn$1.class",
+      "original_sha256": "b0f5e63476dd94dc96923025470dbf3db585ce3de8607adca8875d9f099d7022",
+      "adapted_sha256": "af10400197d46119975e2fdf9de0128cc0c35edf54ee361f6d1cdd686091b7c0"
+    },
+    {
+      "member": "aym.class",
+      "original_sha256": "89860c65dd253dc7b2b40ebd589a4e5eab1e9877d22711763d5a4a80add7547e",
+      "adapted_sha256": "3bae1f57dcff7afd08e42a4da4bdc86cc06f7dc03fc617fc60e95a885c158527"
+    }
+  ],
+  "all_non_adapter_members_identical": true,
+  "extra_classpath": [
+    {
+      "name": "log4j-api-2.17.1.jar",
+      "sha256": "b0d8a4c8ab4fb8b1888d0095822703b0e6d4793c419550203da9e69196161de4"
+    },
+    {
+      "name": "log4j-core-2.17.1.jar",
+      "sha256": "c967f223487980b9364e94a7c7f9a8a01fd3ee7c19bdbf0b0f9f8cb8511f3d41"
+    }
+  ],
+  "adapter_source_sha256": "386020701128373a55d5a4adc5cedd60f0e9f0d5301abbdb880be0ef4a138866",
+  "source_sha256": "9caa5edc84b003852c5e2dafa4faff92a7873b75956bd316d74e6b0ba35d6c96"
+}

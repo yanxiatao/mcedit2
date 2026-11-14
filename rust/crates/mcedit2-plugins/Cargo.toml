@@ -1,0 +1,20 @@
+[package]
+name = "mcedit2-plugins"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "MCEdit2 插件目录、进程协议与经过校验的编辑预览"
+
+[dependencies]
+mcedit2-world = { path = "../mcedit2-world" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+log = { version = "0.4", features = ["std"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
