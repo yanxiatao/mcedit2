@@ -65,7 +65,7 @@ impl Builder {
     }
 }
 pub(super) fn decode_anvil(root: &Tag<'_>, level: &Tag<'_>, list: &Tag<'_>) -> Result<Chunk> {
-    if list.kind != 9 || list.items.len() > 32 {
+    if list.kind != 9 {
         return Err(err("Invalid numeric Sections list"));
     }
     let mut sections = Vec::new();
@@ -84,9 +84,9 @@ pub(super) fn decode_anvil(root: &Tag<'_>, level: &Tag<'_>, list: &Tag<'_>) -> R
             .map(|x| byte_array(x, 2048, "Add"))
             .transpose()?;
         let mut builder = Builder::new();
-        for i in 0..4096 {
+        for (i, block) in blocks.iter().enumerate() {
             let high = add.map_or(0, |a| nibble(a, i)) as u16;
-            builder.put(blocks[i] as u16 | (high << 8), nibble(data, i))?;
+            builder.put(*block as u16 | (high << 8), nibble(data, i))?;
         }
         sections.push(builder.finish(y));
     }
@@ -96,6 +96,12 @@ pub(super) fn decode_anvil(root: &Tag<'_>, level: &Tag<'_>, list: &Tag<'_>) -> R
         x: level.field("xPos").map(Tag::i32).transpose()?,
         z: level.field("zPos").map(Tag::i32).transpose()?,
         layout: Layout::NumericAnvil112,
+        light: crate::saved_light::Chunk::read(
+            level,
+            &Layout::NumericAnvil112,
+            root.field("DataVersion").map(Tag::i32).transpose()?,
+        )?,
+        numeric_biomes: crate::numeric_biome::NumericBiomes::read(root, level)?,
         sections,
         block_entities: original_block_entities(level, false)?,
     })
@@ -121,10 +127,21 @@ pub(super) fn decode_mcregion(root: &Tag<'_>, level: &Tag<'_>) -> Result<Chunk> 
         x: level.field("xPos").map(Tag::i32).transpose()?,
         z: level.field("zPos").map(Tag::i32).transpose()?,
         layout: Layout::McRegion128,
+        light: crate::saved_light::Chunk::read(
+            level,
+            &Layout::McRegion128,
+            root.field("DataVersion").map(Tag::i32).transpose()?,
+        )?,
+        numeric_biomes: crate::numeric_biome::NumericBiomes::read(root, level)?,
         sections,
         block_entities: original_block_entities(level, false)?,
     })
 }
+#[cfg(test)]
+pub(crate) fn run_test_category(category: crate::test_categories::Category) {
+    tests::run_test_category(category);
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::sections::decode_sections;
@@ -153,7 +170,7 @@ mod tests {
             &compound(vec![tag(10, "Level", &compound(children))]),
         )
     }
-    #[test]
+
     fn original_anvil_numeric_meta_and_add_are_not_lost() {
         let (mut blocks, mut data, mut add) = (vec![0; 4096], vec![0; 2048], vec![0; 2048]);
         let n = (2 * 16 + 3) * 16 + 4;
@@ -178,7 +195,7 @@ mod tests {
         assert_eq!(output.block(4, 2, 3).unwrap().properties[0].1, "7");
         assert_eq!(input, untouched);
     }
-    #[test]
+
     fn mcregion_128_high_arrays_reorder_without_writing() {
         let (mut blocks, mut data) = (vec![0; 32768], vec![0; 16384]);
         let (x, z, y) = (3, 7, 100);
@@ -199,7 +216,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn original_numeric_anvil_can_insert_missing_high_id_add_without_rewriting_opaque_nbt() {
         let blocks = vec![1u8; 4096];
         let data = vec![0u8; 2048];
@@ -244,7 +260,7 @@ mod tests {
         assert!(result.windows(b"safe".len()).any(|v| v == b"safe"));
         assert!(original.len() < result.len()); // only Add TAG was inserted
     }
-    #[test]
+
     fn original_mcregion_byte_patch_preserves_neighbors_and_rejects_12bit_ids() {
         let original = old_chunk(vec![
             ba("Blocks", &vec![1u8; 32768]),
@@ -288,12 +304,23 @@ mod tests {
                 .is_err()
         );
     }
-    #[test]
+
     fn missing_or_truncated_original_arrays_are_refused() {
         assert!(decode_sections(&old_chunk(vec![
             ba("Blocks", &[0; 100]),
             ba("Data", &[0; 16384])
         ]))
         .is_err());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
+        if category == crate::test_categories::Category::Formats {
+            original_anvil_numeric_meta_and_add_are_not_lost();
+            mcregion_128_high_arrays_reorder_without_writing();
+            original_numeric_anvil_can_insert_missing_high_id_add_without_rewriting_opaque_nbt();
+            original_mcregion_byte_patch_preserves_neighbors_and_rejects_12bit_ids();
+            missing_or_truncated_original_arrays_are_refused();
+        }
     }
 }

@@ -7,12 +7,12 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 const MAX_DEPTH: u8 = 64;
-const MAX_NODES: usize = 1_000_000;
-const MAX_SECTIONS: usize = 128;
-const MAX_PALETTE: usize = 4096;
+// Section Y 与调色板索引的实际存储宽度，不另设资源数量门槛。
+const SECTION_CAPACITY: usize = u8::MAX as usize + 1;
+const PALETTE_CAPACITY: usize = u16::MAX as usize + 1;
 const BLOCKS: usize = 4096;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct State {
     pub name: String,
@@ -67,11 +67,17 @@ pub struct Chunk {
     pub x: Option<i32>,
     pub z: Option<i32>,
     pub layout: Layout,
+    /// 原始已保存光照；纯光照区段不并入可编辑方块段。
+    pub light: crate::saved_light::Chunk,
     pub sections: Vec<Section>,
+    pub numeric_biomes: Option<std::sync::Arc<crate::numeric_biome::NumericBiomes>>,
     /// Original Block Entity positions. Opaque NBT is never rewritten.
     pub block_entities: BTreeSet<(i32, i32, i32)>,
 }
 impl Chunk {
+    pub fn numeric_biome(&self, x: u8, y: i32, z: u8) -> Option<i32> {
+        self.numeric_biomes.as_ref()?.sample(x, y, z)
+    }
     pub fn has_block_entity(&self, x: i32, y: i32, z: i32) -> bool {
         self.block_entities.contains(&(x, y, z))
     }
@@ -150,16 +156,14 @@ impl Tag<'_> {
         if n + 2 != self.raw.len() {
             return Err(error("Invalid original NBT string size"));
         }
-        std::str::from_utf8(&self.raw[2..])
-            .map(str::to_owned)
-            .map_err(|_| error("Invalid original NBT UTF-8"))
+        crate::nbt_utf::decode(&self.raw[2..]).map_err(|e| error(e.to_string()))
     }
     fn longs(&self) -> Result<Vec<u64>> {
         if self.kind != 12 || self.raw.len() < 4 {
             return Err(error("Expected TAG_Long_Array"));
         }
         let count = i32::from_be_bytes(self.raw[0..4].try_into().unwrap());
-        if count < 0 || count > 65_536 || self.raw.len() != 4 + count as usize * 8 {
+        if !(0..=65_536).contains(&count) || self.raw.len() != 4 + count as usize * 8 {
             return Err(error("Invalid original BlockStates long-array length"));
         }
         Ok(self.raw[4..]
@@ -171,7 +175,6 @@ impl Tag<'_> {
 struct Reader<'a> {
     buf: &'a [u8],
     at: usize,
-    nodes: usize,
 }
 impl<'a> Reader<'a> {
     fn take(&mut self, n: usize) -> Result<&'a [u8]> {
@@ -191,9 +194,7 @@ impl<'a> Reader<'a> {
     }
     fn name(&mut self) -> Result<String> {
         let n = u16::from_be_bytes(self.take(2)?.try_into().unwrap()) as usize;
-        std::str::from_utf8(self.take(n)?)
-            .map(str::to_owned)
-            .map_err(|_| error("NBT name is not UTF-8"))
+        crate::nbt_utf::decode(self.take(n)?).map_err(|e| error(e.to_string()))
     }
     fn count(&mut self, max: usize) -> Result<usize> {
         let n = i32::from_be_bytes(self.take(4)?.try_into().unwrap());
@@ -203,10 +204,9 @@ impl<'a> Reader<'a> {
         Ok(n as usize)
     }
     fn node(&mut self, kind: u8, depth: u8) -> Result<Tag<'a>> {
-        if depth > MAX_DEPTH || self.nodes >= MAX_NODES {
+        if depth > MAX_DEPTH {
             return Err(error("NBT traversal budget exceeded"));
         }
-        self.nodes += 1;
         let start = self.at;
         let mut fields = Vec::new();
         let mut items = Vec::new();
@@ -232,34 +232,31 @@ impl<'a> Reader<'a> {
             }
             9 => {
                 let inner = self.byte()?;
-                let n = self.count(MAX_NODES)?;
-                if inner > 12
-                    || (inner == 0 && n != 0)
-                    || self
-                        .nodes
-                        .checked_add(n)
-                        .is_none_or(|total| total > MAX_NODES)
-                {
+                let n = self.count(self.buf.len().saturating_sub(self.at))?;
+                if inner > 12 || (inner == 0 && n != 0) {
                     return Err(error("Invalid original List schema/size"));
                 }
                 for _ in 0..n {
                     items.push(self.node(inner, depth + 1)?);
                 }
             }
-            10 => loop {
-                let next = self.byte()?;
-                if next == 0 {
-                    break;
+            10 => {
+                let mut names = std::collections::HashSet::new();
+                loop {
+                    let next = self.byte()?;
+                    if next == 0 {
+                        break;
+                    }
+                    if next > 12 {
+                        return Err(error("Invalid original Compound kind"));
+                    }
+                    let name = self.name()?;
+                    if !names.insert(name.clone()) {
+                        return Err(error("Ambiguous duplicate original NBT field"));
+                    }
+                    fields.push((name, self.node(next, depth + 1)?));
                 }
-                if next > 12 {
-                    return Err(error("Invalid original Compound kind"));
-                }
-                let name = self.name()?;
-                if fields.iter().any(|(s, _)| s == &name) {
-                    return Err(error("Ambiguous duplicate original NBT field"));
-                }
-                fields.push((name, self.node(next, depth + 1)?));
-            },
+            }
             11 | 12 => {
                 let n = self.count(self.buf.len())?;
                 let bytes = n
@@ -281,11 +278,7 @@ pub(crate) fn parse_root(data: &[u8]) -> Result<Tag<'_>> {
     if data.len() > 64 * 1024 * 1024 {
         return Err(error("NBT exceeds 64 MiB"));
     }
-    let mut r = Reader {
-        buf: data,
-        at: 0,
-        nodes: 0,
-    };
+    let mut r = Reader { buf: data, at: 0 };
     if r.byte()? != 10 {
         return Err(error("Original root is not a Compound"));
     }
@@ -300,7 +293,7 @@ pub(crate) fn parse_root(data: &[u8]) -> Result<Tag<'_>> {
 /// Exact 4096 original indices, both cross-long pre-1.16 style and
 /// non-crossing padded style; validates every index against actual palette.
 pub fn unpack(palette_len: usize, words: &[u64]) -> Result<Vec<u16>> {
-    if !(1..=MAX_PALETTE).contains(&palette_len) {
+    if !(1..=PALETTE_CAPACITY).contains(&palette_len) {
         return Err(error("Invalid palette size"));
     }
     if palette_len == 1 {
@@ -343,17 +336,22 @@ pub fn unpack(palette_len: usize, words: &[u64]) -> Result<Vec<u16>> {
     }
     Ok(out)
 }
-fn block_state(tag: &Tag<'_>) -> Result<State> {
+/// 从完整 NBT 根读取实体保存的 Name / Properties，复用区块调色板解析合同。
+pub fn decode_block_state(bytes: &[u8]) -> Result<State> {
+    block_state(&parse_root(bytes)?)
+}
+/// 区块内部 Tag 不跨库暴露；外部使用完整编码的公开入口。
+pub(crate) fn block_state(tag: &Tag<'_>) -> Result<State> {
     if tag.kind != 10 {
         return Err(error("Original palette member is not Compound"));
     }
     let name = tag.require("Name", 8)?.string()?;
-    if name.is_empty() || name.len() > 512 {
+    if name.is_empty() {
         return Err(error("Invalid block state Name"));
     }
     let mut properties = Vec::new();
     if let Some(p) = tag.field("Properties") {
-        if p.kind != 10 || p.fields.len() > 256 {
+        if p.kind != 10 {
             return Err(error("Invalid original block properties"));
         }
         for (key, value) in &p.fields {
@@ -371,18 +369,24 @@ pub(super) fn original_block_entities(
     source: &Tag<'_>,
     modern: bool,
 ) -> Result<BTreeSet<(i32, i32, i32)>> {
+    Ok(original_be_entries(source, modern)?.into_keys().collect())
+}
+fn original_be_entries<'tree, 'data>(
+    source: &'tree Tag<'data>,
+    modern: bool,
+) -> Result<std::collections::BTreeMap<(i32, i32, i32), &'tree Tag<'data>>> {
     let key = if modern {
         "block_entities"
     } else {
         "TileEntities"
     };
     let Some(list) = source.field(key) else {
-        return Ok(BTreeSet::new());
+        return Ok(Default::default());
     };
     if list.kind != 9 {
         return Err(error(format!("Original {key} is not an NBT List")));
     }
-    let mut positions = BTreeSet::new();
+    let mut entries = std::collections::BTreeMap::new();
     for item in &list.items {
         if item.kind != 10 {
             return Err(error(format!("Original {key} member is not a Compound")));
@@ -392,23 +396,52 @@ pub(super) fn original_block_entities(
             item.require("y", 3)?.i32()?,
             item.require("z", 3)?.i32()?,
         );
-        if !positions.insert(position) {
-            return Err(error("Duplicate original Block Entity XYZ; edit unsafe"));
+        if entries.insert(position, item).is_some() {
+            return Err(error("Duplicate original Block Entity XYZ"));
         }
     }
-    Ok(positions)
+    Ok(entries)
+}
+fn selected_original_be<'tree, 'data>(
+    root: &'tree Tag<'data>,
+    position: (i32, i32, i32),
+) -> Result<Option<&'tree Tag<'data>>> {
+    let modern = root.field("sections").is_some();
+    let source = if modern {
+        root
+    } else {
+        root.require("Level", 10)?
+    };
+    let entries = original_be_entries(source, modern)?;
+    let selected = entries.get(&position).copied();
+    if selected.is_some()
+        && (source
+            .field("xPos")
+            .map(Tag::i32)
+            .transpose()?
+            .is_some_and(|cx| position.0.div_euclid(16) != cx)
+            || source
+                .field("zPos")
+                .map(Tag::i32)
+                .transpose()?
+                .is_some_and(|cz| position.2.div_euclid(16) != cz))
+    {
+        return Err(error(
+            "Original Block Entity coordinates mismatch chunk owner",
+        ));
+    }
+    Ok(selected)
 }
 
 /// Biome palettes use 64 quart-resolution entries, not the block-state
 /// array's 4096 elements or minimum 4 bits. Modern Java packing is padded
-/// per long. Invalid optional biome metadata is ignored by the renderer:
-/// no original block decode/editing validation is relaxed.
+/// per long. 缺失的群系保留为未知，损坏的声明按正常解码错误报告。
 fn read_biomes(value: &Tag<'_>) -> Result<BiomePalette> {
     if value.kind != 10 {
         return Err(error("Invalid original biome compound"));
     }
     let palette = value.require("palette", 9)?;
-    if palette.items.is_empty() || palette.items.len() > 64 {
+    if palette.items.is_empty() || palette.items.len() > PALETTE_CAPACITY {
         return Err(error("Invalid original biome palette size"));
     }
     let names = palette
@@ -416,7 +449,7 @@ fn read_biomes(value: &Tag<'_>) -> Result<BiomePalette> {
         .iter()
         .map(|v| {
             let id = v.string()?;
-            if id.is_empty() || id.len() > 256 || !id.contains(':') {
+            if id.is_empty() || !id.contains(':') {
                 return Err(error("Invalid original biome registry name"));
             }
             Ok(id)
@@ -449,19 +482,27 @@ fn read_biomes(value: &Tag<'_>) -> Result<BiomePalette> {
     Ok(BiomePalette { names, indices })
 }
 pub fn decode_sections(raw: &[u8]) -> Result<Chunk> {
-    let root = parse_root(raw)?;
+    decode_chunk(&parse_root(raw)?)
+}
+fn decode_chunk(root: &Tag<'_>) -> Result<Chunk> {
     let modern = root.field("sections").is_some();
     let source = if modern {
-        &root
+        root
     } else {
         root.require("Level", 10)?
     };
     if !modern && source.field("Blocks").is_some() {
-        return super::oldnumeric::decode_mcregion(&root, source);
+        return super::oldnumeric::decode_mcregion(root, source);
     }
     let block_entities = original_block_entities(source, modern)?;
     let list = source.require(if modern { "sections" } else { "Sections" }, 9)?;
-    if !modern && list.items.iter().any(|s| s.field("Blocks").is_some()) {
+    // 空气区块没有 Section 可供识别；已声明的旧数字版本仍属于数字 Anvil。
+    let empty_numeric = list.items.is_empty()
+        && matches!(
+            root.field("DataVersion").map(Tag::i32).transpose()?,
+            Some(0..=1343)
+        );
+    if !modern && (empty_numeric || list.items.iter().any(|s| s.field("Blocks").is_some())) {
         if !list
             .items
             .iter()
@@ -469,17 +510,18 @@ pub fn decode_sections(raw: &[u8]) -> Result<Chunk> {
         {
             return Err(error("Mixed named and numeric Section formats are unsafe"));
         }
-        return super::oldnumeric::decode_anvil(&root, source, list);
-    }
-    if list.items.len() > MAX_SECTIONS {
-        return Err(error("Too many original sections"));
+        return super::oldnumeric::decode_anvil(root, source, list);
     }
     let mut sections: Vec<Section> = Vec::new();
+    let mut seen_y = BTreeSet::new();
     for entry in &list.items {
         if entry.kind != 10 {
             return Err(error("Non-Compound original Section"));
         }
         let y = entry.require("Y", 1)?.byte()?;
+        if !seen_y.insert(y) {
+            return Err(error("Duplicate signed Section Y in chunk"));
+        }
         let states = if modern {
             match entry.field("block_states") {
                 None => continue, // light-only entry
@@ -490,7 +532,7 @@ pub fn decode_sections(raw: &[u8]) -> Result<Chunk> {
             entry
         };
         let palette = states.require(if modern { "palette" } else { "Palette" }, 9)?;
-        if palette.items.is_empty() || palette.items.len() > MAX_PALETTE {
+        if palette.items.is_empty() {
             return Err(error("Invalid Section palette length"));
         }
         let palette: Vec<State> = palette
@@ -505,11 +547,16 @@ pub fn decode_sections(raw: &[u8]) -> Result<Chunk> {
             None => return Err(error("Multi-state palette without original data")),
         };
         let indices = unpack(palette.len(), &longs)?;
-        if sections.iter().any(|s| s.y == y) {
-            return Err(error("Duplicate signed Section Y in chunk"));
-        }
         let biomes = if modern {
-            entry.field("biomes").and_then(|tag| read_biomes(tag).ok())
+            entry
+                .field("biomes")
+                .and_then(|tag| match read_biomes(tag) {
+                    Ok(biomes) => Some(biomes),
+                    Err(error) => {
+                        log::error!("[chunk-biomes] Section {y} 群系数据无效：{error}");
+                        None
+                    }
+                })
         } else {
             None
         };
@@ -522,6 +569,15 @@ pub fn decode_sections(raw: &[u8]) -> Result<Chunk> {
     }
     sections.sort_by_key(|s| s.y);
     Ok(Chunk {
+        light: crate::saved_light::Chunk::read(
+            source,
+            &if modern {
+                Layout::Modern118
+            } else {
+                Layout::Named113
+            },
+            root.field("DataVersion").map(Tag::i32).transpose()?,
+        )?,
         data_version: root.field("DataVersion").map(Tag::i32).transpose()?,
         x: source.field("xPos").map(Tag::i32).transpose()?,
         z: source.field("zPos").map(Tag::i32).transpose()?,
@@ -532,6 +588,11 @@ pub fn decode_sections(raw: &[u8]) -> Result<Chunk> {
         },
         sections,
         block_entities,
+        numeric_biomes: if modern {
+            None
+        } else {
+            crate::numeric_biome::NumericBiomes::read(root, source)?
+        },
     })
 }
 
@@ -584,52 +645,18 @@ pub fn inspect_original_block_entity(
     original_nbt: &[u8],
     position: (i32, i32, i32),
 ) -> Result<Option<OriginalBlockEntity>> {
-    let chunk = decode_sections(original_nbt)?;
-    if !chunk.block_entities.contains(&position) {
-        return Ok(None);
-    }
-    if chunk.x.is_some_and(|cx| position.0.div_euclid(16) != cx)
-        || chunk.z.is_some_and(|cz| position.2.div_euclid(16) != cz)
-    {
-        return Err(error(
-            "Original Block Entity coordinates mismatch chunk owner",
-        ));
-    }
     let root = parse_root(original_nbt)?;
-    let modern = root.field("sections").is_some();
-    let source = if modern {
-        &root
-    } else {
-        root.require("Level", 10)?
+    let Some(original) = selected_original_be(&root, position)? else {
+        return Ok(None);
     };
-    let list = source.require(
-        if modern {
-            "block_entities"
-        } else {
-            "TileEntities"
-        },
-        9,
-    )?;
-    let original = list
-        .items
-        .iter()
-        .find(|tag| {
-            tag.kind == 10
-                && tag.field("x").and_then(|v| v.i32().ok()) == Some(position.0)
-                && tag.field("y").and_then(|v| v.i32().ok()) == Some(position.1)
-                && tag.field("z").and_then(|v| v.i32().ok()) == Some(position.2)
-        })
-        .ok_or_else(|| error("Block Entity disappeared from source NBT"))?;
     let raw_id = original.field("id").map(|tag| tag.string()).transpose()?;
     let original_compound_sha256 = Sha256::digest(original.raw)
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    const MAX_FIELDS: usize = 96;
     let fields = original
         .fields
         .iter()
-        .take(MAX_FIELDS)
         .map(|(name, tag)| OriginalNbtField {
             name: name.clone(),
             kind: tag.kind,
@@ -669,25 +696,20 @@ pub struct OriginalBePath {
 fn flatten_original_be(
     node: &Tag<'_>,
     prefix: &str,
-    depth: usize,
     safe_parent: bool,
     out: &mut Vec<OriginalBePath>,
 ) {
     for (key, child) in &node.fields {
-        if out.len() >= 256 {
-            return;
-        }
         let clean = !key.is_empty()
             && !key.contains('/')
-            && key.len() <= 64
-            && !matches!(key.as_str(), "x" | "y" | "z" | "id" | "keepPacked");
+            && (!prefix.is_empty()
+                || !matches!(key.as_str(), "x" | "y" | "z" | "id" | "keepPacked"));
         let name = if prefix.is_empty() {
             key.clone()
         } else {
             format!("{prefix}/{key}")
         };
-        let editable =
-            safe_parent && clean && depth < 8 && matches!(child.kind, 1 | 2 | 3 | 4 | 5 | 6 | 8);
+        let editable = safe_parent && clean && matches!(child.kind, 1 | 2 | 3 | 4 | 5 | 6 | 8);
         out.push(OriginalBePath {
             path: name.clone(),
             kind: child.kind,
@@ -701,8 +723,8 @@ fn flatten_original_be(
             },
             safely_editable_scalar: editable,
         });
-        if child.kind == 10 && depth < 7 {
-            flatten_original_be(child, &name, depth + 1, safe_parent && clean, out);
+        if child.kind == 10 {
+            flatten_original_be(child, &name, safe_parent && clean, out);
         }
     }
 }
@@ -710,36 +732,12 @@ pub fn inspect_original_be_tree(
     original_nbt: &[u8],
     position: (i32, i32, i32),
 ) -> Result<Vec<OriginalBePath>> {
-    if inspect_original_block_entity(original_nbt, position)?.is_none() {
-        return Ok(Vec::new());
-    }
     let root = parse_root(original_nbt)?;
-    let modern = root.field("sections").is_some();
-    let source = if modern {
-        &root
-    } else {
-        root.require("Level", 10)?
+    let Some(entity) = selected_original_be(&root, position)? else {
+        return Ok(Vec::new());
     };
-    let list = source.require(
-        if modern {
-            "block_entities"
-        } else {
-            "TileEntities"
-        },
-        9,
-    )?;
-    let entity = list
-        .items
-        .iter()
-        .find(|t| {
-            t.kind == 10
-                && t.field("x").and_then(|x| x.i32().ok()) == Some(position.0)
-                && t.field("y").and_then(|y| y.i32().ok()) == Some(position.1)
-                && t.field("z").and_then(|z| z.i32().ok()) == Some(position.2)
-        })
-        .ok_or_else(|| error("BE field tree position is inconsistent"))?;
     let mut out = Vec::new();
-    flatten_original_be(entity, "", 0, true, &mut out);
+    flatten_original_be(entity, "", true, &mut out);
     Ok(out)
 }
 
@@ -791,29 +789,18 @@ pub fn patch_original_block_entity_scalar(
     field: &str,
     text: &str,
 ) -> Result<Vec<u8>> {
-    if field.is_empty() || field.len() > 128 || text.len() > 4096 {
-        return Err(error(
-            "Block Entity field/value exceeds preview safety budget",
-        ));
-    }
     let path = field.split('/').collect::<Vec<_>>();
     if path.is_empty()
-        || path.len() > 8
-        || path.iter().any(|segment| {
-            segment.is_empty()
-                || segment.len() > 64
-                || matches!(*segment, "x" | "y" | "z" | "id" | "keepPacked")
-        })
+        || matches!(path[0], "x" | "y" | "z" | "id" | "keepPacked")
+        || path.iter().any(|segment| segment.is_empty())
     {
-        return Err(error(
-            "Unsafe or excessively deep original BE scalar field path",
-        ));
+        return Err(error("Invalid original BE scalar field path"));
     }
-    let before = decode_sections(original_nbt)?;
+    let root = parse_root(original_nbt)?;
+    let before = decode_chunk(&root)?;
     if !before.block_entities.contains(&position) {
         return Err(error("No original Block Entity at selected XYZ"));
     }
-    let root = parse_root(original_nbt)?;
     let modern = root.field("sections").is_some();
     let source = if modern {
         &root
@@ -882,9 +869,10 @@ pub fn patch_original_block_entity_scalar(
             number.to_bits().to_be_bytes().to_vec()
         }
         8 => {
-            let size = u16::try_from(text.len()).map_err(|_| error("NBT UTF-8 string too long"))?;
+            let encoded = crate::nbt_utf::encode(text).map_err(|e| error(e.to_string()))?;
+            let size = u16::try_from(encoded.len()).map_err(|_| error("NBT string too long"))?;
             let mut bytes = size.to_be_bytes().to_vec();
-            bytes.extend(text.as_bytes());
+            bytes.extend(encoded);
             bytes
         }
         _ => {
@@ -904,7 +892,8 @@ pub fn patch_original_block_entity_scalar(
     if patched.len() > 64 * 1024 * 1024 {
         return Err(error("Scalar NBT preview exceeds 64 MiB"));
     }
-    let after = decode_sections(&patched)?;
+    let new_root = parse_root(&patched)?;
+    let after = decode_chunk(&new_root)?;
     if before.x != after.x
         || before.z != after.z
         || before.data_version != after.data_version
@@ -926,7 +915,6 @@ pub fn patch_original_block_entity_scalar(
             return Err(error("BlockStates unexpectedly changed during scalar edit"));
         }
     }
-    let new_root = parse_root(&patched)?;
     let new_source = if modern {
         &new_root
     } else {
@@ -966,11 +954,11 @@ pub fn original_block_entity_bytes(
     original_nbt: &[u8],
     position: (i32, i32, i32),
 ) -> Result<Option<Vec<u8>>> {
-    let decoded = decode_sections(original_nbt)?;
+    let root = parse_root(original_nbt)?;
+    let decoded = decode_chunk(&root)?;
     if !decoded.block_entities.contains(&position) {
         return Ok(None);
     }
-    let root = parse_root(original_nbt)?;
     let source = if root.field("sections").is_some() {
         &root
     } else {
@@ -1075,7 +1063,8 @@ pub fn patch_named_existing_palette(
     if edits.is_empty() || edits.len() > 4096 {
         return Err(error("Palette patch requires 1..4096 original-state edits"));
     }
-    let decoded = decode_sections(original_nbt)?;
+    let root = parse_root(original_nbt)?;
+    let decoded = decode_chunk(&root)?;
     if !matches!(decoded.layout, Layout::Named113 | Layout::Modern118) {
         return Err(error(
             "Existing-palette byte patch requires named Anvil Sections",
@@ -1087,7 +1076,6 @@ pub fn patch_named_existing_palette(
     }) {
         return Err(error("Block Entity ownership is ambiguous or invalid"));
     }
-    let root = parse_root(original_nbt)?;
     let modern = decoded.layout == Layout::Modern118;
     let source = if modern {
         &root
@@ -1214,13 +1202,16 @@ fn payload_span(nbt: &[u8], payload: &[u8]) -> Result<(usize, usize)> {
     Ok((start, end))
 }
 fn write_named_tag(name: &str, value: &str, out: &mut Vec<u8>) -> Result<()> {
-    let name_len = u16::try_from(name.len()).map_err(|_| error("NBT tag name too long"))?;
-    let value_len = u16::try_from(value.len()).map_err(|_| error("NBT tag string too long"))?;
+    let name_bytes = crate::nbt_utf::encode(name).map_err(|e| error(e.to_string()))?;
+    let value_bytes = crate::nbt_utf::encode(value).map_err(|e| error(e.to_string()))?;
+    let name_len = u16::try_from(name_bytes.len()).map_err(|_| error("NBT tag name too long"))?;
+    let value_len =
+        u16::try_from(value_bytes.len()).map_err(|_| error("NBT tag string too long"))?;
     out.push(8);
     out.extend_from_slice(&name_len.to_be_bytes());
-    out.extend_from_slice(name.as_bytes());
+    out.extend_from_slice(&name_bytes);
     out.extend_from_slice(&value_len.to_be_bytes());
-    out.extend_from_slice(value.as_bytes());
+    out.extend_from_slice(&value_bytes);
     Ok(())
 }
 fn appended_palette_entry(state: &State) -> Result<Vec<u8>> {
@@ -1241,7 +1232,7 @@ fn appended_palette_entry(state: &State) -> Result<Vec<u8>> {
     Ok(member)
 }
 fn encode_packed_indices(indices: &[u16], palette_len: usize, padded: bool) -> Result<Vec<u8>> {
-    if indices.len() != BLOCKS || !(2..=MAX_PALETTE).contains(&palette_len) {
+    if indices.len() != BLOCKS || !(2..=PALETTE_CAPACITY).contains(&palette_len) {
         return Err(error("Invalid palette re-packing parameters"));
     }
     let bits = ((usize::BITS - (palette_len - 1).leading_zeros()) as usize).max(4);
@@ -1331,12 +1322,20 @@ pub fn patch_named_growing_palette(
     original_nbt: &[u8],
     edits: &[InPaletteEdit],
 ) -> Result<Vec<u8>> {
-    if edits.is_empty() || edits.len() > BLOCKS * MAX_SECTIONS {
+    patch_named_with_authorized_be(original_nbt, edits, &BTreeSet::new())
+}
+pub(crate) fn patch_named_with_authorized_be(
+    original_nbt: &[u8],
+    edits: &[InPaletteEdit],
+    authorized: &BTreeSet<(i32, i32, i32)>,
+) -> Result<Vec<u8>> {
+    if edits.is_empty() || edits.len() > BLOCKS * SECTION_CAPACITY {
         return Err(error(
             "Palette growth batch is empty or exceeds section budget",
         ));
     }
-    let decoded = decode_sections(original_nbt)?;
+    let root = parse_root(original_nbt)?;
+    let decoded = decode_chunk(&root)?;
     if !matches!(decoded.layout, Layout::Named113 | Layout::Modern118) {
         return Err(error(
             "Palette growth supports named Java Anvil chunks only",
@@ -1349,7 +1348,6 @@ pub fn patch_named_growing_palette(
         return Err(error("Original Block Entity ownership cannot be proven"));
     }
     let modern = decoded.layout == Layout::Modern118;
-    let root = parse_root(original_nbt)?;
     let container = if modern {
         &root
     } else {
@@ -1383,6 +1381,9 @@ pub fn patch_named_growing_palette(
         }
         // Fail closed if original chunk coordinates are absent with BEs.
         if decoded.block_entities.iter().any(|&(x, y, z)| {
+            if authorized.contains(&(x, y, z)) {
+                return false;
+            }
             decoded
                 .x
                 .is_some_and(|cx| x.div_euclid(16) == cx && x.rem_euclid(16) == edit.local_x as i32)
@@ -1429,9 +1430,6 @@ pub fn patch_named_growing_palette(
             {
                 existing
             } else {
-                if palette.len() >= MAX_PALETTE {
-                    return Err(error("Section palette cannot exceed 4096 states"));
-                }
                 added.extend_from_slice(&appended_palette_entry(&edit.replacement)?);
                 palette.push(edit.replacement.clone());
                 palette.len() - 1
@@ -1598,7 +1596,7 @@ fn write_nibble(array: &mut [u8], position: usize, value: u8) -> Result<()> {
     let byte = array
         .get_mut(position / 2)
         .ok_or_else(|| error("Numeric nibble position out of bounds"))?;
-    if position % 2 == 0 {
+    if position.is_multiple_of(2) {
         *byte = (*byte & 0xF0) | value;
     } else {
         *byte = (*byte & 0x0F) | (value << 4);
@@ -1626,10 +1624,18 @@ pub fn patch_original_numeric_arrays(
     original_nbt: &[u8],
     edits: &[InPaletteEdit],
 ) -> Result<Vec<u8>> {
-    if edits.is_empty() || edits.len() > BLOCKS * MAX_SECTIONS {
+    patch_numeric_with_authorized_be(original_nbt, edits, &BTreeSet::new())
+}
+pub(crate) fn patch_numeric_with_authorized_be(
+    original_nbt: &[u8],
+    edits: &[InPaletteEdit],
+    authorized: &BTreeSet<(i32, i32, i32)>,
+) -> Result<Vec<u8>> {
+    if edits.is_empty() || edits.len() > BLOCKS * SECTION_CAPACITY {
         return Err(error("Numeric patch batch is empty or over budget"));
     }
-    let before = decode_sections(original_nbt)?;
+    let root = parse_root(original_nbt)?;
+    let before = decode_chunk(&root)?;
     if !matches!(before.layout, Layout::McRegion128 | Layout::NumericAnvil112) {
         return Err(error(
             "Original numeric patch requires numeric Java world storage",
@@ -1643,7 +1649,6 @@ pub fn patch_original_numeric_arrays(
             "Numeric Block Entity original coordinates are ambiguous",
         ));
     }
-    let root = parse_root(original_nbt)?;
     let level = root.require("Level", 10)?;
     let mcregion = before.layout == Layout::McRegion128;
     let sections = if mcregion {
@@ -1676,6 +1681,9 @@ pub fn patch_original_numeric_arrays(
             return Err(error("MCRegion Blocks array supports only 8-bit IDs"));
         }
         if before.block_entities.iter().any(|&(x, y, z)| {
+            if authorized.contains(&(x, y, z)) {
+                return false;
+            }
             before
                 .x
                 .is_some_and(|cx| x.div_euclid(16) == cx && x.rem_euclid(16) == edit.local_x as i32)
@@ -1821,6 +1829,11 @@ pub fn patch_original_numeric_arrays(
 }
 
 #[cfg(test)]
+pub(crate) fn run_test_category(category: crate::test_categories::Category) {
+    tests::run_test_category(category);
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     fn named(kind: u8, name: &str, payload: &[u8]) -> Vec<u8> {
@@ -1880,7 +1893,6 @@ mod tests {
         )
     }
 
-    #[test]
     fn modern_chunk_decoding_preserves_biome_for_read_only_surface_queries() {
         let mut block_palette = vec![10];
         block_palette.extend(1i32.to_be_bytes());
@@ -1918,7 +1930,7 @@ mod tests {
             "minecraft:grass_block"
         );
     }
-    #[test]
+
     fn modern_biome_quart_palette_reads_signed_height_and_xz() {
         let mut palette = vec![8];
         palette.extend(2i32.to_be_bytes());
@@ -1951,7 +1963,7 @@ mod tests {
         assert_eq!(section.biome(14, 15, 15), Some("minecraft:swamp"));
         assert_eq!(section.biome(0, 16, 0), None);
     }
-    #[test]
+
     fn in_memory_palette_patch_changes_only_existing_packed_words() {
         let source = modern_chunk(-4, &vec![0; 256]);
         let original_len = source.len();
@@ -2020,7 +2032,7 @@ mod tests {
             .count();
         assert!(differences > 0 && differences <= 8);
     }
-    #[test]
+
     fn palette_patch_refuses_new_state_and_duplicate_or_wrong_source() {
         let source = modern_chunk(-4, &vec![0; 256]);
         let stone = State {
@@ -2077,7 +2089,7 @@ mod tests {
         )
         .is_err());
     }
-    #[test]
+
     fn grow_modern_palette_and_preserve_all_untouched_originals() {
         let old = modern_chunk(-4, &vec![0; 256]);
         let original = decode_sections(&old).unwrap();
@@ -2136,9 +2148,58 @@ mod tests {
             ]),
         )
     }
-    #[test]
+
     fn grow_one_state_without_data_and_keep_modded_nbt_bytes() {
         let old = single_state_modern_no_data();
+        let root = parse_root(&old).unwrap();
+        let list = root.field("block_entities").unwrap();
+        let mut fields = vec![
+            named(3, "x", &(-112i32).to_be_bytes()),
+            named(3, "y", &(-64i32).to_be_bytes()),
+            named(3, "z", &48i32.to_be_bytes()),
+            named(8, "id", &string("example:source")),
+            named(10, "Data", &compound(vec![named(8, "id", &string("kept"))])),
+        ];
+        fields.extend((0..120).map(|i| named(3, &format!("field_{i}"), &i32::to_be_bytes(i))));
+        let mut entities = vec![10];
+        entities.extend(1i32.to_be_bytes());
+        entities.extend(compound(fields));
+        let (start, end) = payload_span(&old, list.raw).unwrap();
+        let mut populated = old[..start].to_vec();
+        populated.extend(entities);
+        populated.extend_from_slice(&old[end..]);
+        let inspected = inspect_original_block_entity(&populated, (-112, -64, 48))
+            .unwrap()
+            .unwrap();
+        assert_eq!(inspected.fields.len(), 125);
+        let tree = inspect_original_be_tree(&populated, (-112, -64, 48)).unwrap();
+        assert!(tree
+            .iter()
+            .any(|row| row.path == "Data/id" && row.safely_editable_scalar));
+        assert!(tree
+            .iter()
+            .any(|row| row.path == "id" && !row.safely_editable_scalar));
+        let changed =
+            patch_original_block_entity_scalar(&populated, (-112, -64, 48), "Data/id", "changed")
+                .unwrap();
+        let parsed = parse_root(&changed).unwrap();
+        let entity = selected_original_be(&parsed, (-112, -64, 48))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            entity
+                .require("Data", 10)
+                .unwrap()
+                .require("id", 8)
+                .unwrap()
+                .string()
+                .unwrap(),
+            "changed"
+        );
+        assert_eq!(
+            entity.require("id", 8).unwrap().string().unwrap(),
+            "example:source"
+        );
         let next = patch_named_growing_palette(
             &old,
             &[InPaletteEdit {
@@ -2169,7 +2230,7 @@ mod tests {
             .windows("exact bytes retained".len())
             .any(|x| x == b"exact bytes retained"));
     }
-    #[test]
+
     fn palette_growth_rejects_duplicate_target_and_original_mismatch() {
         let old = single_state_modern_no_data();
         let stone = State {
@@ -2239,7 +2300,7 @@ mod tests {
             ]),
         )
     }
-    #[test]
+
     fn legacy_named_palette_grows_from_four_to_five_bits_with_crossing_words() {
         let old = sixteen_palette_old_named(1631); // Java 1.13.x
         let changed = patch_named_growing_palette(
@@ -2278,7 +2339,7 @@ mod tests {
             .windows(b"original opaque NBT".len())
             .any(|x| x == b"original opaque NBT"));
     }
-    #[test]
+
     fn ambiguous_legacy_version_rejects_palette_bit_growth() {
         let old = sixteen_palette_old_named(2400); // unsupported transition version
         assert!(patch_named_growing_palette(
@@ -2299,7 +2360,7 @@ mod tests {
         )
         .is_err());
     }
-    #[test]
+
     fn latest_snapshot_26_4_snapshot_5_5125_reuses_structural_layout_without_guessing() {
         let words = vec![0u64; 256];
         let mut original = modern_chunk(-4, &words);
@@ -2314,7 +2375,7 @@ mod tests {
         assert_eq!(result.layout, Layout::Modern118);
         assert_eq!(result.block(0, -64, 0).unwrap().name, "minecraft:stone");
     }
-    #[test]
+
     fn minecraft_26_3_padded_and_negative_y() {
         let mut data = vec![0u64; 256];
         let n = 306usize;
@@ -2329,7 +2390,7 @@ mod tests {
         assert_eq!(chunk.x, Some(-7));
         assert_eq!(raw, original);
     }
-    #[test]
+
     fn sorted_signed_section_lookup_is_exact_and_never_infers_absent_y() {
         let state = |name: &str| State {
             name: name.into(),
@@ -2353,8 +2414,10 @@ mod tests {
             x: Some(0),
             z: Some(0),
             layout: Layout::Modern118,
+            numeric_biomes: None,
             sections,
             block_entities: BTreeSet::new(),
+            light: Default::default(),
         };
         assert_eq!(chunk.block(15, -64, 15).unwrap().name, "minecraft:stone");
         assert_eq!(chunk.block(0, 15, 0).unwrap().name, "minecraft:dirt");
@@ -2363,7 +2426,7 @@ mod tests {
         assert!(chunk.block(0, -65, 0).is_none());
         assert!(chunk.block(16, 0, 0).is_none());
     }
-    #[test]
+
     fn contiguous_and_padded_five_bit_encoding() {
         let mut contiguous = vec![0u64; 320];
         let mut padded = vec![0u64; 342];
@@ -2372,13 +2435,33 @@ mod tests {
         assert_eq!(unpack(17, &contiguous).unwrap()[12], 1);
         assert_eq!(unpack(17, &padded).unwrap()[12], 1);
     }
-    #[test]
+
     fn reject_unknown_palette_and_invalid_index() {
         assert!(unpack(0, &[]).is_err());
         assert!(unpack(2, &[]).is_err());
         let mut words = vec![0; 256];
         words[0] = 2;
         assert!(unpack(2, &words).is_err());
-        assert!(decode_sections(&modern_chunk(-4, &vec![0; 15])).is_err());
+        assert!(decode_sections(&modern_chunk(-4, &[0; 15])).is_err());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
+        if category == crate::test_categories::Category::Formats {
+            modern_chunk_decoding_preserves_biome_for_read_only_surface_queries();
+            modern_biome_quart_palette_reads_signed_height_and_xz();
+            in_memory_palette_patch_changes_only_existing_packed_words();
+            palette_patch_refuses_new_state_and_duplicate_or_wrong_source();
+            grow_modern_palette_and_preserve_all_untouched_originals();
+            grow_one_state_without_data_and_keep_modded_nbt_bytes();
+            palette_growth_rejects_duplicate_target_and_original_mismatch();
+            legacy_named_palette_grows_from_four_to_five_bits_with_crossing_words();
+            ambiguous_legacy_version_rejects_palette_bit_growth();
+            latest_snapshot_26_4_snapshot_5_5125_reuses_structural_layout_without_guessing();
+            minecraft_26_3_padded_and_negative_y();
+            sorted_signed_section_lookup_is_exact_and_never_infers_absent_y();
+            contiguous_and_padded_five_bit_encoding();
+            reject_unknown_palette_and_invalid_index();
+        }
     }
 }

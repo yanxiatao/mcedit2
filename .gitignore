@@ -13,6 +13,11 @@ Thumbs.db
 *.swp
 *~
 *.log
+__pycache__/
+*.pyc
 /dist/
 /build/
 /tmp/
+
+# 插件目录的本机启停配置
+/rust/plugins/.mcedit2-enabled.json

@@ -44,22 +44,18 @@ jobs:
         if: github.event_name != 'workflow_dispatch' || inputs.verify_tests
         working-directory: rust
         shell: pwsh
-        run: cargo test --release --workspace
-      - name: Build native Windows x64 release GUI and CLI
+        run: cargo test --workspace
+      - name: Build native Windows x64 application
         working-directory: rust
         shell: pwsh
-        run: cargo build --release -p mcedit2-iced -p mcedit2-cli
+        run: cargo build --release -p mcedit2-iced
       - name: Smoke test GUI and CLI release startup
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $cli = (Resolve-Path 'rust/target/release/mcedit2-cli.exe').Path
-          $gui = (Resolve-Path 'rust/target/release/mcedit2.exe').Path
-          $cliProcess = Start-Process -FilePath $cli -ArgumentList '--help' -Wait -PassThru -NoNewWindow
-          if ($cliProcess.ExitCode -ne 0) { throw "CLI --help exited $($cliProcess.ExitCode)" }
-          # GUI subsystem is intentionally windowless for the --help path.
-          $process = Start-Process -FilePath $gui -ArgumentList '--help' -Wait -PassThru
-          if ($process.ExitCode -ne 0) { throw "GUI --help exited $($process.ExitCode)" }
+          $exe = (Resolve-Path 'rust/target/release/mcedit2.exe').Path
+          $process = Start-Process -FilePath $exe -ArgumentList '--help' -Wait -PassThru -NoNewWindow
+          if ($process.ExitCode -ne 0) { throw "mcedit2 --help exited $($process.ExitCode)" }
       - name: Assemble standalone ZIP, source docs and SHA-256
         shell: pwsh
         run: |
@@ -67,31 +63,34 @@ jobs:
           $root = 'dist/MCEdit2-Rust-Windows-x64'
           New-Item -ItemType Directory -Force -Path $root | Out-Null
           Copy-Item 'rust/target/release/mcedit2.exe' "$root/MCEdit2.exe"
-          Copy-Item 'rust/target/release/mcedit2-cli.exe' "$root/MCEdit2-CLI.exe"
+          Copy-Item 'rust/plugins' "$root/plugins" -Recurse
           Copy-Item 'LICENSE.md' "$root/LICENSE.md"
           Copy-Item 'rust/COMPATIBILITY.md' "$root/COMPATIBILITY.md"
           $instructions = @'
           MCEdit2 Rust Windows x64 — experimental standalone preview
-          
+
           System: Windows 10/11 x64, supported graphics driver with wgpu.
           No Python, Qt, Java or installed Rust toolchain is needed to launch.
+          MCEdit2.exe embeds RustPython and starts itself as an isolated plugin host.
+          Plugin discovery never executes scripts;
+          enable a plugin and load its commands explicitly in Advanced tools.
           On some older systems the Microsoft Visual C++ runtime may be required.
-          
+
           1. Extract this entire ZIP into a directory you control.
           2. Double-click MCEdit2.exe to open the native graphical application.
           3. Extract your Minecraft Java save to a regular folder containing level.dat.
           4. Enter that world folder in the app and select Inspect world.
              Alternatively, invoke MCEdit2.exe -view "C:\Path\To\Minecraft\saves\World".
-          5. MCEdit2-CLI.exe --help prints command-line usage. The CLI can audit an
-             extracted Java world folder without opening the graphical interface.
-          
+          5. MCEdit2.exe --inspect "C:\Path\To\World" audits the world in the terminal.
+             MCEdit2.exe --help prints all graphical and command-line options.
+
           WARNING: This is a development preview of the Rust rewrite, not the
           finished MCEdit2. Keep a full separate backup of every Minecraft save.
           Opening an archive directly as a ZIP is not currently supported.
           Display/model parity with actual Minecraft, and third-party mods,
           are not guaranteed. Save modifications always require explicit preview
           and confirmation in the graphical tool.
-          
+
           Repository: https://github.com/yanxiatao/mcedit2
           Branch: rust-iced-rewrite
           Source commit: PLACEHOLDER

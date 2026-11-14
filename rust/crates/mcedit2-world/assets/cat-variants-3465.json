@@ -1,0 +1,17 @@
+{
+  "data_version": 3465,
+  "default": "minecraft:black",
+  "variants": {
+    "minecraft:all_black": "minecraft:entity/cat/all_black",
+    "minecraft:black": "minecraft:entity/cat/black",
+    "minecraft:british_shorthair": "minecraft:entity/cat/british_shorthair",
+    "minecraft:calico": "minecraft:entity/cat/calico",
+    "minecraft:jellie": "minecraft:entity/cat/jellie",
+    "minecraft:persian": "minecraft:entity/cat/persian",
+    "minecraft:ragdoll": "minecraft:entity/cat/ragdoll",
+    "minecraft:red": "minecraft:entity/cat/red",
+    "minecraft:siamese": "minecraft:entity/cat/siamese",
+    "minecraft:tabby": "minecraft:entity/cat/tabby",
+    "minecraft:white": "minecraft:entity/cat/white"
+  }
+}

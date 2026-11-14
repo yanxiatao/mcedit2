@@ -1,0 +1,20 @@
+{
+  "client_sha256": "56b71336d2b4fdffd197f56595b0da93e32a946f78f382a299b8f4b92758bb0f",
+  "omitted_signature_entries_in_analysis_copy": [
+    "META-INF/MOJANGCS.SF",
+    "META-INF/MOJANGCS.RSA"
+  ],
+  "all_other_members_identical": false,
+  "output_sha256": "7e77afbb50dd3cf671239c9a46982e0b3a1efeec085d93cf95fb000c7c637002",
+  "cpu_draw_adapters": [
+    {
+      "member": "fqi.class",
+      "original_sha256": "d210d25a7073cf9083b70897a4a6924aee06d340f95454a9e5fb05c7f5ac85b4",
+      "adapted_sha256": "79056704aa93c5081fd465cd6208d1e2e7d5ad279dc4c3e0a75e3b590719f300"
+    }
+  ],
+  "all_non_adapter_members_identical": true,
+  "adapter_source_sha256": "8d4da1cc6e5d61911a54c9710586a4a149334f6705f24624dfef99687775b9e6",
+  "catalog_sha256": "2d13bfaed8fdc8e7d5af62e6fb8f69328613375925a1e180d46ff2cac6c9249f",
+  "geometry_sha256": "1e7de8e011c1c0455e374590e45dc8664f6cbb367c6504968976c5691ab57f6e"
+}

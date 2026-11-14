@@ -1,0 +1,331 @@
+{
+  "version": "1.21.1",
+  "documents": [
+    {
+      "input": "{\"x\":1}",
+      "value": {
+        "x": 1
+      },
+      "accepted": true
+    },
+    {
+      "input": "{\"x\":1}r",
+      "value": {
+        "x": 1
+      },
+      "accepted": true
+    },
+    {
+      "input": "{} {}",
+      "value": {},
+      "accepted": true
+    },
+    {
+      "input": "{} /* unterminated",
+      "value": {},
+      "accepted": true
+    },
+    {
+      "input": "// head\n{a:\u0027value\u0027,}",
+      "accepted": false,
+      "error": "com.google.gson.JsonParseException: com.google.gson.stream.MalformedJsonException: Use JsonReader.setLenient(true) to accept malformed JSON at line 1 column 2 path $"
+    },
+    {
+      "input": "{a:1}",
+      "accepted": false,
+      "error": "com.google.gson.JsonParseException: com.google.gson.stream.MalformedJsonException: Use JsonReader.setLenient(true) to accept malformed JSON at line 1 column 3 path $."
+    },
+    {
+      "input": "{\"x\":}",
+      "accepted": false,
+      "error": "com.google.gson.JsonParseException: com.google.gson.stream.MalformedJsonException: Expected value at line 1 column 6 path $.x"
+    },
+    {
+      "input": "[]",
+      "accepted": false,
+      "error": "com.google.gson.JsonSyntaxException: Expected a com.google.gson.JsonObject but was com.google.gson.JsonArray; at path $"
+    },
+    {
+      "input": "null",
+      "accepted": false,
+      "error": "com.google.gson.JsonSyntaxException: Expected a com.google.gson.JsonObject but was com.google.gson.JsonNull; at path $"
+    },
+    {
+      "input": "{\"animation\":{\"frames\":[0,1]}}",
+      "value": {
+        "animation": {
+          "frames": [
+            0,
+            1
+          ]
+        }
+      },
+      "accepted": true
+    }
+  ],
+  "numbers": [
+    {
+      "input": "1.9",
+      "value": 1,
+      "accepted": true
+    },
+    {
+      "input": "-0.9",
+      "value": 0,
+      "accepted": true
+    },
+    {
+      "input": "-1.9",
+      "value": -1,
+      "accepted": true
+    },
+    {
+      "input": "2147483648",
+      "value": -2147483648,
+      "accepted": true
+    },
+    {
+      "input": "4294967297",
+      "value": 1,
+      "accepted": true
+    },
+    {
+      "input": "-4294967297",
+      "value": -1,
+      "accepted": true
+    },
+    {
+      "input": "1e32",
+      "value": 0,
+      "accepted": true
+    },
+    {
+      "input": "429496729700e-2",
+      "value": 1,
+      "accepted": true
+    },
+    {
+      "input": "1e-2147483648",
+      "accepted": false,
+      "error": "java.lang.NumberFormatException: Exponent overflow."
+    },
+    {
+      "input": "1e2147483647",
+      "value": 0,
+      "accepted": true
+    },
+    {
+      "input": "1e2147483648",
+      "value": 0,
+      "accepted": true
+    },
+    {
+      "input": "\"1\"",
+      "accepted": false,
+      "error": "com.google.gson.JsonSyntaxException: Expected reference to be a Int, was \"1\""
+    },
+    {
+      "input": "true",
+      "accepted": false,
+      "error": "com.google.gson.JsonSyntaxException: Expected reference to be a Int, was a boolean (true)"
+    },
+    {
+      "input": "null",
+      "accepted": false,
+      "error": "com.google.gson.JsonSyntaxException: Expected reference to be a Int, was null (json)"
+    }
+  ],
+  "animations": [
+    {
+      "input": "{}",
+      "width": 4,
+      "height": 4,
+      "frametime": 1,
+      "interpolate": false,
+      "frames": [],
+      "accepted": true
+    },
+    {
+      "input": "{\"frames\":[1]}",
+      "width": 4,
+      "height": 4,
+      "frametime": 1,
+      "interpolate": false,
+      "frames": [
+        [
+          1,
+          1
+        ]
+      ],
+      "accepted": true
+    },
+    {
+      "input": "{\"frames\":[-1,0,1]}",
+      "width": 4,
+      "height": 4,
+      "frametime": 1,
+      "interpolate": false,
+      "frames": [
+        [
+          -1,
+          1
+        ],
+        [
+          0,
+          1
+        ],
+        [
+          1,
+          1
+        ]
+      ],
+      "accepted": true
+    },
+    {
+      "input": "{\"frames\":[null,[],0.9,{\"index\":1.9}]} क",
+      "width": 4,
+      "height": 4,
+      "frametime": 1,
+      "interpolate": false,
+      "frames": [
+        [
+          0,
+          1
+        ],
+        [
+          1,
+          1
+        ]
+      ],
+      "accepted": true
+    },
+    {
+      "input": "{\"width\":-1,\"height\":1.9}",
+      "width": 4,
+      "height": 1,
+      "frametime": 1,
+      "interpolate": false,
+      "frames": [],
+      "accepted": true
+    },
+    {
+      "input": "{\"width\":4294967297,\"frames\":[4294967297]}",
+      "width": 1,
+      "height": 8,
+      "frametime": 1,
+      "interpolate": false,
+      "frames": [
+        [
+          1,
+          1
+        ]
+      ],
+      "accepted": true
+    },
+    {
+      "input": "{\"frames\":[{\"index\":-1}]}",
+      "accepted": false,
+      "error": "java.lang.IllegalArgumentException: Invalid frame index"
+    },
+    {
+      "input": "{\"frames\":[{\"index\":0,\"time\":0}]}",
+      "accepted": false,
+      "error": "java.lang.IllegalArgumentException: Invalid frame time"
+    },
+    {
+      "input": "{\"frametime\":0.9}",
+      "accepted": false,
+      "error": "java.lang.IllegalArgumentException: Invalid default frame time"
+    },
+    {
+      "input": "{\"interpolate\":[]}",
+      "accepted": false,
+      "error": "com.google.gson.JsonSyntaxException: Expected interpolate to be a Boolean, was an array ([])"
+    },
+    {
+      "input": "{\"interpolate\":\"true\"}",
+      "width": 4,
+      "height": 4,
+      "frametime": 1,
+      "interpolate": true,
+      "frames": [],
+      "accepted": true
+    },
+    {
+      "input": "{\"interpolate\":\"TRUE\"}",
+      "width": 4,
+      "height": 4,
+      "frametime": 1,
+      "interpolate": true,
+      "frames": [],
+      "accepted": true
+    },
+    {
+      "input": "{\"interpolate\":1}",
+      "width": 4,
+      "height": 4,
+      "frametime": 1,
+      "interpolate": false,
+      "frames": [],
+      "accepted": true
+    },
+    {
+      "input": "{\"frametime\":7,\"frames\":[1,{\"index\":0,\"time\":3}]}",
+      "width": 4,
+      "height": 4,
+      "frametime": 7,
+      "interpolate": false,
+      "frames": [
+        [
+          1,
+          7
+        ],
+        [
+          0,
+          3
+        ]
+      ],
+      "accepted": true
+    },
+    {
+      "input": "{\"frametime\":2147483647,\"frames\":[1,0]}",
+      "width": 4,
+      "height": 4,
+      "frametime": 2147483647,
+      "interpolate": false,
+      "frames": [
+        [
+          1,
+          2147483647
+        ],
+        [
+          0,
+          2147483647
+        ]
+      ],
+      "accepted": true
+    },
+    {
+      "input": "{\"frametime\":2.9,\"frames\":[-1,1,0]}",
+      "width": 4,
+      "height": 4,
+      "frametime": 2,
+      "interpolate": false,
+      "frames": [
+        [
+          -1,
+          2
+        ],
+        [
+          1,
+          2
+        ],
+        [
+          0,
+          2
+        ]
+      ],
+      "accepted": true
+    }
+  ]
+}

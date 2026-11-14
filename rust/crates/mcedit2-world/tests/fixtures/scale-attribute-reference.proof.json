@@ -1,0 +1,14 @@
+{
+  "client_sha256": "499f6897d1837516680f3114072d8106e11c9adcd933fe5cf051b551089b0c99",
+  "omitted_signature_entries_in_analysis_copy": [
+    "META-INF/MOJANGCS.SF",
+    "META-INF/MOJANGCS.RSA"
+  ],
+  "all_other_members_identical": true,
+  "output_sha256": "0f7be5e3571a5f073c1fa91d9c1a3b5dbf22c180064f53cb1a55163341ce46d3",
+  "client_sha1": "30c73b1c5da787909b2f73340419fdf13b9def88",
+  "java_source_sha256": "4fc9b3abcaecc78db3580b320031f5f99fde7b51fa62157590f4d026c8fa78ea",
+  "case_count": 6,
+  "executed": "官方注册 SCALE、AttributeInstance、持久修饰符、getValue、save 和 NbtIo 二进制输出；变更回调实际计数",
+  "limitations": "无实体、世界、装备动态修饰符或游戏客户端渲染。"
+}

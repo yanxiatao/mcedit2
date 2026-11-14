@@ -1,0 +1,21 @@
+{
+  "version": "1.20.1",
+  "client_sha256": "56b71336d2b4fdffd197f56595b0da93e32a946f78f382a299b8f4b92758bb0f",
+  "mappings_sha256": "67bfc33ef0c7103f002d6ac134f8eddd3d67e2ce45d266e83816d1a2e2c9b01d",
+  "entries_sha256": {
+    "eoh.class": "acf4b3ff6bbd3307ddd6db441e2ae7ce422fdab8bafdcbdebe94df5fbaf4e708",
+    "eoi.class": "b8a6275b8b3a59afd22fed4a3dc33e4f9108cead14a5d2096e7fed0754e508ab",
+    "eoj.class": "de9a3dc351fc905bc5cac02d53a9129bee7f1444b71e364bc6fafdf3ba354f06",
+    "eok.class": "fb2ea27e103c84fd57e58263f489d29395813fc5c3363e938b968b07d0460a23",
+    "eoe$a.class": "913c738fcaf9ce76ae353584c6cce33da9e5501cbeef9ed1be42917441423515",
+    "eoe.class": "2a7bfd41c46bf5510bb3aaffdd72656351e7cf5a83591bc702d98606cff94989",
+    "eog.class": "f39aacf79ded7d662d0250fbcfcd9e65cebfb888119b168efca90311bef250ac",
+    "eof.class": "625031671b9b6d3a9fa94f81bb3501e70abb141629826dfcebfb109cdde94e1f",
+    "eod.class": "792f95ecaee0398f065fb3b6fa0ed9dc799629eef4d3d8fd9a6694f3d4aa85d8",
+    "eod$d.class": "aeed34563ab2ee24e7179661ab37519279f1ea116c5f16f5e5e96d719bc07531",
+    "eod$b.class": "eaba639be5e776c152261cd2dc1527cae4b3a4eb8777d46e844e15c4b60ee827"
+  },
+  "extractor_sha256": "07ca1bf95674e2965916468f20f453082a28fa64b3e979ee3d180f5af966a9ff",
+  "output_sha256": "20794627a283c35c47155d11da03e63c038f9eadd6408fd36b0f4c6a5a4d3716",
+  "scope": "仅静态读取 class 常量构造数据流；不加载或执行客户端类，无编译或测试"
+}

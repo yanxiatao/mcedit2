@@ -1,0 +1,110 @@
+{
+  "minecraft:banner_black": {
+    "legacy_icon": 25,
+    "show_on_frame": true
+  },
+  "minecraft:banner_blue": {
+    "legacy_icon": 21,
+    "show_on_frame": true
+  },
+  "minecraft:banner_brown": {
+    "legacy_icon": 22,
+    "show_on_frame": true
+  },
+  "minecraft:banner_cyan": {
+    "legacy_icon": 19,
+    "show_on_frame": true
+  },
+  "minecraft:banner_gray": {
+    "legacy_icon": 17,
+    "show_on_frame": true
+  },
+  "minecraft:banner_green": {
+    "legacy_icon": 23,
+    "show_on_frame": true
+  },
+  "minecraft:banner_light_blue": {
+    "legacy_icon": 13,
+    "show_on_frame": true
+  },
+  "minecraft:banner_light_gray": {
+    "legacy_icon": 18,
+    "show_on_frame": true
+  },
+  "minecraft:banner_lime": {
+    "legacy_icon": 15,
+    "show_on_frame": true
+  },
+  "minecraft:banner_magenta": {
+    "legacy_icon": 12,
+    "show_on_frame": true
+  },
+  "minecraft:banner_orange": {
+    "legacy_icon": 11,
+    "show_on_frame": true
+  },
+  "minecraft:banner_pink": {
+    "legacy_icon": 16,
+    "show_on_frame": true
+  },
+  "minecraft:banner_purple": {
+    "legacy_icon": 20,
+    "show_on_frame": true
+  },
+  "minecraft:banner_red": {
+    "legacy_icon": 24,
+    "show_on_frame": true
+  },
+  "minecraft:banner_white": {
+    "legacy_icon": 10,
+    "show_on_frame": true
+  },
+  "minecraft:banner_yellow": {
+    "legacy_icon": 14,
+    "show_on_frame": true
+  },
+  "minecraft:blue_marker": {
+    "legacy_icon": 3,
+    "show_on_frame": false
+  },
+  "minecraft:frame": {
+    "legacy_icon": 1,
+    "show_on_frame": true
+  },
+  "minecraft:mansion": {
+    "legacy_icon": 8,
+    "show_on_frame": true
+  },
+  "minecraft:monument": {
+    "legacy_icon": 9,
+    "show_on_frame": true
+  },
+  "minecraft:player": {
+    "legacy_icon": 0,
+    "show_on_frame": false
+  },
+  "minecraft:player_off_limits": {
+    "legacy_icon": 7,
+    "show_on_frame": false
+  },
+  "minecraft:player_off_map": {
+    "legacy_icon": 6,
+    "show_on_frame": false
+  },
+  "minecraft:red_marker": {
+    "legacy_icon": 2,
+    "show_on_frame": false
+  },
+  "minecraft:red_x": {
+    "legacy_icon": 26,
+    "show_on_frame": true
+  },
+  "minecraft:target_point": {
+    "legacy_icon": 5,
+    "show_on_frame": true
+  },
+  "minecraft:target_x": {
+    "legacy_icon": 4,
+    "show_on_frame": true
+  }
+}

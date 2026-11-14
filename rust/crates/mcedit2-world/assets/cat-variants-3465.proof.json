@@ -1,0 +1,16 @@
+{
+  "version": "1.20.1",
+  "client_sha256": "56b71336d2b4fdffd197f56595b0da93e32a946f78f382a299b8f4b92758bb0f",
+  "mappings_sha256": "67bfc33ef0c7103f002d6ac134f8eddd3d67e2ce45d266e83816d1a2e2c9b01d",
+  "classes": {
+    "brp.class": "059dc72a36949cd408b1708f55ce8a5b4bef3288106ac6aaaeefba08f21b2592",
+    "bro.class": "9cc365c261da53a01e927b341ffa0e0c14dae25346d8674269e80acd3f68f2b6"
+  },
+  "disassembly_sha256": {
+    "brp": "debaa1906a6ced127e94ff0006011b222f725bdacc7e90cd053b84122329409a",
+    "bro": "2def0306299e0d940d898f47edc9fc00e4a2e242742e9c5572e91d336f6f8456"
+  },
+  "extractor_sha256": "f8368da2b38d1c39e42c7b48db715662ada0a843171708a5fcd39b39a7475674",
+  "output_sha256": "457dd5f7e4d184c9b8a81be8d8d6dc9f0743d52fbc4dc92bb287dab88845b200",
+  "scope": "只读取实际注册键、纹理构造和同步数据缺省键；没有编译或执行客户端"
+}

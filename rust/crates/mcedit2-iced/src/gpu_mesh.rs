@@ -8,6 +8,9 @@ use mcedit2_world::sections::State;
 /// properties can legitimately resolve to different original JSON geometry.
 /// Entries never outlive the corresponding immutable surface snapshot.
 pub(crate) type ModelCacheKey<'a> = (&'a str, &'a [(String, String)], u64);
+/// 面样式按完整方块状态、面方向、模型元素与加权变体缓存。
+type FaceStyleKey = (String, Vec<(String, String)>, u8, usize, u64);
+pub(crate) type FaceStyle = ([[f32; 2]; 4], AlphaMode, u32);
 pub(crate) fn model_cache_key(state: &State, variant: u64) -> ModelCacheKey<'_> {
     (state.name.as_str(), state.properties.as_slice(), variant)
 }
@@ -49,10 +52,12 @@ pub(crate) struct Vertex {
     pub mode: u32,
     /// Relative original-world vertex position; spectator mode only.
     pub xyz: [f32; 3],
-    /// The two camera modes share one wgpu pipeline.
+    /// 通用投影顶点的坐标通道；自由视角生产网格使用 WorldQuad 实例。
     pub world_mode: u32,
     /// Array layer in the multi-page resource-pack block atlas.
     pub atlas_page: u32,
+    /// 显式满亮，或携带通道存在位的原始光照编码。
+    pub light: u32,
 }
 impl Vertex {
     fn new(p: Point, depth: f32, c: Color, uv: [f32; 2], mode: AlphaMode) -> Self {
@@ -61,10 +66,11 @@ impl Vertex {
             depth,
             rgba: [c.r, c.g, c.b, c.a],
             uv,
-            mode: mode as u32,
+            mode: mode.gpu_bits(),
             xyz: [0.0; 3],
             world_mode: 0,
             atlas_page: 0,
+            light: crate::lighting::FULLBRIGHT,
         }
     }
 }
@@ -92,13 +98,13 @@ fn quad_uv(region: &AtlasUv) -> [[f32; 2]; 4] {
     ]
 }
 /// One GPU quad per projected original face; no scene-wide polygon cap.
-
+///
 /// The mesh worker can abandon obsolete camera views between individual
 /// source faces. Never return an incomplete mesh for caching or uploading.
 pub(crate) fn build_cancellable(
     view: &IsometricSurface,
     size: Size,
-    cancelled: &impl Fn() -> bool,
+    cancelled: &dyn Fn() -> bool,
 ) -> Option<Vec<Vertex>> {
     if cancelled() {
         return None;
@@ -109,65 +115,108 @@ pub(crate) fn build_cancellable(
     }
     let mut out = Vec::with_capacity(faces.len().saturating_mul(6));
     let atlas = view.texture_bank.as_ref().and_then(|bank| bank.atlas());
-    let mut style_cache: HashMap<
-        (String, Vec<(String, String)>, u8, usize, u64),
-        Option<([[f32; 2]; 4], AlphaMode, u32)>,
-    > = HashMap::new();
+    let mut style_cache: HashMap<FaceStyleKey, Option<FaceStyle>> = HashMap::new();
+    let mut fluid_materials = crate::fluid_material::Cache::new(view.texture_bank.as_deref());
+    let mut colors = view
+        .texture_bank
+        .as_ref()
+        .map(|bank| bank.tint_context(&view.surface.biomes));
     for face in faces.iter() {
         if cancelled() {
             return None;
         }
         let voxel = &view.surface.voxels[face.voxel_index];
+        if let Some(style) = face.static_style_in(view, colors.as_mut()) {
+            // 投影渲染器按六顶点源面划分材质页与上传段；后半退化，
+            // 不得把两个不同页的 OBJ 三角形合成一个材质批次。
+            for i in [0, 1, 2, 0, 2, 2] {
+                out.push(Vertex {
+                    xy: [face.corners[i].x, face.corners[i].y],
+                    depth: face.vertex_depths[i],
+                    rgba: style.rgba[i],
+                    uv: style.uv[i],
+                    mode: style.mode,
+                    xyz: [0.0; 3],
+                    world_mode: 0,
+                    atlas_page: style.page,
+                    light: crate::lighting::FULLBRIGHT,
+                });
+            }
+            continue;
+        }
+        let light = crate::lighting::FULLBRIGHT;
+        let state = face.state(voxel);
+        let display_state = view
+            .texture_bank
+            .as_ref()
+            .map_or(state, |b| b.render_state(state));
+        let display_kind = if face.fluid_layer {
+            mcedit2_world::surface::VoxelMaterial::Liquid
+        } else {
+            view.texture_bank
+                .as_ref()
+                .map_or(voxel.kind, |b| b.render_material(state, voxel.kind))
+        };
         let variant = if voxel.span > 1 {
             0
         } else {
             view.texture_bank
                 .as_ref()
-                .map_or(0, |bank| bank.model_variant_key(&voxel.state, face.pos))
+                .map_or(0, |bank| bank.model_variant_key(state, face.pos))
         };
-        let cache_key = (
-            voxel.state.name.clone(),
-            voxel.state.properties.clone(),
-            face.face as u8,
-            face.element_index,
-            variant,
-        );
-        let style = style_cache.entry(cache_key).or_insert_with(|| {
-            if view.show_textures {
-                view.texture_bank.as_ref().and_then(|bank| {
-                    bank.atlas_face_style_at(&voxel.state, face.face, face.element_index, face.pos)
-                })
+        let fluid_style = if view.show_textures && face.fluid_layer {
+            fluid_materials.style_in(voxel, state, face.face, colors.as_mut())
+        } else {
+            None
+        };
+        let style = if view.show_textures {
+            if voxel.span == 1 && display_kind == mcedit2_world::surface::VoxelMaterial::Liquid {
+                fluid_style.map(|style| style.face)
             } else {
-                None
+                let cache_key = (
+                    state.name.clone(),
+                    state.properties.clone(),
+                    face.face as u8,
+                    face.element_index,
+                    variant,
+                );
+                *style_cache.entry(cache_key).or_insert_with(|| {
+                    view.texture_bank.as_ref().and_then(|bank| {
+                        bank.atlas_face_style_at(state, face.face, face.element_index, face.pos)
+                    })
+                })
             }
-        });
+        } else {
+            None
+        };
         let texture = style.as_ref().map(|(uv, _, _)| *uv);
         let color = if texture.is_some() {
-            // Lighting remains a per-face multiplier. Transparency comes
-            // from the PNG's original alpha, not a CPU alpha threshold.
-            let shade = 1.0;
+            // 固定全亮，只乘材质 / 生物群系着色；透明度来自原始 PNG。
             let (_, alpha) = crate::textures::classify_block_alpha(
-                &voxel.state,
-                voxel.kind,
+                display_state,
+                display_kind,
                 style
                     .as_ref()
                     .map(|(_, a, _)| *a)
                     .unwrap_or(AlphaMode::Opaque),
             );
-            let tint = view
-                .texture_bank
-                .as_ref()
-                .map(|bank| {
-                    bank.face_tint_with_biome_at(
-                        &voxel.state,
-                        face.face,
-                        face.element_index,
-                        face.pos,
-                        voxel.biome.as_deref(),
-                    )
-                })
-                .unwrap_or([1.0; 3]);
-            Color::from_rgba(shade * tint[0], shade * tint[1], shade * tint[2], alpha)
+            let tint = if let Some(style) = fluid_style {
+                style.tint
+            } else {
+                colors
+                    .as_mut()
+                    .map(|colors| {
+                        colors.face(
+                            state,
+                            face.face,
+                            face.element_index,
+                            face.pos,
+                            voxel.biome.as_deref(),
+                        )
+                    })
+                    .unwrap_or([1.0; 3])
+            };
+            Color::from_rgba(tint[0], tint[1], tint[2], alpha)
         } else {
             face.color
         };
@@ -183,10 +232,60 @@ pub(crate) fn build_cancellable(
             .map(|(_, _, page)| *page)
             .or_else(|| atlas.map(|a| a.white.page))
             .unwrap_or(0);
-        mode = crate::textures::classify_block_alpha(&voxel.state, voxel.kind, mode).0;
+        mode = crate::textures::classify_block_alpha(display_state, display_kind, mode).0;
         if color.a < 0.999 {
             mode = AlphaMode::Blend;
         }
+        if view.show_textures {
+            if let Some((raw_uv, region, Some(sampler))) =
+                view.texture_bank.as_ref().and_then(|bank| {
+                    bank.atlas_repeating_face_at(state, face.face, face.element_index, face.pos)
+                })
+            {
+                let source_mode = style.as_ref().map_or(0, |(_, alpha, _)| alpha.gpu_bits());
+                let source = crate::world_mesh::WorldQuad {
+                    xyz: std::array::from_fn(|i| {
+                        [face.corners[i].x, face.corners[i].y, face.vertex_depths[i]]
+                    }),
+                    uv: raw_uv.map(|uv| uv.map(|value| value / 16.)),
+                    rgba: [[color.r, color.g, color.b, color.a]; 4],
+                    mode: mode.gpu_bits()
+                        | (source_mode
+                            & (crate::material_mode::SIMPLE_TEXTURE
+                                | crate::material_mode::NO_MIPMAP)),
+                    atlas_page: region.page,
+                    light,
+                };
+                if let Err(error) = crate::static_triangle_uv::bind_quad(
+                    source,
+                    &region,
+                    Some(sampler),
+                    view.texture_bank
+                        .as_deref()
+                        .and_then(|bank| bank.geometry_budget()),
+                    |piece| {
+                        for i in [0, 1, 2, 0, 2, 3] {
+                            out.push(Vertex {
+                                xy: [piece.xyz[i][0], piece.xyz[i][1]],
+                                depth: piece.xyz[i][2],
+                                rgba: piece.rgba[i],
+                                uv: piece.uv[i],
+                                mode: piece.mode,
+                                xyz: [0.; 3],
+                                world_mode: 0,
+                                atlas_page: piece.atlas_page,
+                                light: piece.light,
+                            });
+                        }
+                    },
+                ) {
+                    log::error!("[models] {} 的投影材质寻址失败：{error}", state.name);
+                    return None;
+                }
+                continue;
+            }
+        }
+        let start = out.len();
         quad(
             &mut out,
             face.corners,
@@ -196,13 +295,21 @@ pub(crate) fn build_cancellable(
             mode,
             page,
         );
+        for vertex in &mut out[start..] {
+            vertex.light = light;
+        }
     }
     (!cancelled()).then_some(out)
 }
 #[cfg(test)]
+pub(crate) fn run_test_category(category: crate::test_categories::Category) {
+    tests::run_test_category(category);
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
+
     fn source_face_quad_and_texture_uv_keep_alpha() {
         let mut vertices = Vec::new();
         let points = [
@@ -233,11 +340,12 @@ mod tests {
         assert_eq!(vertices[0].depth, 1.0);
         assert_eq!(vertices[0].atlas_page, 3);
         assert_eq!(vertices[2].depth, 3.0);
-        assert_eq!(vertices[0].mode, AlphaMode::Blend as u32);
-        assert_eq!(std::mem::size_of::<Vertex>(), 60);
+        assert_eq!(vertices[0].mode, AlphaMode::Blend.gpu_bits());
+        assert_eq!(std::mem::size_of::<Vertex>(), 64);
+        assert_eq!(vertices[0].light, crate::lighting::FULLBRIGHT);
         assert_eq!(vertices[0].world_mode, 0);
     }
-    #[test]
+
     fn borrowed_model_cache_keys_share_state_content_but_not_weighted_variants() {
         use std::collections::HashMap;
         let source = State {
@@ -260,23 +368,12 @@ mod tests {
         assert_eq!(cache.get(&model_cache_key(&other_orientation, 2)), None);
         assert_eq!(cache.len(), 1);
     }
-    #[test]
-    fn gpu_style_cache_distinguishes_model_element_and_face() {
-        let mut cache: HashMap<(String, Vec<(String, String)>, u8, usize), usize> = HashMap::new();
-        cache.insert(("test:machine".to_string(), vec![], 0u8, 0usize), 1usize);
-        cache.insert(("test:machine".to_string(), vec![], 0u8, 1usize), 2usize);
-        assert_eq!(cache.len(), 2);
-        assert_ne!(
-            cache.get(&("test:machine".into(), vec![], 0, 0)),
-            cache.get(&("test:machine".into(), vec![], 0, 1))
-        );
-    }
-    #[test]
-    fn gpu_quality_cycles_with_no_cpu_per_pixel_tessellation() {
-        assert_eq!(Quality::Fast.next(), Quality::Balanced);
-        assert_eq!(Quality::Balanced.next(), Quality::Detailed);
-        assert_eq!(Quality::Detailed.next(), Quality::Fast);
-        // Full mesh arrays are split at hardware buffer and draw-call limits
-        // in gpu_scene, rather than clipped by this builder.
+
+    #[cfg(test)]
+    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
+        if category == crate::test_categories::Category::Rendering {
+            source_face_quad_and_texture_uv_keep_alpha();
+            borrowed_model_cache_keys_share_state_content_but_not_weighted_variants();
+        }
     }
 }

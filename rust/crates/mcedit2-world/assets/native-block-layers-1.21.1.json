@@ -1,0 +1,530 @@
+{
+  "version": 3955,
+  "bindings": [
+    {
+      "model": {
+        "layer": "minecraft:bell#main",
+        "loader": "mcedit2:entity_layer",
+        "texture": "minecraft:entity/bell/bell_body"
+      },
+      "block": "minecraft:bell"
+    },
+    {
+      "block": "minecraft:lectern",
+      "when": {
+        "has_book": "true"
+      },
+      "model": {
+        "poses": {
+          "/left_lid": {
+            "rotation": [
+              0,
+              4.641592653589793,
+              0
+            ]
+          },
+          "/right_lid": {
+            "rotation": [
+              0,
+              -1.5,
+              0
+            ]
+          },
+          "/left_pages": {
+            "pivot": [
+              0.9974949866040544,
+              0,
+              0
+            ],
+            "rotation": [
+              0,
+              1.5,
+              0
+            ]
+          },
+          "/right_pages": {
+            "pivot": [
+              0.9974949866040544,
+              0,
+              0
+            ],
+            "rotation": [
+              0,
+              -1.5,
+              0
+            ]
+          },
+          "/flip_page1": {
+            "pivot": [
+              0.9974949866040544,
+              0,
+              0
+            ],
+            "rotation": [
+              0,
+              1.2,
+              0
+            ]
+          },
+          "/flip_page2": {
+            "pivot": [
+              0.9974949866040544,
+              0,
+              0
+            ],
+            "rotation": [
+              0,
+              -1.2,
+              0
+            ]
+          }
+        },
+        "layer_transform": {
+          "map": {
+            "north": [
+              [
+                0.38268343236508984,
+                -0.9238795325112867,
+                0,
+                0.6154849415639109
+              ],
+              [
+                0.9238795325112867,
+                0.38268343236508984,
+                0,
+                1.0146645709543638
+              ],
+              [
+                0,
+                0,
+                1,
+                0.5
+              ]
+            ],
+            "south": [
+              [
+                -0.38268343236508984,
+                0.9238795325112867,
+                -1.2246467991473532e-16,
+                0.38451505843608913
+              ],
+              [
+                0.9238795325112867,
+                0.38268343236508984,
+                0,
+                1.0146645709543638
+              ],
+              [
+                4.686520405326299e-17,
+                -1.1314261122877003e-16,
+                -1,
+                0.5
+              ]
+            ],
+            "west": [
+              [
+                -7.029780607989448e-17,
+                1.6971391684315505e-16,
+                1,
+                0.5
+              ],
+              [
+                0.9238795325112867,
+                0.38268343236508984,
+                0,
+                1.0146645709543638
+              ],
+              [
+                -0.38268343236508984,
+                0.9238795325112867,
+                -1.8369701987210297e-16,
+                0.38451505843608913
+              ]
+            ],
+            "east": [
+              [
+                2.3432602026631496e-17,
+                -5.657130561438501e-17,
+                -1,
+                0.5
+              ],
+              [
+                0.9238795325112867,
+                0.38268343236508984,
+                0,
+                1.0146645709543638
+              ],
+              [
+                0.38268343236508984,
+                -0.9238795325112867,
+                6.123233995736766e-17,
+                0.6154849415639109
+              ]
+            ]
+          },
+          "$state": "facing"
+        },
+        "layer": "minecraft:book#main",
+        "loader": "mcedit2:entity_layer",
+        "texture": "minecraft:entity/enchanting_table_book"
+      }
+    },
+    {
+      "model": {
+        "poses": {
+          "/left_lid": {
+            "rotation": [
+              0,
+              3.141592653589793,
+              0
+            ]
+          },
+          "/right_lid": {
+            "rotation": [
+              0,
+              0,
+              0
+            ]
+          },
+          "/left_pages": {
+            "pivot": [
+              0,
+              0,
+              0
+            ],
+            "rotation": [
+              0,
+              0,
+              0
+            ]
+          },
+          "/right_pages": {
+            "pivot": [
+              0,
+              0,
+              0
+            ],
+            "rotation": [
+              0,
+              0,
+              0
+            ]
+          },
+          "/flip_page1": {
+            "pivot": [
+              0,
+              0,
+              0
+            ],
+            "rotation": [
+              0,
+              0,
+              0
+            ]
+          },
+          "/flip_page2": {
+            "pivot": [
+              0,
+              0,
+              0
+            ],
+            "rotation": [
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        "layer_transform": [
+          [
+            0.17364817766693041,
+            -0.984807753012208,
+            0,
+            0.5
+          ],
+          [
+            0.984807753012208,
+            0.17364817766693041,
+            0,
+            0.85
+          ],
+          [
+            0,
+            0,
+            1,
+            0.5
+          ]
+        ],
+        "layer": "minecraft:book#main",
+        "loader": "mcedit2:entity_layer",
+        "texture": "minecraft:entity/enchanting_table_book"
+      },
+      "block": "minecraft:enchanting_table"
+    }
+  ],
+  "block_entities": [
+    {
+      "block": "minecraft:decorated_pot",
+      "stub": "decorated_pot",
+      "model": {
+        "loader": "neoforge:composite",
+        "block_entity": {
+          "mode": "replace",
+          "ids": [
+            "minecraft:decorated_pot"
+          ],
+          "data_versions": [
+            3955
+          ],
+          "source_fields": {
+            "sherds": {
+              "type": "list",
+              "optional": true,
+              "max_length": 4,
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "children": {
+          "base": {
+            "loader": "mcedit2:entity_layer",
+            "layer": "minecraft:decorated_pot_base#main",
+            "texture": "minecraft:entity/decorated_pot/decorated_pot_base",
+            "layer_transform": {
+              "origin": "center",
+              "rotation": {
+                "y": {
+                  "$state": "facing",
+                  "map": {
+                    "north": 0,
+                    "south": 180,
+                    "west": 90,
+                    "east": -90
+                  }
+                }
+              }
+            }
+          },
+          "back": {
+            "loader": "mcedit2:entity_layer",
+            "layer": "minecraft:decorated_pot_sides#main",
+            "texture": {
+              "$nbt": [
+                "sherds",
+                0
+              ],
+              "absent": "minecraft:brick",
+              "map": {
+                "minecraft:brick": "minecraft:entity/decorated_pot/decorated_pot_side",
+                "minecraft:angler_pottery_sherd": "minecraft:entity/decorated_pot/angler_pottery_pattern",
+                "minecraft:archer_pottery_sherd": "minecraft:entity/decorated_pot/archer_pottery_pattern",
+                "minecraft:arms_up_pottery_sherd": "minecraft:entity/decorated_pot/arms_up_pottery_pattern",
+                "minecraft:blade_pottery_sherd": "minecraft:entity/decorated_pot/blade_pottery_pattern",
+                "minecraft:brewer_pottery_sherd": "minecraft:entity/decorated_pot/brewer_pottery_pattern",
+                "minecraft:burn_pottery_sherd": "minecraft:entity/decorated_pot/burn_pottery_pattern",
+                "minecraft:danger_pottery_sherd": "minecraft:entity/decorated_pot/danger_pottery_pattern",
+                "minecraft:explorer_pottery_sherd": "minecraft:entity/decorated_pot/explorer_pottery_pattern",
+                "minecraft:flow_pottery_sherd": "minecraft:entity/decorated_pot/flow_pottery_pattern",
+                "minecraft:friend_pottery_sherd": "minecraft:entity/decorated_pot/friend_pottery_pattern",
+                "minecraft:guster_pottery_sherd": "minecraft:entity/decorated_pot/guster_pottery_pattern",
+                "minecraft:heart_pottery_sherd": "minecraft:entity/decorated_pot/heart_pottery_pattern",
+                "minecraft:heartbreak_pottery_sherd": "minecraft:entity/decorated_pot/heartbreak_pottery_pattern",
+                "minecraft:howl_pottery_sherd": "minecraft:entity/decorated_pot/howl_pottery_pattern",
+                "minecraft:miner_pottery_sherd": "minecraft:entity/decorated_pot/miner_pottery_pattern",
+                "minecraft:mourner_pottery_sherd": "minecraft:entity/decorated_pot/mourner_pottery_pattern",
+                "minecraft:plenty_pottery_sherd": "minecraft:entity/decorated_pot/plenty_pottery_pattern",
+                "minecraft:prize_pottery_sherd": "minecraft:entity/decorated_pot/prize_pottery_pattern",
+                "minecraft:scrape_pottery_sherd": "minecraft:entity/decorated_pot/scrape_pottery_pattern",
+                "minecraft:sheaf_pottery_sherd": "minecraft:entity/decorated_pot/sheaf_pottery_pattern",
+                "minecraft:shelter_pottery_sherd": "minecraft:entity/decorated_pot/shelter_pottery_pattern",
+                "minecraft:skull_pottery_sherd": "minecraft:entity/decorated_pot/skull_pottery_pattern",
+                "minecraft:snort_pottery_sherd": "minecraft:entity/decorated_pot/snort_pottery_pattern"
+              }
+            },
+            "layer_transform": {
+              "origin": "center",
+              "rotation": {
+                "y": {
+                  "$state": "facing",
+                  "map": {
+                    "north": 0,
+                    "south": 180,
+                    "west": 90,
+                    "east": -90
+                  }
+                }
+              }
+            },
+            "parts": [
+              "/back"
+            ]
+          },
+          "left": {
+            "loader": "mcedit2:entity_layer",
+            "layer": "minecraft:decorated_pot_sides#main",
+            "texture": {
+              "$nbt": [
+                "sherds",
+                1
+              ],
+              "absent": "minecraft:brick",
+              "map": {
+                "minecraft:brick": "minecraft:entity/decorated_pot/decorated_pot_side",
+                "minecraft:angler_pottery_sherd": "minecraft:entity/decorated_pot/angler_pottery_pattern",
+                "minecraft:archer_pottery_sherd": "minecraft:entity/decorated_pot/archer_pottery_pattern",
+                "minecraft:arms_up_pottery_sherd": "minecraft:entity/decorated_pot/arms_up_pottery_pattern",
+                "minecraft:blade_pottery_sherd": "minecraft:entity/decorated_pot/blade_pottery_pattern",
+                "minecraft:brewer_pottery_sherd": "minecraft:entity/decorated_pot/brewer_pottery_pattern",
+                "minecraft:burn_pottery_sherd": "minecraft:entity/decorated_pot/burn_pottery_pattern",
+                "minecraft:danger_pottery_sherd": "minecraft:entity/decorated_pot/danger_pottery_pattern",
+                "minecraft:explorer_pottery_sherd": "minecraft:entity/decorated_pot/explorer_pottery_pattern",
+                "minecraft:flow_pottery_sherd": "minecraft:entity/decorated_pot/flow_pottery_pattern",
+                "minecraft:friend_pottery_sherd": "minecraft:entity/decorated_pot/friend_pottery_pattern",
+                "minecraft:guster_pottery_sherd": "minecraft:entity/decorated_pot/guster_pottery_pattern",
+                "minecraft:heart_pottery_sherd": "minecraft:entity/decorated_pot/heart_pottery_pattern",
+                "minecraft:heartbreak_pottery_sherd": "minecraft:entity/decorated_pot/heartbreak_pottery_pattern",
+                "minecraft:howl_pottery_sherd": "minecraft:entity/decorated_pot/howl_pottery_pattern",
+                "minecraft:miner_pottery_sherd": "minecraft:entity/decorated_pot/miner_pottery_pattern",
+                "minecraft:mourner_pottery_sherd": "minecraft:entity/decorated_pot/mourner_pottery_pattern",
+                "minecraft:plenty_pottery_sherd": "minecraft:entity/decorated_pot/plenty_pottery_pattern",
+                "minecraft:prize_pottery_sherd": "minecraft:entity/decorated_pot/prize_pottery_pattern",
+                "minecraft:scrape_pottery_sherd": "minecraft:entity/decorated_pot/scrape_pottery_pattern",
+                "minecraft:sheaf_pottery_sherd": "minecraft:entity/decorated_pot/sheaf_pottery_pattern",
+                "minecraft:shelter_pottery_sherd": "minecraft:entity/decorated_pot/shelter_pottery_pattern",
+                "minecraft:skull_pottery_sherd": "minecraft:entity/decorated_pot/skull_pottery_pattern",
+                "minecraft:snort_pottery_sherd": "minecraft:entity/decorated_pot/snort_pottery_pattern"
+              }
+            },
+            "layer_transform": {
+              "origin": "center",
+              "rotation": {
+                "y": {
+                  "$state": "facing",
+                  "map": {
+                    "north": 0,
+                    "south": 180,
+                    "west": 90,
+                    "east": -90
+                  }
+                }
+              }
+            },
+            "parts": [
+              "/left"
+            ]
+          },
+          "right": {
+            "loader": "mcedit2:entity_layer",
+            "layer": "minecraft:decorated_pot_sides#main",
+            "texture": {
+              "$nbt": [
+                "sherds",
+                2
+              ],
+              "absent": "minecraft:brick",
+              "map": {
+                "minecraft:brick": "minecraft:entity/decorated_pot/decorated_pot_side",
+                "minecraft:angler_pottery_sherd": "minecraft:entity/decorated_pot/angler_pottery_pattern",
+                "minecraft:archer_pottery_sherd": "minecraft:entity/decorated_pot/archer_pottery_pattern",
+                "minecraft:arms_up_pottery_sherd": "minecraft:entity/decorated_pot/arms_up_pottery_pattern",
+                "minecraft:blade_pottery_sherd": "minecraft:entity/decorated_pot/blade_pottery_pattern",
+                "minecraft:brewer_pottery_sherd": "minecraft:entity/decorated_pot/brewer_pottery_pattern",
+                "minecraft:burn_pottery_sherd": "minecraft:entity/decorated_pot/burn_pottery_pattern",
+                "minecraft:danger_pottery_sherd": "minecraft:entity/decorated_pot/danger_pottery_pattern",
+                "minecraft:explorer_pottery_sherd": "minecraft:entity/decorated_pot/explorer_pottery_pattern",
+                "minecraft:flow_pottery_sherd": "minecraft:entity/decorated_pot/flow_pottery_pattern",
+                "minecraft:friend_pottery_sherd": "minecraft:entity/decorated_pot/friend_pottery_pattern",
+                "minecraft:guster_pottery_sherd": "minecraft:entity/decorated_pot/guster_pottery_pattern",
+                "minecraft:heart_pottery_sherd": "minecraft:entity/decorated_pot/heart_pottery_pattern",
+                "minecraft:heartbreak_pottery_sherd": "minecraft:entity/decorated_pot/heartbreak_pottery_pattern",
+                "minecraft:howl_pottery_sherd": "minecraft:entity/decorated_pot/howl_pottery_pattern",
+                "minecraft:miner_pottery_sherd": "minecraft:entity/decorated_pot/miner_pottery_pattern",
+                "minecraft:mourner_pottery_sherd": "minecraft:entity/decorated_pot/mourner_pottery_pattern",
+                "minecraft:plenty_pottery_sherd": "minecraft:entity/decorated_pot/plenty_pottery_pattern",
+                "minecraft:prize_pottery_sherd": "minecraft:entity/decorated_pot/prize_pottery_pattern",
+                "minecraft:scrape_pottery_sherd": "minecraft:entity/decorated_pot/scrape_pottery_pattern",
+                "minecraft:sheaf_pottery_sherd": "minecraft:entity/decorated_pot/sheaf_pottery_pattern",
+                "minecraft:shelter_pottery_sherd": "minecraft:entity/decorated_pot/shelter_pottery_pattern",
+                "minecraft:skull_pottery_sherd": "minecraft:entity/decorated_pot/skull_pottery_pattern",
+                "minecraft:snort_pottery_sherd": "minecraft:entity/decorated_pot/snort_pottery_pattern"
+              }
+            },
+            "layer_transform": {
+              "origin": "center",
+              "rotation": {
+                "y": {
+                  "$state": "facing",
+                  "map": {
+                    "north": 0,
+                    "south": 180,
+                    "west": 90,
+                    "east": -90
+                  }
+                }
+              }
+            },
+            "parts": [
+              "/right"
+            ]
+          },
+          "front": {
+            "loader": "mcedit2:entity_layer",
+            "layer": "minecraft:decorated_pot_sides#main",
+            "texture": {
+              "$nbt": [
+                "sherds",
+                3
+              ],
+              "absent": "minecraft:brick",
+              "map": {
+                "minecraft:brick": "minecraft:entity/decorated_pot/decorated_pot_side",
+                "minecraft:angler_pottery_sherd": "minecraft:entity/decorated_pot/angler_pottery_pattern",
+                "minecraft:archer_pottery_sherd": "minecraft:entity/decorated_pot/archer_pottery_pattern",
+                "minecraft:arms_up_pottery_sherd": "minecraft:entity/decorated_pot/arms_up_pottery_pattern",
+                "minecraft:blade_pottery_sherd": "minecraft:entity/decorated_pot/blade_pottery_pattern",
+                "minecraft:brewer_pottery_sherd": "minecraft:entity/decorated_pot/brewer_pottery_pattern",
+                "minecraft:burn_pottery_sherd": "minecraft:entity/decorated_pot/burn_pottery_pattern",
+                "minecraft:danger_pottery_sherd": "minecraft:entity/decorated_pot/danger_pottery_pattern",
+                "minecraft:explorer_pottery_sherd": "minecraft:entity/decorated_pot/explorer_pottery_pattern",
+                "minecraft:flow_pottery_sherd": "minecraft:entity/decorated_pot/flow_pottery_pattern",
+                "minecraft:friend_pottery_sherd": "minecraft:entity/decorated_pot/friend_pottery_pattern",
+                "minecraft:guster_pottery_sherd": "minecraft:entity/decorated_pot/guster_pottery_pattern",
+                "minecraft:heart_pottery_sherd": "minecraft:entity/decorated_pot/heart_pottery_pattern",
+                "minecraft:heartbreak_pottery_sherd": "minecraft:entity/decorated_pot/heartbreak_pottery_pattern",
+                "minecraft:howl_pottery_sherd": "minecraft:entity/decorated_pot/howl_pottery_pattern",
+                "minecraft:miner_pottery_sherd": "minecraft:entity/decorated_pot/miner_pottery_pattern",
+                "minecraft:mourner_pottery_sherd": "minecraft:entity/decorated_pot/mourner_pottery_pattern",
+                "minecraft:plenty_pottery_sherd": "minecraft:entity/decorated_pot/plenty_pottery_pattern",
+                "minecraft:prize_pottery_sherd": "minecraft:entity/decorated_pot/prize_pottery_pattern",
+                "minecraft:scrape_pottery_sherd": "minecraft:entity/decorated_pot/scrape_pottery_pattern",
+                "minecraft:sheaf_pottery_sherd": "minecraft:entity/decorated_pot/sheaf_pottery_pattern",
+                "minecraft:shelter_pottery_sherd": "minecraft:entity/decorated_pot/shelter_pottery_pattern",
+                "minecraft:skull_pottery_sherd": "minecraft:entity/decorated_pot/skull_pottery_pattern",
+                "minecraft:snort_pottery_sherd": "minecraft:entity/decorated_pot/snort_pottery_pattern"
+              }
+            },
+            "layer_transform": {
+              "origin": "center",
+              "rotation": {
+                "y": {
+                  "$state": "facing",
+                  "map": {
+                    "north": 0,
+                    "south": 180,
+                    "west": 90,
+                    "east": -90
+                  }
+                }
+              }
+            },
+            "parts": [
+              "/front"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

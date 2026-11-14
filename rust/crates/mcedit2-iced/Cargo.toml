@@ -2,21 +2,42 @@
 name = "mcedit2-iced"
 version = "0.1.0"
 edition.workspace = true
-rust-version.workspace = true
+rust-version = "1.93"
 license.workspace = true
 description = "Native Rust iced Minecraft world inspector and future editor"
 
 [dependencies]
-iced = { version = "0.14", features = ["canvas", "wgpu", "tokio"] }
-image = { version = "0.25", default-features = false, features = ["png"] }
+iced_wgpu = "0.14.0"
+sha2 = "0.10"
+md-5 = "0.10.6"
+ab_glyph = "0.2.32"
+serde = { version = "1", features = ["derive"] }
+iced = { version = "0.14", default-features = false, features = ["canvas", "wgpu", "tokio", "image-without-codecs", "advanced", "crisp", "web-colors", "thread-pool", "linux-theme-detection", "x11", "wayland"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "ico", "webp", "tiff"] }
 zip = { version = "2.4", default-features = false, features = ["deflate"] }
 serde_json = "1"
+regex-lite = "0.1.8"
+log = { version = "0.4", features = ["std"] }
 bytemuck = { version = "1.20", features = ["derive"] }
+ureq = { version = "3.4", default-features = true }
+base64 = "0.22"
+flate2 = "1.1"
+resvg = { version = "0.45.1", default-features = false, features = ["text", "system-fonts", "raster-images"] }
 mcedit2-world = { path = "../mcedit2-world" }
+mcedit2-plugins = { path = "../mcedit2-plugins" }
+mcedit2-python = { path = "../mcedit2-python" }
 
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
 sys-locale = "0.3"
+getrandom = "0.3.4"
+tokio = { version = "1.54.1", features = ["net", "io-util", "time"] }
 
 [[bin]]
 name = "mcedit2"
 path = "src/main.rs"
+
+[dev-dependencies]
+iced_runtime = "0.14.0"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Console", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }

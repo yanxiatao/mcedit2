@@ -1,0 +1,24 @@
+{
+  "client_sha1": "0c3ec587af28e5a785c0b4a7b8a30f9a8f78f838",
+  "baseline_catalog_sha256": "11e5e4b091cdb12eac1d169461c012e5ac7f20b8c225ac5027e832ab1bb4d750",
+  "layers": [
+    "minecraft:banner#main",
+    "minecraft:bed_foot#main",
+    "minecraft:bed_head#main",
+    "minecraft:chest#main",
+    "minecraft:conduit#shell",
+    "minecraft:creeper_head#main",
+    "minecraft:decorated_pot_base#main",
+    "minecraft:decorated_pot_sides#main",
+    "minecraft:dragon_skull#main",
+    "minecraft:piglin_head#main",
+    "minecraft:player_head#main",
+    "minecraft:shield#main",
+    "minecraft:shulker#main",
+    "minecraft:skeleton_skull#main",
+    "minecraft:wither_skeleton_skull#main",
+    "minecraft:zombie_head#main"
+  ],
+  "all_selected_layers_identical": true,
+  "source": "EntityLayerReference.java public ModelPart.visit / Cube.compile"
+}

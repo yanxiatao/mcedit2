@@ -1,0 +1,377 @@
+{
+  "source": "准确客户端 MemoryModuleType 静态注册与实际 codec 引用；未执行客户端",
+  "client_sha256": "499f6897d1837516680f3114072d8106e11c9adcd933fe5cf051b551089b0c99",
+  "owner": "ccs",
+  "javap_sha256": "12f6bce25d533a0c1a781ce17ebfe2f939b689c42b6f0f3da0f585c1326e959f",
+  "registrations": {
+    "minecraft:dummy": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:home": [
+      "jl.b:Lcom/mojang/serialization/Codec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:job_site": [
+      "jl.b:Lcom/mojang/serialization/Codec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:potential_job_site": [
+      "jl.b:Lcom/mojang/serialization/Codec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:meeting_point": [
+      "jl.b:Lcom/mojang/serialization/Codec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:secondary_job_site": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:mobs": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:visible_mobs": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:visible_villager_babies": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:nearest_players": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:nearest_visible_player": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:nearest_visible_targetable_player": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:walk_target": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:look_target": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:attack_target": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:attack_cooling_down": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:interaction_target": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:breed_target": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:ride_target": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:path": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:interactable_doors": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:doors_to_close": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:nearest_bed": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:hurt_by": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:hurt_by_entity": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:avoid_target": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:nearest_hostile": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:nearest_attackable": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:hiding_place": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:heard_bell_time": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:cant_reach_walk_target_since": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:golem_detected_recently": [
+      "com/mojang/serialization/Codec.BOOL:Lcom/mojang/serialization/codecs/PrimitiveCodec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:danger_detected_recently": [
+      "com/mojang/serialization/Codec.BOOL:Lcom/mojang/serialization/codecs/PrimitiveCodec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:last_slept": [
+      "com/mojang/serialization/Codec.LONG:Lcom/mojang/serialization/codecs/PrimitiveCodec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:last_woken": [
+      "com/mojang/serialization/Codec.LONG:Lcom/mojang/serialization/codecs/PrimitiveCodec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:last_worked_at_poi": [
+      "com/mojang/serialization/Codec.LONG:Lcom/mojang/serialization/codecs/PrimitiveCodec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:nearest_visible_adult": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:nearest_visible_wanted_item": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:nearest_visible_nemesis": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:play_dead_ticks": [
+      "com/mojang/serialization/Codec.INT:Lcom/mojang/serialization/codecs/PrimitiveCodec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:tempting_player": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:temptation_cooldown_ticks": [
+      "com/mojang/serialization/Codec.INT:Lcom/mojang/serialization/codecs/PrimitiveCodec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:gaze_cooldown_ticks": [
+      "com/mojang/serialization/Codec.INT:Lcom/mojang/serialization/codecs/PrimitiveCodec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:is_tempted": [
+      "com/mojang/serialization/Codec.BOOL:Lcom/mojang/serialization/codecs/PrimitiveCodec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:long_jump_cooling_down": [
+      "com/mojang/serialization/Codec.INT:Lcom/mojang/serialization/codecs/PrimitiveCodec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:long_jump_mid_jump": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:has_hunting_cooldown": [
+      "com/mojang/serialization/Codec.BOOL:Lcom/mojang/serialization/codecs/PrimitiveCodec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:ram_cooldown_ticks": [
+      "com/mojang/serialization/Codec.INT:Lcom/mojang/serialization/codecs/PrimitiveCodec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:ram_target": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:is_in_water": [
+      "azs.b:Lcom/mojang/serialization/Codec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:is_pregnant": [
+      "azs.b:Lcom/mojang/serialization/Codec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:is_panicking": [
+      "com/mojang/serialization/Codec.BOOL:Lcom/mojang/serialization/codecs/PrimitiveCodec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:unreachable_tongue_targets": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:angry_at": [
+      "kg.a:Lcom/mojang/serialization/Codec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:universal_anger": [
+      "com/mojang/serialization/Codec.BOOL:Lcom/mojang/serialization/codecs/PrimitiveCodec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:admiring_item": [
+      "com/mojang/serialization/Codec.BOOL:Lcom/mojang/serialization/codecs/PrimitiveCodec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:time_trying_to_reach_admire_item": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:disable_walk_to_admire_item": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:admiring_disabled": [
+      "com/mojang/serialization/Codec.BOOL:Lcom/mojang/serialization/codecs/PrimitiveCodec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:hunted_recently": [
+      "com/mojang/serialization/Codec.BOOL:Lcom/mojang/serialization/codecs/PrimitiveCodec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:celebrate_location": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:dancing": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:nearest_visible_huntable_hoglin": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:nearest_visible_baby_hoglin": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:nearest_targetable_player_not_wearing_gold": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:nearby_adult_piglins": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:nearest_visible_adult_piglins": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:nearest_visible_adult_hoglins": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:nearest_visible_adult_piglin": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:nearest_visible_zombified": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:visible_adult_piglin_count": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:visible_adult_hoglin_count": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:nearest_player_holding_wanted_item": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:ate_recently": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:nearest_repellent": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:pacified": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:roar_target": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:disturbance_location": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:recent_projectile": [
+      "azs.b:Lcom/mojang/serialization/Codec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:is_sniffing": [
+      "azs.b:Lcom/mojang/serialization/Codec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:is_emerging": [
+      "azs.b:Lcom/mojang/serialization/Codec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:roar_sound_delay": [
+      "azs.b:Lcom/mojang/serialization/Codec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:dig_cooldown": [
+      "azs.b:Lcom/mojang/serialization/Codec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:roar_sound_cooldown": [
+      "azs.b:Lcom/mojang/serialization/Codec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:sniff_cooldown": [
+      "azs.b:Lcom/mojang/serialization/Codec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:touch_cooldown": [
+      "azs.b:Lcom/mojang/serialization/Codec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:vibration_cooldown": [
+      "azs.b:Lcom/mojang/serialization/Codec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:sonic_boom_cooldown": [
+      "azs.b:Lcom/mojang/serialization/Codec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:sonic_boom_sound_cooldown": [
+      "azs.b:Lcom/mojang/serialization/Codec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:sonic_boom_sound_delay": [
+      "azs.b:Lcom/mojang/serialization/Codec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:liked_player": [
+      "kg.a:Lcom/mojang/serialization/Codec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:liked_noteblock": [
+      "jl.b:Lcom/mojang/serialization/Codec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:liked_noteblock_cooldown_ticks": [
+      "com/mojang/serialization/Codec.INT:Lcom/mojang/serialization/codecs/PrimitiveCodec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:item_pickup_cooldown_ticks": [
+      "com/mojang/serialization/Codec.INT:Lcom/mojang/serialization/codecs/PrimitiveCodec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:sniffer_explored_positions": [
+      "jl.b:Lcom/mojang/serialization/Codec;",
+      "com/mojang/serialization/Codec.list:(Lcom/mojang/serialization/Codec;)Lcom/mojang/serialization/Codec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:sniffer_sniffing_target": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:sniffer_digging": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:sniffer_happy": [
+      "a:(Ljava/lang/String;)Lccs;"
+    ],
+    "minecraft:breeze_jump_cooldown": [
+      "azs.b:Lcom/mojang/serialization/Codec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:breeze_shoot": [
+      "azs.b:Lcom/mojang/serialization/Codec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:breeze_shoot_charging": [
+      "azs.b:Lcom/mojang/serialization/Codec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:breeze_shoot_recover": [
+      "azs.b:Lcom/mojang/serialization/Codec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:breeze_shoot_cooldown": [
+      "azs.b:Lcom/mojang/serialization/Codec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:breeze_jump_inhaling": [
+      "azs.b:Lcom/mojang/serialization/Codec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:breeze_jump_target": [
+      "jd.a:Lcom/mojang/serialization/Codec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ],
+    "minecraft:breeze_leaving_water": [
+      "azs.b:Lcom/mojang/serialization/Codec;",
+      "a:(Ljava/lang/String;Lcom/mojang/serialization/Codec;)Lccs;"
+    ]
+  },
+  "output_sha256": "71bdf44a7a3cbd49752c2e9187dd640e8bb118eea0b90bed13ecfa256a4c343b"
+}

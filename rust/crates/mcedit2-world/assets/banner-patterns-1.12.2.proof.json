@@ -1,0 +1,20 @@
+{
+  "client_sha256": "8ada07da5ee77dad3527bd7278fbd05ee1fc8a597813b216a871a2d7d64cc64f",
+  "omitted_signature_entries_in_analysis_copy": [
+    "META-INF/MOJANGCS.SF",
+    "META-INF/MOJANGCS.RSA"
+  ],
+  "all_other_members_identical": true,
+  "output_sha256": "d1601cf1e7e114e6f42398961389acb3acae97fd60dd609d8184c70c20587f59",
+  "source_sha256": "5ff29009b749dbf525da0d1ff67025f5aba093e818ee673bc62446c1aaf649e6",
+  "extra_classpath": [
+    {
+      "name": "log4j-api-2.17.1.jar",
+      "sha256": "b0d8a4c8ab4fb8b1888d0095822703b0e6d4793c419550203da9e69196161de4"
+    },
+    {
+      "name": "log4j-core-2.17.1.jar",
+      "sha256": "c967f223487980b9364e94a7c7f9a8a01fd3ee7c19bdbf0b0f9f8cb8511f3d41"
+    }
+  ]
+}

@@ -41,53 +41,137 @@ pub struct RegionDryRun {
     pub timestamp: u32,
     pub regions: Vec<RegionDryRunEntry>,
 }
+/// 版本 1 报告枚举已有地形 Region 的完整文件镜像，不省略不在其格式内的写入。
 pub fn prepare(session: &Session, timestamp: u32) -> Result<RegionDryRun, WorldError> {
-    let world = session.original_world();
-    let proposals = if session.pending_be_chunks() > 0 {
-        session.preview_be_region_candidates(timestamp)?
-    } else {
-        session.prepare_native_region_candidates(timestamp)?
+    use crate::{
+        chunk_snapshot::{Role, Storage},
+        mixed_transaction::MixedCandidate,
     };
-    if proposals.is_empty() || proposals.len() > 256 {
-        return Err(refuse(
-            "Region manifest requires 1..256 existing region files",
-        ));
+    let world = session.original_world();
+    let proposals = session.prepare_mixed_region_candidates(timestamp)?;
+    let counts = session.scalar_checkpoint_counts()?;
+    let mut scalar_regions = std::collections::BTreeMap::new();
+    for (chunk, count) in counts {
+        *scalar_regions
+            .entry((chunk.0.div_euclid(32), chunk.1.div_euclid(32)))
+            .or_insert(0usize) += count;
+    }
+    let mut files = Vec::new();
+    for proposal in proposals {
+        match proposal {
+            MixedCandidate::Region {
+                dimension,
+                candidate,
+            } if dimension == session.dimension() => {
+                files.push(Planned {
+                    path: candidate.path,
+                    coords: (candidate.region_x, candidate.region_z),
+                    chunks: candidate.modified_chunks,
+                    source: Some(candidate.original_region_sha256),
+                    image: candidate.image,
+                });
+            }
+            MixedCandidate::ChunkSnapshot(candidate) => {
+                let Storage::Terrain { region, .. } = candidate.proof.storage else {
+                    return Err(refuse(
+                        "版本 1 Region 报告不能表示独立实体或 Alpha 文件，请使用完整保存预览",
+                    ));
+                };
+                if candidate.parts.len() != 1 || candidate.proof.dimension != session.dimension() {
+                    return Err(refuse(
+                        "版本 1 Region 报告不能省略 MCC 或其他维度文件，请使用完整保存预览",
+                    ));
+                }
+                let identity = candidate.proof.file(&Role::Main)?;
+                let source = identity.before.clone();
+                let chunks = candidate.chunk_count();
+                let part = candidate
+                    .parts
+                    .into_iter()
+                    .next()
+                    .expect("已核对唯一 Region 文件");
+                files.push(Planned {
+                    path: part.path,
+                    coords: region,
+                    chunks,
+                    source,
+                    image: part
+                        .image
+                        .ok_or_else(|| refuse("版本 1 Region 报告不能表示整文件删除"))?,
+                });
+            }
+            MixedCandidate::SharedChunk(candidate) => {
+                if !candidate.sidecars.is_empty() {
+                    return Err(refuse("版本 1 Region 报告不能省略 MCC，请使用完整保存预览"));
+                }
+                for part in candidate.parts {
+                    files.push(Planned {
+                        path: part.path,
+                        coords: part.coords,
+                        chunks: part.modified_chunks,
+                        source: part.original_sha,
+                        image: part.image,
+                    });
+                }
+            }
+            _ => {
+                return Err(refuse(
+                    "当前保存包含版本 1 Region 报告不能完整表示的文件，请使用完整保存预览",
+                ))
+            }
+        }
+    }
+    if files.is_empty() {
+        return Err(refuse("Region 报告需要已有地形文件"));
     }
     let root = fs::canonicalize(&world.root)?;
+    let dimension = world
+        .dimensions
+        .iter()
+        .find(|dimension| dimension.name == session.dimension())
+        .ok_or_else(|| refuse("Region 报告所属维度不存在"))?;
     let mut seen = BTreeSet::new();
-    let mut regions = Vec::with_capacity(proposals.len());
-    for proposed in proposals {
-        let info = fs::symlink_metadata(&proposed.path)?;
-        if !info.file_type().is_file() || info.file_type().is_symlink() {
-            return Err(refuse("Region dry run source is not a regular file"));
+    let mut regions = Vec::with_capacity(files.len());
+    for proposed in files {
+        let source = proposed
+            .source
+            .ok_or_else(|| refuse("版本 1 Region 报告不能表示原先缺失的文件"))?;
+        let extension = proposed
+            .path
+            .extension()
+            .and_then(|value| value.to_str())
+            .filter(|extension| matches!(*extension, "mca" | "mcr"))
+            .ok_or_else(|| refuse("版本 1 Region 报告不能表示 Alpha 或外置文件"))?;
+        let expected = dimension.region_dir.join(format!(
+            "r.{}.{}.{}",
+            proposed.coords.0, proposed.coords.1, extension
+        ));
+        if proposed.path != expected {
+            return Err(refuse("Region 报告不能混入实体 Region 或其他来源路径"));
         }
+        let bytes =
+            crate::history_source::read_file(&proposed.path, 256 * 1024 * 1024, |_| Ok(()))?
+                .ok_or_else(|| refuse("Region 报告的原始文件已消失"))?;
         let canonical = fs::canonicalize(&proposed.path)?;
-        if !canonical.starts_with(&root) || !seen.insert(canonical.clone()) {
-            return Err(refuse(
-                "Region manifest contains duplicate/external source files",
-            ));
-        }
-        let bytes = fs::read(&proposed.path)?;
-        if digest(&bytes) != proposed.original_region_sha256
-            || bytes.len() != proposed.original_bytes
-            || proposed.image.len() != proposed.planned_bytes
+        if !canonical.starts_with(&root)
+            || !seen.insert(canonical.clone())
+            || digest(&bytes) != source
         {
-            return Err(refuse(
-                "Region original source changed during batch preflight",
-            ));
+            return Err(refuse("Region 报告的来源变化、重复或越界"));
         }
         regions.push(RegionDryRunEntry {
             path: canonical.to_string_lossy().into_owned(),
-            region_x: proposed.region_x,
-            region_z: proposed.region_z,
-            edited_chunks: proposed.modified_chunks,
-            be_scalar_steps: proposed.be_replay.len(),
-            original_bytes: proposed.original_bytes,
-            planned_bytes: proposed.planned_bytes,
-            original_sha256: proposed.original_region_sha256,
+            region_x: proposed.coords.0,
+            region_z: proposed.coords.1,
+            edited_chunks: proposed.chunks,
+            be_scalar_steps: scalar_regions.get(&proposed.coords).copied().unwrap_or(0),
+            original_bytes: bytes.len(),
+            planned_bytes: proposed.image.len(),
+            original_sha256: source,
             planned_sha256: digest(&proposed.image),
         });
     }
+    regions.sort_by_key(|entry| (entry.region_x, entry.region_z));
     Ok(RegionDryRun {
         version: 1,
         original_world_root: root.to_string_lossy().into_owned(),
@@ -96,6 +180,13 @@ pub fn prepare(session: &Session, timestamp: u32) -> Result<RegionDryRun, WorldE
         timestamp,
         regions,
     })
+}
+struct Planned {
+    path: std::path::PathBuf,
+    coords: (i32, i32),
+    chunks: usize,
+    source: Option<String>,
+    image: Vec<u8>,
 }
 fn check_output_path(world: &WorldSummary, path: &Path) -> Result<(), WorldError> {
     if path
@@ -130,7 +221,11 @@ pub fn export(session: &Session, timestamp: u32, path: &Path) -> Result<usize, W
     let status = file.write_all(&bytes).and_then(|_| file.sync_all());
     drop(file);
     if let Err(e) = status {
-        let _ = fs::remove_file(path);
+        if let Err(cleanup) = fs::remove_file(path) {
+            return Err(refuse(format!(
+                "Region 报告写入失败：{e}；清理未完成文件失败：{cleanup}"
+            )));
+        }
         return Err(e.into());
     }
     Ok(report.regions.len())

@@ -5,25 +5,114 @@
 //! .mca/.mcr and modded chunk payloads are never altered by this crate.
 
 pub mod alpha;
+pub mod banner;
+pub mod be_editing;
 pub mod be_journal;
 pub mod be_operations;
+pub mod be_registry;
 pub mod be_snapshot;
+pub mod biome_editing;
+pub mod biome_source;
 pub mod block_lookup;
+pub mod cat_variant;
+mod chunk_completion;
+pub mod chunk_creation;
+pub mod chunk_display;
+pub mod chunk_lifecycle;
+pub mod chunk_metadata;
+pub mod chunk_postprocess;
+pub mod chunk_snapshot;
+pub mod chunk_surface;
+pub mod client_json;
 pub mod clipboard;
+pub mod command_visuals;
+pub mod container_data;
+pub mod cursor_info;
+pub mod diagnostics;
+pub mod edit_sources;
 pub mod editing;
+pub mod entity_attributes;
+pub mod entity_batch;
+mod entity_brain;
 pub mod entity_catalog;
+pub mod entity_display;
+pub mod entity_editing;
+pub mod entity_light;
+pub mod entity_model;
+pub mod entity_objects;
+pub mod entity_physics;
+pub mod entity_projectiles;
+mod entity_references;
+pub mod entity_sidecar;
+mod entity_spatial;
+pub mod entity_vehicles;
+pub mod entity_water;
 pub mod far_view;
+pub mod fish_variant;
+pub mod fluid_occlusion;
+pub mod fluid_surface;
+pub mod geometric_line;
+pub mod hanging;
+pub mod history;
+pub mod history_source;
+pub mod inspector_data;
+pub mod inventory;
+pub mod item_catalog;
+mod item_fire;
 pub mod launch;
+pub mod legacy_assets;
+pub mod legacy_lighting;
+pub mod lifecycle_history;
 mod lz4_block;
+pub mod map_catalog;
+pub mod map_data;
+pub mod map_decorations;
+pub mod map_edit;
+pub mod map_history;
+pub mod mixed_transaction;
+pub mod native_material;
+pub mod nbt_codec;
+pub mod nbt_document;
+mod nbt_envelope;
+pub mod nbt_file;
+pub mod nbt_query;
+mod nbt_utf;
+pub mod numeric_biome;
 mod oldnumeric;
+pub mod painting;
 mod patch;
+pub mod piston;
+pub mod player_catalog;
 pub mod plugins;
+pub mod region_external;
+pub mod region_history;
 pub mod region_plan;
 pub mod region_report;
 pub mod region_transaction;
+pub mod root_order;
+pub mod saved_light;
+pub mod scene_annotations;
+pub mod scheduled_ticks;
 pub mod schematic;
+pub mod section_visibility;
 pub mod sections;
+pub mod shared_chunk_save;
+pub mod shared_text;
+pub mod sign;
+pub mod skull;
+pub mod source_memory;
+pub mod spawn_rules;
+pub mod structure_context;
+pub mod structure_document;
+pub mod structure_exchange;
+pub mod structure_transform;
 pub mod surface;
+pub mod surface_visibility;
+mod transaction_artifacts;
+pub mod wolf_variant;
+pub mod world_data;
+pub mod world_list;
+mod world_write_lock;
 
 use flate2::read::{GzDecoder, ZlibDecoder};
 use std::fmt;
@@ -35,8 +124,6 @@ const SECTOR: u64 = 4096;
 const HEADER_BYTES: usize = 8192;
 const MAX_COMPRESSED: u64 = 32 * 1024 * 1024;
 const MAX_NBT: u64 = 64 * 1024 * 1024;
-const MAX_REGION_FILES: usize = 16_384;
-const MAX_DIMENSIONS: usize = 128;
 const MAX_NBT_DEPTH: u8 = 64;
 
 #[derive(Debug)]
@@ -208,7 +295,7 @@ impl RegionIndex {
             if length != 1 || slot.sector_count != 1 {
                 return Err(invalid("Malformed external Java chunk marker"));
             }
-            if !matches!(method, 1 | 2 | 3 | 4) {
+            if !matches!(method, 1..=4) {
                 return Err(invalid(format!(
                     "Unsupported external compression method {method}"
                 )));
@@ -255,17 +342,19 @@ impl RegionIndex {
                 )))
             }
         };
+        let (_, original) = nbt_envelope::NbtEnvelope::decode(original)?;
         Ok(Some(original))
     }
 }
 
 fn decompress_bounded(reader: impl Read) -> Result<Vec<u8>> {
+    decompress_limited(reader, MAX_NBT)
+}
+fn decompress_limited(reader: impl Read, limit: u64) -> Result<Vec<u8>> {
     let mut result = Vec::new();
-    reader.take(MAX_NBT + 1).read_to_end(&mut result)?;
-    if result.len() as u64 > MAX_NBT {
-        return Err(invalid(
-            "Decompressed original NBT exceeds 64 MiB safety budget",
-        ));
+    reader.take(limit + 1).read_to_end(&mut result)?;
+    if result.len() as u64 > limit {
+        return Err(invalid(format!("NBT 解压结果超过 {limit} 字节预算")));
     }
     Ok(result)
 }
@@ -282,6 +371,10 @@ pub struct DimensionSummary {
 #[derive(Debug, Clone)]
 pub struct WorldSummary {
     pub root: PathBuf,
+    /// 从真实 level.dat 及其启用文件数据包取得的不可变维度与 biome 来源。
+    pub world_data: std::sync::Arc<world_data::Snapshot>,
+    /// level.dat 的现代 WorldGenSettings.seed，或旧版 RandomSeed；缺失时保持未知。
+    pub seed: Option<i64>,
     pub level_name: Option<String>,
     pub data_version: Option<i32>,
     /// Original numeric level.dat Version: 19132 MCRegion, 19133 Anvil.
@@ -312,9 +405,8 @@ pub fn inspect_world(path: impl AsRef<Path>) -> Result<WorldSummary> {
     }
     // Legacy adapter accepts level.dat_old as an explicit backup fallback;
     // never generates, overwrites or silently converts either file.
-    let primary = root.join("level.dat");
-    let backup = root.join("level.dat_old");
-    let file = if primary.is_file() { primary } else { backup };
+    let file = world_list::metadata(&root)?
+        .ok_or_else(|| invalid("世界目录缺少 level.dat 或 level.dat_old"))?;
     let compressed = fs::read(&file)?;
     if compressed.len() as u64 > MAX_COMPRESSED {
         return Err(invalid(
@@ -323,22 +415,23 @@ pub fn inspect_world(path: impl AsRef<Path>) -> Result<WorldSummary> {
     }
     let expanded = decompress_bounded(GzDecoder::new(&compressed[..]))?;
     let metadata = nbt_metadata(&expanded)?;
-    let mut discovered: Vec<(String, PathBuf)> = Vec::new();
-    for (id, path) in [
-        ("minecraft:overworld", root.join("region")),
-        ("minecraft:the_nether", root.join("DIM-1/region")),
-        ("minecraft:the_end", root.join("DIM1/region")),
-    ] {
-        if path.is_dir() && !fs::symlink_metadata(&path)?.file_type().is_symlink() {
-            discovered.push((id.into(), path));
-        }
-    }
+    let mut discovered = discover_legacy_dimensions(&root)?;
     let custom = root.join("dimensions");
-    if custom.is_dir() && !fs::symlink_metadata(&custom)?.file_type().is_symlink() {
-        walk_custom_dimensions(&custom, &custom, 0, &mut discovered)?;
+    if real_directory(&custom)? {
+        let mut modern = Vec::new();
+        walk_custom_dimensions(&custom, &mut modern)?;
+        modern.sort_by(|a, b| a.0.cmp(&b.0));
+        discovered.extend(modern);
     }
-    if discovered.len() > MAX_DIMENSIONS {
-        return Err(invalid("World has too many discoverable dimensions"));
+    let mut identities = std::collections::BTreeMap::new();
+    for (name, path) in &discovered {
+        if let Some(previous) = identities.insert(name, path) {
+            return Err(invalid(format!(
+                "维度身份 {name} 同时指向两个来源：{}；{}",
+                previous.display(),
+                path.display()
+            )));
+        }
     }
 
     let mut dimensions = Vec::new();
@@ -354,11 +447,6 @@ pub fn inspect_world(path: impl AsRef<Path>) -> Result<WorldSummary> {
             if is_region_filename(&path) {
                 region_files.push(path);
             }
-        }
-        if region_files.len() > MAX_REGION_FILES {
-            return Err(invalid(format!(
-                "Dimension {name} exceeds region index limit"
-            )));
         }
         region_files.sort();
         let mut chunks = 0usize;
@@ -377,10 +465,11 @@ pub fn inspect_world(path: impl AsRef<Path>) -> Result<WorldSummary> {
             }
             match RegionIndex::open(filename) {
                 Ok(index) => chunks += index.chunk_count(),
-                Err(error) if warnings.len() < 128 => {
-                    warnings.push(format!("{}: {error}", filename.display()))
+                Err(error) => {
+                    let diagnostic = format!("{}: {error}", filename.display());
+                    log::warn!("[world-index] {diagnostic}");
+                    warnings.push(diagnostic);
                 }
-                Err(_) => {}
             }
         }
         dimensions.push(DimensionSummary {
@@ -400,7 +489,7 @@ pub fn inspect_world(path: impl AsRef<Path>) -> Result<WorldSummary> {
         let old = alpha::find_alpha_chunks(&root)?;
         if !old.is_empty() {
             dimensions.push(DimensionSummary {
-                name: "minecraft:overworld (Alpha chunk files)".into(),
+                name: alpha::DIMENSION_NAME.into(),
                 region_dir: root.clone(),
                 regions: 0,
                 chunks: old.len(),
@@ -409,8 +498,19 @@ pub fn inspect_world(path: impl AsRef<Path>) -> Result<WorldSummary> {
         }
     }
 
+    let world_data = world_data::Snapshot::from_level(
+        &entity_editing::DiskIdentitySource,
+        &root,
+        metadata.data_version,
+        &file,
+        &compressed,
+        &expanded,
+    )?;
+    warnings.extend(world_data.diagnostics.iter().cloned());
     Ok(WorldSummary {
         root,
+        world_data,
+        seed: metadata.seed.or(metadata.legacy_seed),
         level_name: metadata.name,
         data_version: metadata.data_version,
         storage_format: metadata.storage_format,
@@ -418,6 +518,80 @@ pub fn inspect_world(path: impl AsRef<Path>) -> Result<WorldSummary> {
         dimensions,
         warnings,
     })
+}
+
+/// 不跟随目录链接；缺失是没有该存储布局，其余 I/O 错误正常传递。
+fn real_directory(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(metadata.is_dir() && !metadata.file_type().is_symlink()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// 原 AnvilWorldFolder._findDimensions：世界根目录的一层子目录含 region 即为来源。
+/// ## 开头目录属于原版工作目录；不进入其中，也不递归普通子目录。
+fn discover_legacy_dimensions(root: &Path) -> Result<Vec<(String, PathBuf)>> {
+    let mut standard = std::collections::BTreeMap::new();
+    let overworld = root.join("region");
+    if real_directory(&overworld)? {
+        standard.insert("minecraft:overworld", overworld);
+    }
+    let mut custom = Vec::new();
+    for item in fs::read_dir(root)? {
+        let item = item?;
+        if !item.file_type()?.is_dir() {
+            continue;
+        }
+        let filename = item.file_name();
+        if filename.to_str().is_some_and(|name| name.starts_with("##")) {
+            continue;
+        }
+        let directory = item.path();
+        let region = directory.join("region");
+        if !real_directory(&region)? {
+            continue;
+        }
+        let name = filename.to_str().ok_or_else(|| {
+            invalid(format!(
+                "旧式维度目录名称不是 UTF-8：{}",
+                directory.display()
+            ))
+        })?;
+        match name {
+            "DIM-1" => {
+                standard.insert("minecraft:the_nether", region);
+            }
+            "DIM1" => {
+                standard.insert("minecraft:the_end", region);
+            }
+            _ => {
+                // 数字目录保留已有玩家 Int Dimension 的显式 legacy:n 身份。
+                // 非标准拼写和任意命名目录使用真实原名，不猜成现代资源 ID。
+                let number = name
+                    .strip_prefix("DIM")
+                    .and_then(|id| id.parse::<i32>().ok());
+                let identity = match number {
+                    Some(id) if name == format!("DIM{id}") => format!("legacy:{id}"),
+                    _ => name.to_owned(),
+                };
+                custom.push((identity, region));
+            }
+        }
+    }
+    custom.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut found = Vec::with_capacity(standard.len() + custom.len());
+    for id in [
+        "minecraft:overworld",
+        "minecraft:the_nether",
+        "minecraft:the_end",
+    ] {
+        if let Some(path) = standard.remove(id) {
+            found.push((id.to_owned(), path));
+        }
+    }
+    found.extend(custom);
+    Ok(found)
 }
 
 fn is_region_filename(path: &Path) -> bool {
@@ -429,7 +603,7 @@ fn is_region_filename(path: &Path) -> bool {
         return false;
     }
     for _ in 0..2 {
-        if !matches!(parts.next().and_then(|p| p.parse::<i32>().ok()), Some(_)) {
+        if parts.next().and_then(|p| p.parse::<i32>().ok()).is_none() {
             return false;
         }
     }
@@ -438,37 +612,29 @@ fn is_region_filename(path: &Path) -> bool {
 
 /// Custom modern Java dimensions: dimensions/namespace/name[/nested]/region.
 /// Never follow links, traverse the world root, or inspect arbitrary folders.
-fn walk_custom_dimensions(
-    base: &Path,
-    current: &Path,
-    depth: u8,
-    result: &mut Vec<(String, PathBuf)>,
-) -> Result<()> {
-    if depth >= 8 {
-        return Ok(());
-    }
-    for item in fs::read_dir(current)? {
-        let item = item?;
-        if !item.file_type()?.is_dir() {
-            continue;
-        }
-        let path = item.path();
-        if path.file_name().and_then(|s| s.to_str()) == Some("region") {
-            let rel = current
-                .strip_prefix(base)
-                .map_err(|_| invalid("Custom dimension directory escaped root"))?;
-            let mut parts = rel.components().map(|c| c.as_os_str().to_string_lossy());
-            if let Some(namespace) = parts.next() {
-                let kind: Vec<_> = parts.map(|s| s.to_string()).collect();
-                if !kind.is_empty() {
-                    if result.len() >= MAX_DIMENSIONS {
-                        return Err(invalid("Custom dimension safety limit exceeded"));
-                    }
-                    result.push((format!("{namespace}:{}", kind.join("/")), path));
-                }
+fn walk_custom_dimensions(base: &Path, result: &mut Vec<(String, PathBuf)>) -> Result<()> {
+    let mut pending = vec![base.to_path_buf()];
+    while let Some(current) = pending.pop() {
+        for item in fs::read_dir(&current)? {
+            let item = item?;
+            if !item.file_type()?.is_dir() {
+                continue;
             }
-        } else {
-            walk_custom_dimensions(base, &path, depth + 1, result)?;
+            let path = item.path();
+            if path.file_name().and_then(|s| s.to_str()) == Some("region") {
+                let rel = current
+                    .strip_prefix(base)
+                    .map_err(|_| invalid("Custom dimension directory escaped root"))?;
+                let mut parts = rel.components().map(|c| c.as_os_str().to_string_lossy());
+                if let Some(namespace) = parts.next() {
+                    let kind: Vec<_> = parts.map(|s| s.to_string()).collect();
+                    if !kind.is_empty() {
+                        result.push((format!("{namespace}:{}", kind.join("/")), path));
+                    }
+                }
+            } else {
+                pending.push(path);
+            }
         }
     }
     Ok(())
@@ -476,6 +642,8 @@ fn walk_custom_dimensions(
 
 #[derive(Default)]
 struct Metadata {
+    seed: Option<i64>,
+    legacy_seed: Option<i64>,
     data_version: Option<i32>,
     storage_format: Option<i32>,
     version_name: Option<String>,
@@ -510,7 +678,7 @@ impl<'a> NbtReader<'a> {
     }
     fn string(&mut self) -> Result<String> {
         let count = self.u16()? as usize;
-        Ok(String::from_utf8_lossy(self.next(count)?).to_string())
+        crate::nbt_utf::decode(self.next(count)?)
     }
     fn skip(&mut self, size: usize) -> Result<()> {
         self.next(size)?;
@@ -578,6 +746,26 @@ impl<'a> NbtReader<'a> {
             }
         }
     }
+    fn worldgen_metadata(&mut self, depth: u8, meta: &mut Metadata) -> Result<()> {
+        if depth > MAX_NBT_DEPTH {
+            return Err(invalid("NBT WorldGenSettings depth exceeded"));
+        }
+        loop {
+            let tag = self.u8()?;
+            if tag == 0 {
+                return Ok(());
+            }
+            let key = self.string()?;
+            if key == "seed" {
+                if tag != 4 {
+                    return Err(invalid("WorldGenSettings.seed 必须为 Long"));
+                }
+                meta.seed = Some(i64::from_be_bytes(self.next(8)?.try_into().unwrap()));
+            } else {
+                self.payload(tag, depth + 1)?;
+            }
+        }
+    }
     fn compound(&mut self, depth: u8, data: bool, meta: &mut Metadata) -> Result<()> {
         if depth > MAX_NBT_DEPTH {
             return Err(invalid("NBT nesting exceeds 64"));
@@ -589,6 +777,13 @@ impl<'a> NbtReader<'a> {
             }
             let name = self.string()?;
             match (data, name.as_str(), tag) {
+                (true, "WorldGenSettings", 10) => self.worldgen_metadata(depth + 1, meta)?,
+                (true, "RandomSeed", 4) => {
+                    meta.legacy_seed = Some(i64::from_be_bytes(self.next(8)?.try_into().unwrap()));
+                }
+                (true, "WorldGenSettings", _) | (true, "RandomSeed", _) => {
+                    return Err(invalid("level.dat 世界种子容器或数值类型无效"));
+                }
                 (true, "DataVersion", 3) => {
                     meta.data_version = Some(self.i32()?);
                 }
@@ -624,6 +819,68 @@ fn nbt_metadata(input: &[u8]) -> Result<Metadata> {
         return Err(invalid("level.dat has trailing unrecognized NBT bytes"));
     }
     Ok(meta)
+}
+
+/// Original MCEdit2 positional arguments can point to a containing folder,
+/// level.dat or level.dat_old. Unsupported schematics and non-Java files are
+/// rejected rather than pretending they were opened successfully.
+pub fn inspect_input(path: impl AsRef<Path>) -> Result<WorldSummary> {
+    let path = path.as_ref();
+    match path.file_name() {
+        Some(name)
+            if (name == std::ffi::OsStr::new("level.dat")
+                || name == std::ffi::OsStr::new("level.dat_old"))
+                && path.is_file() =>
+        {
+            inspect_world(
+                path.parent()
+                    .ok_or_else(|| invalid("World metadata file has no parent directory"))?,
+            )
+        }
+        _ => inspect_world(path),
+    }
+}
+
+/// Future snapshot DataVersions are not inferred from numeric proximity.
+/// The current known public snapshot is 26.4 Snapshot 5, DataVersion 5125.
+/// A matching chunk tag schema can be read, but that does not authorize
+/// writes until all related entities/BEs/biomes/region storage are validated.
+pub fn compatibility_label(summary: &WorldSummary) -> &'static str {
+    match summary.data_version {
+        Some(5125) => "26.4 Snapshot 5: experimental READ ONLY",
+        Some(5023) => "26.3 release: experimental READ ONLY",
+        Some(v) if v > 5125 => "future or unknown snapshot: inspect-only, no writes",
+        Some(v) if v >= 2844 => "modern Java 1.18+ format",
+        Some(v) if v >= 1451 => "named Java block states",
+        Some(_) => "numeric Java Anvil",
+        None if summary.storage_format == Some(19132) => "original MCRegion format 19132",
+        None if summary.storage_format == Some(19133) => "original numeric Anvil format 19133",
+        None => "legacy Java world without DataVersion",
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn run_test_category(category: crate::test_categories::Category) {
+    client_json::run_test_category(category);
+    world_data::run_test_category(category);
+    scene_annotations::run_test_category(category);
+    entity_model::run_test_category(category);
+    tests::run_test_category(category);
+    alpha::run_test_category(category);
+    block_lookup::run_test_category(category);
+    chunk_surface::run_test_category(category);
+    clipboard::run_test_category(category);
+    structure_transform::run_test_category(category);
+    far_view::run_test_category(category);
+    launch::run_test_category(category);
+    lz4_block::run_test_category(category);
+    nbt_envelope::run_test_category(category);
+    oldnumeric::run_test_category(category);
+    region_plan::run_test_category(category);
+    region_transaction::run_test_category(category);
+    schematic::run_test_category(category);
+    sections::run_test_category(category);
+    surface::run_test_category(category);
 }
 
 #[cfg(test)]
@@ -690,13 +947,13 @@ mod tests {
         fs::write(temp.0.join("region/r.0.0.mca"), region).unwrap();
         chunk
     }
-    #[test]
+
     fn nbt_metadata_preserves_actual_version_and_name() {
         let metadata = nbt_metadata(&example_nbt()).unwrap();
         assert_eq!(metadata.data_version, Some(3955));
         assert_eq!(metadata.name.as_deref(), Some("Native Rust Test"));
     }
-    #[test]
+
     fn nbt_rejects_truncated_and_unknown_tag_types() {
         let mut original = example_nbt();
         original.pop();
@@ -704,7 +961,7 @@ mod tests {
         let invalid = tag(10, "", &[99, 0, 0, 0]);
         assert!(nbt_metadata(&invalid).is_err());
     }
-    #[test]
+
     fn original_region_index_and_exact_zlib_nbt_are_read_only() {
         let temp = Fixture::new();
         let chunk = write_fixture_world(&temp);
@@ -723,8 +980,20 @@ mod tests {
         assert_eq!(world.dimensions[0].name, "minecraft:overworld");
         assert!(world.warnings.is_empty());
         assert_eq!(fs::read(source).unwrap(), before);
+        for i in 0..130 {
+            fs::create_dir_all(temp.0.join(format!("dimensions/test/d{i}/region"))).unwrap();
+        }
+        let nested = "deep/a/b/c/d/e/f/g/h/i/j";
+        fs::create_dir_all(temp.0.join(format!("dimensions/test/{nested}/region"))).unwrap();
+        let world = inspect_world(&temp.0).unwrap();
+        assert_eq!(world.dimensions.len(), 132);
+        assert!(world
+            .dimensions
+            .iter()
+            .any(|d| d.name == format!("test:{nested}")));
+        assert_eq!(world.total_chunks(), 1);
     }
-    #[test]
+
     fn truncated_region_is_skipped_with_warning_not_a_generated_chunk() {
         let temp = Fixture::new();
         write_fixture_world(&temp);
@@ -735,8 +1004,15 @@ mod tests {
         assert_eq!(world.total_chunks(), 1);
         assert_eq!(world.warnings.len(), 1);
         assert!(RegionIndex::open(bad).is_err());
+        for i in 2..132 {
+            fs::write(temp.0.join(format!("region/r.{i}.0.mca")), [1, 2, 3]).unwrap();
+        }
+        let world = inspect_world(&temp.0).unwrap();
+        assert_eq!(world.total_regions(), 132);
+        assert_eq!(world.total_chunks(), 1);
+        assert_eq!(world.warnings.len(), 131);
     }
-    #[test]
+
     fn invalid_or_out_of_bounds_sector_is_never_read() {
         let temp = Fixture::new();
         write_fixture_world(&temp);
@@ -746,7 +1022,7 @@ mod tests {
         fs::write(&path, raw).unwrap();
         assert!(RegionIndex::open(path).is_err());
     }
-    #[test]
+
     fn overlapping_original_region_slots_are_rejected_before_rendering() {
         let temp = Fixture::new();
         write_fixture_world(&temp);
@@ -775,7 +1051,7 @@ mod tests {
         assert_eq!(safe.slot(1, 0).unwrap().start_sector, 3);
         assert_eq!(fs::read(&path).unwrap(), partial);
     }
-    #[test]
+
     fn original_region_method_four_decodes_inline_and_external_lz4() {
         let temp = Fixture::new();
         let raw = write_fixture_world(&temp);
@@ -821,7 +1097,7 @@ mod tests {
         assert_eq!(fs::read(&sidecar).unwrap(), stream);
         assert_eq!(fs::read(&path).unwrap(), bytes);
     }
-    #[test]
+
     fn java_external_mcc_is_read_only_and_rejects_bad_marker() {
         let temp = Fixture::new();
         let original = write_fixture_world(&temp);
@@ -859,7 +1135,7 @@ mod tests {
             .read_chunk_at(0, 0)
             .is_err());
     }
-    #[test]
+
     fn negative_external_mcc_coordinates_are_not_local_slot_names() {
         let temp = Fixture::new();
         let region = temp.0.join("region/r.-1.0.mca");
@@ -876,53 +1152,40 @@ mod tests {
         assert_eq!(index.read_chunk_at(-1, 7).unwrap().unwrap(), payload);
         assert!(index.read_chunk_at(31, 7).is_err());
     }
-    #[test]
+
     fn region_filename_accepts_negative_positions_and_refuses_suspicious_extensions() {
         assert!(is_region_filename(Path::new("r.-1.3.mcr")));
         assert!(is_region_filename(Path::new("r.12.-9.mca")));
         assert!(!is_region_filename(Path::new("r.0.0.mca.tmp")));
         assert!(!is_region_filename(Path::new("notes.mca")));
     }
-}
 
-/// Original MCEdit2 positional arguments can point to a containing folder,
-/// level.dat or level.dat_old. Unsupported schematics and non-Java files are
-/// rejected rather than pretending they were opened successfully.
-pub fn inspect_input(path: impl AsRef<Path>) -> Result<WorldSummary> {
-    let path = path.as_ref();
-    match path.file_name() {
-        Some(name)
-            if (name == std::ffi::OsStr::new("level.dat")
-                || name == std::ffi::OsStr::new("level.dat_old"))
-                && path.is_file() =>
-        {
-            inspect_world(
-                path.parent()
-                    .ok_or_else(|| invalid("World metadata file has no parent directory"))?,
-            )
+    #[cfg(test)]
+    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
+        if category == crate::test_categories::Category::Formats {
+            nbt_metadata_preserves_actual_version_and_name();
+            nbt_rejects_truncated_and_unknown_tag_types();
+            original_region_index_and_exact_zlib_nbt_are_read_only();
+            truncated_region_is_skipped_with_warning_not_a_generated_chunk();
+            invalid_or_out_of_bounds_sector_is_never_read();
+            overlapping_original_region_slots_are_rejected_before_rendering();
+            original_region_method_four_decodes_inline_and_external_lz4();
+            java_external_mcc_is_read_only_and_rejects_bad_marker();
+            negative_external_mcc_coordinates_are_not_local_slot_names();
+            region_filename_accepts_negative_positions_and_refuses_suspicious_extensions();
         }
-        _ => inspect_world(path),
     }
 }
 
-/// Future snapshot DataVersions are not inferred from numeric proximity.
-/// The current known public snapshot is 26.4 Snapshot 5, DataVersion 5125.
-/// A matching chunk tag schema can be read, but that does not authorize
-/// writes until all related entities/BEs/biomes/region storage are validated.
-pub fn compatibility_label(summary: &WorldSummary) -> &'static str {
-    match summary.data_version {
-        Some(5125) => "26.4 Snapshot 5: experimental READ ONLY",
-        Some(5023) => "26.3 release: experimental READ ONLY",
-        Some(v) if v > 5125 => "future or unknown snapshot: inspect-only, no writes",
-        Some(v) if v >= 2844 => "modern Java 1.18+: inspect-only, no writes",
-        Some(v) if v >= 1451 => "named Java block states: inspect-only, no writes",
-        Some(_) => "numeric Java Anvil: inspect-only, no writes",
-        None if summary.storage_format == Some(19132) => {
-            "original MCRegion format 19132: inspect-only, no writes"
-        }
-        None if summary.storage_format == Some(19133) => {
-            "original numeric Anvil format 19133: inspect-only, no writes"
-        }
-        None => "legacy Java world without DataVersion: inspect-only, no writes",
-    }
-}
+#[cfg(test)]
+mod test_categories;
+
+pub mod entity_name;
+
+pub mod entity_animation;
+pub mod entity_equipment;
+pub mod entity_zombification;
+pub mod piglin_appearance;
+
+pub mod armor_trim;
+mod registry_tags;

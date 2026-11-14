@@ -1,0 +1,82 @@
+{
+  "client_sha256": "8ada07da5ee77dad3527bd7278fbd05ee1fc8a597813b216a871a2d7d64cc64f",
+  "omitted_signature_entries_in_analysis_copy": [
+    "META-INF/MOJANGCS.SF",
+    "META-INF/MOJANGCS.RSA"
+  ],
+  "all_other_members_identical": false,
+  "output_sha256": "6fbd51f7b27887f6bc95225e0fcb7c4b41149a772f73d0a6f23d69a02336ecbb",
+  "cpu_draw_adapters": [
+    {
+      "member": "bul.class",
+      "original_sha256": "0d2e0652e8ade49769e21436c0637ebffc39f466769d80c6e7c269cb34ce45b1",
+      "adapted_sha256": "c8fe04ef1441d62c2da8b26a043cd0d002790abe60fb32112b44c1867aed5f11"
+    }
+  ],
+  "all_non_adapter_members_identical": true,
+  "matrix_library_sha256": "034456b132a336b72757325bb7aaf99e075681ee5650d2bea21717bd485de42f",
+  "reference_sha256": "0e52d29d5f7fe06ac961a8dc3fab55307746ae551c7782c8f2a58b705b655679",
+  "metadata": {
+    "minecraft:armor_stand#main": {
+      "texture_width": 64,
+      "texture_height": 64
+    },
+    "minecraft:cow#main": {
+      "texture_width": 64,
+      "texture_height": 32
+    },
+    "minecraft:creeper#main": {
+      "texture_width": 64,
+      "texture_height": 32
+    },
+    "minecraft:pig#main": {
+      "texture_width": 64,
+      "texture_height": 32
+    },
+    "minecraft:pig#saddle": {
+      "texture_width": 64,
+      "texture_height": 32
+    },
+    "minecraft:player#main": {
+      "texture_width": 64,
+      "texture_height": 64
+    },
+    "minecraft:player_slim#main": {
+      "texture_width": 64,
+      "texture_height": 64
+    },
+    "minecraft:sheep#fur": {
+      "texture_width": 64,
+      "texture_height": 32
+    },
+    "minecraft:sheep#main": {
+      "texture_width": 64,
+      "texture_height": 32
+    },
+    "minecraft:shulker#main": {
+      "texture_width": 64,
+      "texture_height": 64
+    },
+    "minecraft:skeleton#main": {
+      "texture_width": 64,
+      "texture_height": 32
+    },
+    "minecraft:spider#main": {
+      "texture_width": 64,
+      "texture_height": 32
+    },
+    "minecraft:villager#main": {
+      "texture_width": 64,
+      "texture_height": 32
+    },
+    "minecraft:zombie#main": {
+      "texture_width": 64,
+      "texture_height": 64
+    },
+    "minecraft:zombie_pigman#main": {
+      "texture_width": 64,
+      "texture_height": 64
+    }
+  },
+  "adapter_scope": "bul.a(BufferBuilder) GPU 提交改为读取完整四角及 UV 并重置缓冲；ModelBox、TexturedQuad、所有模型和构造器未改动"
+}

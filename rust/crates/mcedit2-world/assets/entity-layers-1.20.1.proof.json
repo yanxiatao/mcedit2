@@ -1,0 +1,16 @@
+{
+  "client_sha256": "56b71336d2b4fdffd197f56595b0da93e32a946f78f382a299b8f4b92758bb0f",
+  "omitted_signature_entries_in_analysis_copy": [
+    "META-INF/MOJANGCS.SF",
+    "META-INF/MOJANGCS.RSA"
+  ],
+  "all_other_members_identical": true,
+  "output_sha256": "1f1dfc1208f218c5ca66027db98353e5e64cbc79b3a403d7ffdc193e3f21e127",
+  "shared_catalog_sha256": "11e5e4b091cdb12eac1d169461c012e5ac7f20b8c225ac5027e832ab1bb4d750",
+  "shared_reference_sha256": "baead8419e2ee8c1ad201d4d0724f5367570f7b78d484ee32467cb0bdcca9da9",
+  "shared_layers": 200,
+  "shared_reference_layers": 200,
+  "catalog_sha256": "9bf168abcf47c84fe08ca3d59f3d4a4013c1167646e70ba34012b3d84c680544",
+  "reference_sha256": "13f86c5771f5193bac0f90d982c553a7bdb774b9f8fdbcf106403183e54c7dd7",
+  "layers": 204
+}

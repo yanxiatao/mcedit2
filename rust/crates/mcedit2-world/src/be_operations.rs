@@ -48,24 +48,16 @@ pub fn read_batch(
         || batch.dimension != dimension
         || batch.data_version != world.data_version
         || batch.operations.is_empty()
-        || batch.operations.len() > 24
     {
         return Err(refuse(
             "BE operation file identity or operation count invalid",
         ));
     }
-    if batch
-        .operations
-        .iter()
-        .any(|x| x.field.len() > 128 || x.value.len() > 4096)
-    {
-        return Err(refuse("BE operation field/value exceeds scalar budget"));
-    }
     Ok(batch)
 }
 fn apply_on_clone(source: &Session, operations: &[BeOperation]) -> Result<Session, WorldError> {
-    if operations.is_empty() || operations.len() > 24 {
-        return Err(refuse("BE scalar batch must contain 1..24 operations"));
+    if operations.is_empty() {
+        return Err(refuse("BE scalar batch requires operations"));
     }
     let mut staged = source.clone();
     for step in operations {

@@ -33,6 +33,29 @@ impl Box3 {
             max: to.map(|v| v / 16.0 - 0.5),
         })
     }
+    /// Java 的 from/to 是有向端点，刷怪笼等模型用反向轴生成内侧面。
+    /// 保留端点顺序和面 UV，不能排序后当成普通外侧方块。
+    pub fn from_model_units_directed(from: [f32; 3], to: [f32; 3]) -> Option<Self> {
+        if (0..3).all(|i| from[i] < to[i]) {
+            return Self::from_model_units(from, to);
+        }
+        if (0..3).any(|i| {
+            !from[i].is_finite()
+                || !to[i].is_finite()
+                || !(-16.0..=32.0).contains(&from[i])
+                || !(-16.0..=32.0).contains(&to[i])
+                || from[i] == to[i]
+        }) {
+            return None;
+        }
+        Some(Self {
+            min: from.map(|v| v / 16.0 - 0.5),
+            max: to.map(|v| v / 16.0 - 0.5),
+        })
+    }
+    fn ordered(&self) -> bool {
+        (0..3).all(|i| self.min[i] <= self.max[i])
+    }
     /// Java allows a model element to be a zero-thickness quad (saplings,
     /// crossed flowers, tall grass). Exactly one axis may collapse; the
     /// resource JSON still must explicitly declare its visible faces.
@@ -41,9 +64,8 @@ impl Box3 {
         for axis in 0..3 {
             if !from[axis].is_finite()
                 || !to[axis].is_finite()
-                || from[axis] < -16.0
-                || to[axis] > 32.0
-                || from[axis] > to[axis]
+                || !(-16.0..=32.0).contains(&from[axis])
+                || !(-16.0..=32.0).contains(&to[axis])
             {
                 return None;
             }
@@ -75,7 +97,7 @@ impl Box3 {
                 if i & 4 == 0 { self.min[2] } else { self.max[2] },
             ];
             for _ in 0..x.rem_euclid(360) / 90 {
-                p = [p[0], -p[2], p[1]];
+                p = [p[0], p[2], -p[1]];
             }
             for _ in 0..y.rem_euclid(360) / 90 {
                 p = [-p[2], p[1], p[0]];
@@ -137,6 +159,7 @@ pub(crate) struct ElementRotation {
 }
 #[derive(Clone, Debug)]
 pub(crate) struct Part {
+    pub root: Option<crate::root_transform::Affine>,
     pub bounds: Box3,
     pub rotation: Option<ElementRotation>,
     pub variant_x: i32,
@@ -145,6 +168,7 @@ pub(crate) struct Part {
 impl Part {
     pub fn cube(bounds: Box3) -> Self {
         Self {
+            root: None,
             bounds,
             rotation: None,
             variant_x: 0,
@@ -162,8 +186,8 @@ impl Part {
     fn transform(&self, mut p: [f32; 3], direction: bool) -> [f32; 3] {
         if let Some(rot) = &self.rotation {
             if !direction {
-                for i in 0..3 {
-                    p[i] -= rot.origin[i];
+                for (coordinate, origin) in p.iter_mut().zip(rot.origin) {
+                    *coordinate -= origin;
                 }
             }
             if rot.rescale {
@@ -178,13 +202,20 @@ impl Part {
             }
             p = Self::rotate_local(p, rot.axis, rot.angle_degrees);
             if !direction {
-                for i in 0..3 {
-                    p[i] += rot.origin[i];
+                for (coordinate, origin) in p.iter_mut().zip(rot.origin) {
+                    *coordinate += origin;
                 }
             }
         }
+        if let Some(root) = self.root {
+            p = if direction {
+                root.normal(p)
+            } else {
+                root.point(p)
+            };
+        }
         for _ in 0..self.variant_x.rem_euclid(360) / 90 {
-            p = [p[0], -p[2], p[1]];
+            p = [p[0], p[2], -p[1]];
         }
         for _ in 0..self.variant_y.rem_euclid(360) / 90 {
             p = [-p[2], p[1], p[0]];
@@ -195,7 +226,7 @@ impl Part {
         self.transform(local, false)
     }
     pub fn face_vertices(&self, corners: [[f32; 3]; 4]) -> [[f32; 3]; 4] {
-        corners.map(|p| {
+        let mut corners = corners.map(|p| {
             self.point([
                 if p[0] > 0.0 {
                     self.bounds.max[0]
@@ -213,24 +244,44 @@ impl Part {
                     self.bounds.min[2]
                 },
             ])
-        })
+        });
+        if self.root.is_some_and(|root| root.determinant() < 0.) {
+            corners.swap(1, 3);
+        }
+        corners
     }
     pub fn normal(&self, face_normal: (i32, i32, i32)) -> [f32; 3] {
+        // 反向端点改变实际顶点绕序；法向取两个切线轴符号的乘积。
+        // 根矩阵的反射另有绕序修正，不能混同这两种语义。
+        let signs: [f32; 3] = std::array::from_fn(|i| {
+            if self.bounds.min[i] > self.bounds.max[i] {
+                -1.
+            } else {
+                1.
+            }
+        });
         self.transform(
             [
-                face_normal.0 as f32,
-                face_normal.1 as f32,
-                face_normal.2 as f32,
+                face_normal.0 as f32 * signs[1] * signs[2],
+                face_normal.1 as f32 * signs[0] * signs[2],
+                face_normal.2 as f32 * signs[0] * signs[1],
             ],
             true,
         )
     }
     pub fn boundary(&self, axis: usize, positive: bool) -> bool {
-        self.rotation.is_none() && self.bounds.face_on_boundary(axis, positive)
+        self.rotation.is_none()
+            && self.root.is_none()
+            && self.bounds.ordered()
+            && self.bounds.face_on_boundary(axis, positive)
     }
     pub fn occluded_by(&self, other: &Self, axis: usize, positive: bool) -> bool {
         self.rotation.is_none()
             && other.rotation.is_none()
+            && self.bounds.ordered()
+            && other.bounds.ordered()
+            && self.root.is_none()
+            && other.root.is_none()
             && self.variant_x == other.variant_x
             && self.variant_y == other.variant_y
             && self.bounds.occluded_by(&other.bounds, axis, positive)
@@ -249,7 +300,7 @@ fn property<'a>(state: &'a State, key: &str) -> Option<&'a str> {
 /// This is an intentionally static, level-correct approximation; flowing
 /// surface corner interpolation requires the exact neighboring source states.
 pub(crate) fn fluid_part(state: &State, same_fluid_above: bool) -> Option<Part> {
-    if !matches!(state.name.as_str(), "minecraft:water" | "minecraft:lava") {
+    if !mcedit2_world::fluid_surface::is_named_fluid(state) {
         return None;
     }
     let level = property(state, "level")
@@ -275,8 +326,7 @@ pub(crate) fn fluid_part(state: &State, same_fluid_above: bool) -> Option<Part> 
 /// Source-backed horizon skirts for sampled LOD terrain. A side is drawn
 /// only where BOTH neighboring column heights were actually read. It is an
 /// approximate visual interpolation, never an editor- or picking-quality mesh.
-/// Adjacent tiles can have different 4/8/16-block sampling spans; split each
-/// shared edge into four-block strips before querying verified neighbors.
+/// Adjacent LOD tiles meet in two-block strips, the finest sampled stride.
 pub(crate) struct DistantElevation<'a> {
     samples: HashMap<(i32, i32, u8), &'a SurfaceVoxel>,
     /// Verified original solid ground tops within the exact vertical slice.
@@ -294,9 +344,9 @@ impl<'a> DistantElevation<'a> {
         F: Fn() -> I,
         I: Iterator<Item = &'a SurfaceVoxel>,
     {
-        let samples = source()
-            .filter(|v| matches!(v.span, 4 | 8 | 16))
-            .fold(HashMap::new(), |mut result, v| {
+        let samples = source().filter(|v| matches!(v.span, 2 | 4 | 8 | 16)).fold(
+            HashMap::new(),
+            |mut result, v| {
                 // Transparent tree crowns and glass are not solid cliffs.
                 // Prefer a verified solid underlay, but keep the observed
                 // upper fluid as the water surface where present.
@@ -314,52 +364,65 @@ impl<'a> DistantElevation<'a> {
                     })
                     .or_insert(v);
                 result
-            });
+            },
+        );
         let exact_ground = source()
-            .filter(|v|v.span==1 && v.kind==VoxelMaterial::Solid
-                && v.faces & mcedit2_world::surface::FACE_TOP != 0
-                && v.y < y_max)
-            .fold(HashMap::new(),|mut index,voxel|{
-                index.entry((voxel.x,voxel.z))
-                    .and_modify(|old:&mut &'a SurfaceVoxel|{
-                        if voxel.y>old.y{*old=voxel;}
-                    }).or_insert(voxel);
+            .filter(|v| {
+                v.span == 1
+                    && v.kind == VoxelMaterial::Solid
+                    && v.faces & mcedit2_world::surface::FACE_TOP != 0
+                    && v.y < y_max
+            })
+            .fold(HashMap::new(), |mut index, voxel| {
+                index
+                    .entry((voxel.x, voxel.z))
+                    .and_modify(|old: &mut &'a SurfaceVoxel| {
+                        if voxel.y > old.y {
+                            *old = voxel;
+                        }
+                    })
+                    .or_insert(voxel);
                 index
             });
-        Self{samples,exact_ground}
-    }
-    /// A four-block LOD boundary can connect to exact geometry only when
-    /// every original column in that strip has an equal visible solid top.
-    fn exact_edge_top(&self,face:crate::isometric::Face,x:i32,z:i32)->Option<f32>{
-        use crate::isometric::Face;
-        let mut top:Option<i32>=None;
-        for step in 0..4_i32{
-            let (sx,sz)=match face{
-                Face::PosX|Face::NegX=>(x,z.checked_add(step)?),
-                Face::PosZ|Face::NegZ=>(x.checked_add(step)?,z),
-                _=>return None,
-            };
-            let voxel=self.exact_ground.get(&(sx,sz))?;
-            if top.is_some_and(|height|height!=voxel.y){return None;}
-            top=Some(voxel.y);
+        Self {
+            samples,
+            exact_ground,
         }
-        Some(top? as f32+0.5)
+    }
+    /// A two-block LOD boundary can connect to exact geometry only when
+    /// every original column in that strip has an equal visible solid top.
+    fn exact_edge_top(&self, face: crate::isometric::Face, x: i32, z: i32) -> Option<f32> {
+        use crate::isometric::Face;
+        let mut top: Option<i32> = None;
+        for step in 0..2_i32 {
+            let (sx, sz) = match face {
+                Face::PosX | Face::NegX => (x, z.checked_add(step)?),
+                Face::PosZ | Face::NegZ => (x.checked_add(step)?, z),
+                _ => return None,
+            };
+            let voxel = self.exact_ground.get(&(sx, sz))?;
+            if top.is_some_and(|height| height != voxel.y) {
+                return None;
+            }
+            top = Some(voxel.y);
+        }
+        Some(top? as f32 + 0.5)
     }
     fn covering(&self, x: i32, z: i32) -> Option<&'a SurfaceVoxel> {
-        [4_u8, 8, 16].into_iter().find_map(|span| {
+        [2_u8, 4, 8, 16].into_iter().find_map(|span| {
             let s = span as i32;
             let x0 = x.div_euclid(s).checked_mul(s)?;
             let z0 = z.div_euclid(s).checked_mul(s)?;
             self.samples.get(&(x0, z0, span)).copied()
         })
     }
-    /// One vertical rectangle per four-block contact segment. Unknown
+    /// One vertical rectangle per two-block contact segment. Unknown
     /// neighbors, exact source cells and equal/higher surfaces omit the wall.
     /// All coordinates are relative to the current sampled block center;
     /// Y is deliberately NOT multiplied by horizontal tile span.
     pub fn walls(&self, voxel: &SurfaceVoxel) -> Vec<(crate::isometric::Face, Part)> {
         use crate::isometric::Face;
-        if !matches!(voxel.span, 4 | 8 | 16)
+        if !matches!(voxel.span, 2 | 4 | 8 | 16)
             || matches!(
                 voxel.kind,
                 VoxelMaterial::Transparent | VoxelMaterial::Foliage
@@ -376,69 +439,87 @@ impl<'a> DistantElevation<'a> {
         let span = voxel.span as i32;
         let top = sampled_top(voxel);
         let mut result = Vec::new();
-        for (face,dx,dz) in [
-            (Face::PosX,1_i64,0_i64),(Face::NegX,-1,0),
-            (Face::PosZ,0,1),(Face::NegZ,0,-1)
-        ]{
-            let mut strips=Vec::with_capacity((span/4) as usize);
-            for step in (0..span).step_by(4){
-                let (px,pz)=match face{
-                    Face::PosX=>(voxel.x as i64+span as i64,voxel.z as i64+step as i64+2),
-                    Face::NegX=>(voxel.x as i64-1,voxel.z as i64+step as i64+2),
-                    Face::PosZ=>(voxel.x as i64+step as i64+2,voxel.z as i64+span as i64),
-                    Face::NegZ=>(voxel.x as i64+step as i64+2,voxel.z as i64-1),
-                    _=>unreachable!()
+        for (face, dx, dz) in [
+            (Face::PosX, 1_i64, 0_i64),
+            (Face::NegX, -1, 0),
+            (Face::PosZ, 0, 1),
+            (Face::NegZ, 0, -1),
+        ] {
+            let mut strips = Vec::with_capacity((span / 2) as usize);
+            for step in (0..span).step_by(2) {
+                let (px, pz) = match face {
+                    Face::PosX => (
+                        voxel.x as i64 + span as i64,
+                        voxel.z as i64 + step as i64 + 1,
+                    ),
+                    Face::NegX => (voxel.x as i64 - 1, voxel.z as i64 + step as i64 + 1),
+                    Face::PosZ => (
+                        voxel.x as i64 + step as i64 + 1,
+                        voxel.z as i64 + span as i64,
+                    ),
+                    Face::NegZ => (voxel.x as i64 + step as i64 + 1, voxel.z as i64 - 1),
+                    _ => unreachable!(),
                 };
-                let edge_height=match(i32::try_from(px),i32::try_from(pz)){
-                    (Ok(px),Ok(pz))=>{
-                        let lod=self.covering(px,pz).and_then(|neighbor|{
-                            let touch=match face{
-                                Face::PosX=>neighbor.x as i64==voxel.x as i64+span as i64,
-                                Face::NegX=>neighbor.x as i64+neighbor.span as i64==voxel.x as i64,
-                                Face::PosZ=>neighbor.z as i64==voxel.z as i64+span as i64,
-                                Face::NegZ=>neighbor.z as i64+neighbor.span as i64==voxel.z as i64,
-                                _=>false,
+                let edge_height = match (i32::try_from(px), i32::try_from(pz)) {
+                    (Ok(px), Ok(pz)) => {
+                        let lod = self.covering(px, pz).and_then(|neighbor| {
+                            let touch = match face {
+                                Face::PosX => neighbor.x as i64 == voxel.x as i64 + span as i64,
+                                Face::NegX => {
+                                    neighbor.x as i64 + neighbor.span as i64 == voxel.x as i64
+                                }
+                                Face::PosZ => neighbor.z as i64 == voxel.z as i64 + span as i64,
+                                Face::NegZ => {
+                                    neighbor.z as i64 + neighbor.span as i64 == voxel.z as i64
+                                }
+                                _ => false,
                             };
-                            touch.then(||neighbor.y as f32+sampled_top(neighbor))
+                            touch.then(|| neighbor.y as f32 + sampled_top(neighbor))
                         });
-                        lod.or_else(||{
-                            let edge_x=match face{
-                                Face::PosX|Face::NegX=>px,
-                                _=>voxel.x.checked_add(step)?,
+                        lod.or_else(|| {
+                            let edge_x = match face {
+                                Face::PosX | Face::NegX => px,
+                                _ => voxel.x.checked_add(step)?,
                             };
-                            let edge_z=match face{
-                                Face::PosZ|Face::NegZ=>pz,
-                                _=>voxel.z.checked_add(step)?,
+                            let edge_z = match face {
+                                Face::PosZ | Face::NegZ => pz,
+                                _ => voxel.z.checked_add(step)?,
                             };
-                            self.exact_edge_top(face,edge_x,edge_z)
+                            self.exact_edge_top(face, edge_x, edge_z)
                         })
                     }
-                    _=>None,
+                    _ => None,
                 };
-                let bottom=edge_height.map(|height|height-voxel.y as f32);
-                strips.push(bottom.filter(|bottom|top-*bottom>0.001));
+                let bottom = edge_height.map(|height| height - voxel.y as f32);
+                strips.push(bottom.filter(|bottom| top - *bottom > 0.001));
             }
             // Greedy equal-height wall strip merges reduce large LOD meshes.
             // Unknown strips and changing elevations always break the merge.
-            let mut index=0;
-            while index<strips.len(){
-                let Some(bottom)=strips[index]else{index+=1;continue;};
-                let begin=index*4;
-                index+=1;
-                while index<strips.len()&&strips[index].is_some_and(|other|
-                    (other-bottom).abs()<0.00001){index+=1;}
-                let end=index*4;
-                let mut min=[-0.5,bottom,-0.5];
-                let mut max=[0.5,top,0.5];
-                if dx!=0{
-                    min[2]=-0.5+begin as f32/span as f32;
-                    max[2]=-0.5+end as f32/span as f32;
+            let mut index = 0;
+            while index < strips.len() {
+                let Some(bottom) = strips[index] else {
+                    index += 1;
+                    continue;
+                };
+                let begin = index * 2;
+                index += 1;
+                while index < strips.len()
+                    && strips[index].is_some_and(|other| (other - bottom).abs() < 0.00001)
+                {
+                    index += 1;
                 }
-                if dz!=0{
-                    min[0]=-0.5+begin as f32/span as f32;
-                    max[0]=-0.5+end as f32/span as f32;
+                let end = index * 2;
+                let mut min = [-0.5, bottom, -0.5];
+                let mut max = [0.5, top, 0.5];
+                if dx != 0 {
+                    min[2] = -0.5 + begin as f32 / span as f32;
+                    max[2] = -0.5 + end as f32 / span as f32;
                 }
-                result.push((face,Part::cube(Box3{min,max})));
+                if dz != 0 {
+                    min[0] = -0.5 + begin as f32 / span as f32;
+                    max[0] = -0.5 + end as f32 / span as f32;
+                }
+                result.push((face, Part::cube(Box3 { min, max })));
             }
         }
         result
@@ -447,100 +528,124 @@ impl<'a> DistantElevation<'a> {
 fn sampled_top(voxel: &SurfaceVoxel) -> f32 {
     fluid_part(&voxel.state, false).map_or(0.5, |p| p.bounds.max[1])
 }
-/// Fluid surfaces use four corner heights shared with adjacent source cells.
-/// The input is a *display-only* map of verified exact block states. A missing
-/// source neighbor never implies water or an empty block: retain this cell's
-/// own height instead of creating an interpolated surface from guessed data.
-fn fluid_level_height(state: &State) -> f32 {
-    let level = property(state, "level")
-        .and_then(|s| s.parse::<u8>().ok())
-        .filter(|v| *v <= 15)
-        .unwrap_or(0);
-    if level >= 8 {
-        8.0 / 9.0
-    } else {
-        (8 - level) as f32 / 9.0
-    }
+/// 精确流体使用读取阶段保留的四角范围；同一状态的不同源格不能共享局部高度。
+pub(crate) fn fluid_part_at(state: &State, voxel: &SurfaceVoxel) -> Result<Option<Part>, String> {
+    let Some(mut part) = fluid_part(state, false) else {
+        return Ok(None);
+    };
+    let surface = voxel.fluid_surface().ok_or_else(|| {
+        format!(
+            "精确流体缺少源角点：{} @ {},{},{}",
+            state.name, voxel.x, voxel.y, voxel.z
+        )
+    })?;
+    part.bounds.max[1] = surface.maximum() - 0.5;
+    Ok(Some(part))
 }
-fn fluid_corner_height(
-    state: &State,
-    pos: (i32, i32, i32),
-    east: bool,
-    south: bool,
-    cells: &HashMap<(i32, i32, i32), &State>,
-) -> f32 {
-    let mut heights = 0.0;
-    let mut weights = 0.0;
-    let dx = if east { [0, 1] } else { [-1, 0] };
-    let dz = if south { [0, 1] } else { [-1, 0] };
-    for ox in dx {
-        for oz in dz {
-            let Some(x) = pos.0.checked_add(ox) else {
-                continue;
-            };
-            let Some(z) = pos.2.checked_add(oz) else {
-                continue;
-            };
-            let neighboring = if x == pos.0 && z == pos.2 {
-                state
-            } else {
-                let Some(other) = cells.get(&(x, pos.1, z)) else {
-                    continue;
-                };
-                *other
-            };
-            if neighboring.name != state.name {
-                continue;
-            }
-            let has_fluid_above = pos
-                .1
-                .checked_add(1)
-                .and_then(|y| cells.get(&(x, y, z)))
-                .is_some_and(|above| above.name == state.name);
-            let height = if has_fluid_above {
-                1.0
-            } else {
-                fluid_level_height(neighboring)
-            };
-            // Follow vanilla fluid weighting: source/full-height neighbors
-            // stabilize lakes while non-source edge cells slope toward flow.
-            let weight = if height >= 8.0 / 9.0 { 10.0 } else { 1.0 };
-            heights += height * weight;
-            weights += weight;
+/// 水层使用独立显示状态，拾取与编辑仍引用原始源格。
+pub(crate) fn fluid_state(
+    kind: mcedit2_world::fluid_surface::Kind,
+) -> &'static std::sync::Arc<State> {
+    static STATES: std::sync::OnceLock<[std::sync::Arc<State>; 2]> = std::sync::OnceLock::new();
+    let states = STATES.get_or_init(|| {
+        ["minecraft:water", "minecraft:lava"].map(|name| {
+            std::sync::Arc::new(State {
+                name: name.into(),
+                properties: vec![("level".into(), "0".into())],
+            })
+        })
+    });
+    &states[match kind {
+        mcedit2_world::fluid_surface::Kind::Water => 0,
+        mcedit2_world::fluid_surface::Kind::Lava => 1,
+    }]
+}
+pub(crate) struct Passes<'a> {
+    source: &'a SurfaceVoxel,
+    primary: Option<SurfaceVoxel>,
+    overlay: Option<SurfaceVoxel>,
+}
+impl<'a> Passes<'a> {
+    pub(crate) fn new(
+        source: &'a SurfaceVoxel,
+        display: &State,
+        palette: &mut mcedit2_world::surface::VoxelPalette,
+    ) -> Self {
+        let fluid_only = mcedit2_world::fluid_surface::is_named_fluid(display);
+        let exact = source.fluid_surface().filter(|_| source.span == 1);
+        let primary = exact
+            .filter(|fluid| fluid_only && fluid.faces() != source.faces)
+            .map(|fluid| palette.updated(source, |data| data.faces = fluid.faces()));
+        let overlay = exact
+            .filter(|fluid| {
+                !fluid_only && display.name.starts_with("minecraft:") && fluid.faces() != 0
+            })
+            .map(|fluid| {
+                palette.updated(source, |data| {
+                    data.state = std::sync::Arc::clone(fluid_state(fluid.kind()));
+                    data.kind = VoxelMaterial::Liquid;
+                    data.faces = fluid.faces();
+                })
+            });
+        Self {
+            source,
+            primary,
+            overlay,
         }
     }
-    if weights > 0.0 {
-        heights / weights
-    } else {
-        fluid_level_height(state)
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (bool, &SurfaceVoxel)> {
+        std::iter::once((false, self.primary.as_ref().unwrap_or(self.source)))
+            .chain(self.overlay.as_ref().map(|voxel| (true, voxel)))
     }
 }
-/// Return actual local quad vertices for a static original Java fluid state.
-/// Both world-space spectator and projected orthographic rendering call this
-/// same implementation; side tops share interpolated corner vertices.
+/// GPU、Canvas 与拾取共用源角点，不再从已经筛选过的显示体素反推高度。
 pub(crate) fn fluid_face_vertices(
-    state: &State,
-    pos: (i32, i32, i32),
+    surface: mcedit2_world::fluid_surface::FluidSurface,
     face: Face,
-    cells: &HashMap<(i32, i32, i32), &State>,
-) -> Option<[[f32; 3]; 4]> {
-    let above = pos
-        .1
-        .checked_add(1)
-        .and_then(|y| cells.get(&(pos.0, y, pos.2)))
-        .is_some_and(|s| s.name == state.name);
-    let part = fluid_part(state, above)?;
-    let mut vertices = part.face_vertices(face.corners());
-    if face == Face::Bottom || above {
-        return Some(vertices);
+) -> [[f32; 3]; 4] {
+    let mut vertices = Part::cube(Box3::FULL).face_vertices(face.corners());
+    if face == Face::Bottom {
+        for vertex in &mut vertices {
+            vertex[1] += 0.001;
+        }
+        return vertices;
     }
     for vertex in &mut vertices {
-        if vertex[1] > -0.5 + 0.0001 {
-            let height = fluid_corner_height(state, pos, vertex[0] > 0.0, vertex[2] > 0.0, cells);
-            vertex[1] = height - 0.5;
+        if vertex[1] > 0.0 {
+            let height = surface.height(vertex[0] > 0.0, vertex[2] > 0.0);
+            vertex[1] = height
+                - 0.5
+                - if surface.faces() & mcedit2_world::surface::FACE_TOP != 0 {
+                    0.001
+                } else {
+                    0.0
+                };
+        } else if surface.faces() & mcedit2_world::surface::FACE_BOTTOM != 0 {
+            vertex[1] += 0.001;
+        }
+        match face {
+            Face::PosX => vertex[0] -= 0.001,
+            Face::NegX => vertex[0] += 0.001,
+            Face::PosZ => vertex[2] -= 0.001,
+            Face::NegZ => vertex[2] += 0.001,
+            _ => {}
         }
     }
-    Some(vertices)
+    if face == Face::Top {
+        let [nw, ne, se, sw] = vertices.map(|p| p[1]);
+        let aligned =
+            (nw - ne).abs() < 0.000001 && (ne - se).abs() < 0.000001 && (se - sw).abs() < 0.000001;
+        let alternate = aligned
+            || ne > nw && ne > se
+            || ne < nw && ne < se
+            || sw > nw && sw > se
+            || sw < nw && sw < se;
+        if alternate {
+            // 顶面高低角决定三角形接缝；UV 从实际顶点求取，旋转不改变其归属。
+            vertices.rotate_left(1);
+        }
+    }
+    vertices
 }
 /// Approximate collision/display cuboids for recognized *minecraft:* states.
 /// Never guesses geometry for foreign namespaces or numeric legacy IDs.
@@ -712,10 +817,22 @@ pub(crate) fn boxes(state: &State) -> Vec<Box3> {
         // boolean connections grow an arm to the edge of the source cell.
         let mut out = vec![Box3::from_six(-0.0625, -0.5, -0.0625, 0.0625, 0.5, 0.0625)];
         for (direction, arm) in [
-            ("north", Box3::from_six(-0.0625, -0.5, -0.5, 0.0625, 0.5, -0.0625)),
-            ("south", Box3::from_six(-0.0625, -0.5, 0.0625, 0.0625, 0.5, 0.5)),
-            ("west", Box3::from_six(-0.5, -0.5, -0.0625, -0.0625, 0.5, 0.0625)),
-            ("east", Box3::from_six(0.0625, -0.5, -0.0625, 0.5, 0.5, 0.0625)),
+            (
+                "north",
+                Box3::from_six(-0.0625, -0.5, -0.5, 0.0625, 0.5, -0.0625),
+            ),
+            (
+                "south",
+                Box3::from_six(-0.0625, -0.5, 0.0625, 0.0625, 0.5, 0.5),
+            ),
+            (
+                "west",
+                Box3::from_six(-0.5, -0.5, -0.0625, -0.0625, 0.5, 0.0625),
+            ),
+            (
+                "east",
+                Box3::from_six(0.0625, -0.5, -0.0625, 0.5, 0.5, 0.0625),
+            ),
         ] {
             if property(state, direction) == Some("true") {
                 out.push(arm);
@@ -763,7 +880,12 @@ pub(crate) fn boxes(state: &State) -> Vec<Box3> {
         let height_shift = if in_wall { -0.1875 } else { 0.0 };
         let mut push_leaf = |x0: f32, y0: f32, z0: f32, x1: f32, y1: f32, z1: f32| {
             out.push(Box3::from_six(
-                x0, y0 + height_shift, z0, x1, y1 + height_shift, z1,
+                x0,
+                y0 + height_shift,
+                z0,
+                x1,
+                y1 + height_shift,
+                z1,
             ));
         };
         if property(state, "open") == Some("true") {
@@ -809,8 +931,69 @@ pub(crate) fn boxes(state: &State) -> Vec<Box3> {
     vec![Box3::FULL]
 }
 #[cfg(test)]
+pub(crate) fn run_test_category(category: crate::test_categories::Category) {
+    tests::run_test_category(category);
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    fn directed_endpoints_match_vertex_winding_through_root_and_variant_rotations() {
+        for mask in 0..8 {
+            let from = std::array::from_fn(|i| if mask & (1 << i) == 0 { 1. } else { 15. });
+            let to = std::array::from_fn(|i| if mask & (1 << i) == 0 { 15. } else { 1. });
+            for reflect in [false, true] {
+                let mut part = Part::cube(Box3::from_model_units_directed(from, to).unwrap());
+                part.variant_x = 90;
+                part.variant_y = 270;
+                if reflect {
+                    part.root = Some(crate::root_transform::Affine([
+                        [-1., 0., 0., 0.],
+                        [0., 1., 0., 0.],
+                        [0., 0., 1., 0.],
+                    ]));
+                }
+                for face in [
+                    Face::Top,
+                    Face::Bottom,
+                    Face::PosX,
+                    Face::NegX,
+                    Face::PosZ,
+                    Face::NegZ,
+                ] {
+                    let vertices = part.face_vertices(face.corners());
+                    let u: [f32; 3] = std::array::from_fn(|i| vertices[1][i] - vertices[0][i]);
+                    let v: [f32; 3] = std::array::from_fn(|i| vertices[2][i] - vertices[0][i]);
+                    let cross = [
+                        u[1] * v[2] - u[2] * v[1],
+                        u[2] * v[0] - u[0] * v[2],
+                        u[0] * v[1] - u[1] * v[0],
+                    ];
+                    let normal = part.normal(face.normal());
+                    let dot: f32 = cross.into_iter().zip(normal).map(|(a, b)| a * b).sum();
+                    // Face::corners 的 X 面与 Y/Z 面采用相反绕序，变换须保持各自约定。
+                    let winding = if matches!(face, Face::PosX | Face::NegX) {
+                        1.
+                    } else {
+                        -1.
+                    };
+                    assert!(
+                        dot * winding > 0.5,
+                        "端点 {mask}，反射 {reflect}，{face:?} 的法向应与生产顶点绕序一致"
+                    );
+                }
+            }
+        }
+        assert!(Box3::from_model_units_plane([15., 1., 8.], [1., 15., 8.]).is_some());
+        for (from, to) in [
+            ([33., 1., 1.], [1., 15., 15.]),
+            ([15., 1., 1.], [-17., 15., 15.]),
+            ([f32::NAN, 1., 1.], [1., 15., 15.]),
+        ] {
+            assert!(Box3::from_model_units_directed(from, to).is_none());
+        }
+    }
     fn state(s: &str, p: &[(&str, &str)]) -> State {
         State {
             name: s.into(),
@@ -820,7 +1003,7 @@ mod tests {
                 .collect(),
         }
     }
-    #[test]
+
     fn water_and_lava_levels_have_static_source_geometry() {
         let source = fluid_part(&state("minecraft:water", &[("level", "0")]), false).unwrap();
         let flow = fluid_part(&state("minecraft:water", &[("level", "4")]), false).unwrap();
@@ -837,22 +1020,27 @@ mod tests {
         );
         assert!(fluid_part(&state("other:fluid", &[]), false).is_none());
     }
-    #[test]
+
     fn lod_walls_join_verified_tiles_without_inventing_missing_cliffs() {
         use mcedit2_world::surface::{SurfaceVoxel, VoxelMaterial, ALL_FACES};
-        let tile = |x: i32, z: i32, y: i32, span: u8| SurfaceVoxel {
-            x,
-            y,
-            z,
-            span,
-            state: state("minecraft:stone", &[]),
-            biome: None,
-            original_block_entity: false,
-            staged: false,
-            faces: ALL_FACES,
-            kind: VoxelMaterial::Solid,
+        let tile = |x: i32, z: i32, y: i32, span: u8| {
+            SurfaceVoxel::new(
+                [x, y, z],
+                mcedit2_world::surface::VoxelData {
+                    span,
+                    fluid: None,
+                    state: state("minecraft:stone", &[]).into(),
+                    biome: None,
+                    original_block_entity: false,
+                    staged: false,
+                    faces: ALL_FACES,
+                    kind: VoxelMaterial::Solid,
+                    light: Default::default(),
+                },
+            )
         };
         let view = mcedit2_world::surface::SurfaceView {
+            biomes: Default::default(),
             x: 0,
             z: 0,
             y_min: 0,
@@ -884,24 +1072,29 @@ mod tests {
         let only_known = DistantElevation::new(&incomplete).walls(&incomplete.voxels[0]);
         assert_eq!(only_known.len(), 1);
     }
-    #[test]
+
     fn duplicate_lod_column_keeps_topmost_verified_elevation() {
         use mcedit2_world::surface::{SurfaceVoxel, VoxelMaterial, ALL_FACES};
-        let make = |x, y, kind| SurfaceVoxel {
-            x,
-            y,
-            z: 0,
-            span: 8,
-            state: state("minecraft:stone", &[]),
-            biome: None,
-            original_block_entity: false,
-            staged: false,
-            faces: ALL_FACES,
-            kind,
+        let make = |x, y, kind| {
+            SurfaceVoxel::new(
+                [x, y, 0],
+                mcedit2_world::surface::VoxelData {
+                    span: 8,
+                    fluid: None,
+                    state: state("minecraft:stone", &[]).into(),
+                    biome: None,
+                    original_block_entity: false,
+                    staged: false,
+                    faces: ALL_FACES,
+                    kind,
+                    light: Default::default(),
+                },
+            )
         };
         // Deliberately present ground before canopy: order of imported
         // source patches cannot determine the horizon altitude.
         let view = SurfaceView {
+            biomes: Default::default(),
             x: 0,
             z: 0,
             y_min: 0,
@@ -931,34 +1124,39 @@ mod tests {
         let top_only = DistantElevation::new(&canopy_only);
         assert!(top_only.walls(&canopy_only.voxels[0]).is_empty());
     }
-    #[test]
+
     fn lod_edges_handle_negative_chunks_and_lower_fluid_surfaces() {
         use mcedit2_world::surface::{SurfaceView, SurfaceVoxel, VoxelMaterial, ALL_FACES};
-        let water = SurfaceVoxel {
-            x: -16,
-            y: 64,
-            z: -16,
-            span: 16,
-            state: state("minecraft:water", &[("level", "4")]),
-            biome: None,
-            original_block_entity: false,
-            staged: false,
-            faces: ALL_FACES,
-            kind: VoxelMaterial::Liquid,
-        };
-        let low = SurfaceVoxel {
-            x: -16,
-            y: 63,
-            z: 0,
-            span: 16,
-            state: state("minecraft:stone", &[]),
-            biome: None,
-            original_block_entity: false,
-            staged: false,
-            faces: ALL_FACES,
-            kind: VoxelMaterial::Solid,
-        };
+        let water = SurfaceVoxel::new(
+            [-16, 64, -16],
+            mcedit2_world::surface::VoxelData {
+                span: 16,
+                fluid: None,
+                state: state("minecraft:water", &[("level", "4")]).into(),
+                biome: None,
+                original_block_entity: false,
+                staged: false,
+                faces: ALL_FACES,
+                kind: VoxelMaterial::Liquid,
+                light: Default::default(),
+            },
+        );
+        let low = SurfaceVoxel::new(
+            [-16, 63, 0],
+            mcedit2_world::surface::VoxelData {
+                span: 16,
+                fluid: None,
+                state: state("minecraft:stone", &[]).into(),
+                biome: None,
+                original_block_entity: false,
+                staged: false,
+                faces: ALL_FACES,
+                kind: VoxelMaterial::Solid,
+                light: Default::default(),
+            },
+        );
         let view = SurfaceView {
+            biomes: Default::default(),
             x: -16,
             z: -16,
             y_min: 0,
@@ -976,22 +1174,27 @@ mod tests {
             *f == Face::PosZ && (part.bounds.max[1] - (-0.5 + 4.0 / 9.0)).abs() < 0.001
         }));
     }
-    #[test]
+
     fn water_lod_horizon_stays_above_seabed_solid_layer() {
         use mcedit2_world::surface::{SurfaceVoxel, VoxelMaterial, ALL_FACES};
-        let make = |x, y, kind| SurfaceVoxel {
-            x,
-            y,
-            z: 0,
-            span: 8,
-            state: state("minecraft:stone", &[]),
-            biome: None,
-            original_block_entity: false,
-            staged: false,
-            faces: ALL_FACES,
-            kind,
+        let make = |x, y, kind| {
+            SurfaceVoxel::new(
+                [x, y, 0],
+                mcedit2_world::surface::VoxelData {
+                    span: 8,
+                    fluid: None,
+                    state: state("minecraft:stone", &[]).into(),
+                    biome: None,
+                    original_block_entity: false,
+                    staged: false,
+                    faces: ALL_FACES,
+                    kind,
+                    light: Default::default(),
+                },
+            )
         };
         let view = SurfaceView {
+            biomes: Default::default(),
             x: 0,
             z: 0,
             y_min: 0,
@@ -1011,77 +1214,164 @@ mod tests {
         assert!(height.walls(&view.voxels[0]).is_empty());
         assert_eq!(height.walls(&view.voxels[1]).len(), 1);
     }
-    #[test]
+
     fn exact_lod_perimeter_requires_four_equal_ground_tops() {
-        use mcedit2_world::surface::{SurfaceVoxel,VoxelMaterial,ALL_FACES};
-        let tile=|x,z,y,span|SurfaceVoxel{
-            x,y,z,span,state:state("minecraft:stone",&[]),biome:None,
-            original_block_entity:false,staged:false,faces:ALL_FACES,
-            kind:VoxelMaterial::Solid,
+        use mcedit2_world::surface::{SurfaceVoxel, VoxelMaterial, ALL_FACES};
+        let tile = |x, z, y, span| {
+            SurfaceVoxel::new(
+                [x, y, z],
+                mcedit2_world::surface::VoxelData {
+                    span,
+                    fluid: None,
+                    state: state("minecraft:stone", &[]).into(),
+                    biome: None,
+                    original_block_entity: false,
+                    staged: false,
+                    faces: ALL_FACES,
+                    kind: VoxelMaterial::Solid,
+                    light: Default::default(),
+                },
+            )
         };
-        let mut view=SurfaceView{
-            x:0,z:0,y_min:40,y_max:99,width:8,depth:4,
-            voxels:vec![tile(0,0,80,4)],source_tiles:vec![],
-            source_chunks:2,missing_columns:0,
+        let mut view = SurfaceView {
+            biomes: Default::default(),
+            x: 0,
+            z: 0,
+            y_min: 40,
+            y_max: 99,
+            width: 8,
+            depth: 4,
+            voxels: vec![tile(0, 0, 80, 4)],
+            source_tiles: vec![],
+            source_chunks: 2,
+            missing_columns: 0,
         };
-        for z in 0..4{view.voxels.push(tile(4,z,74,1));}
-        let walls=DistantElevation::new(&view).walls(&view.voxels[0]);
-        assert_eq!(walls.len(),1);
-        assert_eq!(walls[0].0,Face::PosX);
-        assert_eq!(walls[0].1.bounds.min[1],-5.5);
-        assert_eq!(walls[0].1.bounds.min[2],-0.5);
-        assert_eq!(walls[0].1.bounds.max[2],0.5);
-        let mut absent=view.clone();
+        for z in 0..4 {
+            view.voxels.push(tile(4, z, 74, 1));
+        }
+        let walls = DistantElevation::new(&view).walls(&view.voxels[0]);
+        assert_eq!(walls.len(), 1);
+        assert_eq!(walls[0].0, Face::PosX);
+        assert_eq!(walls[0].1.bounds.min[1], -5.5);
+        assert_eq!(walls[0].1.bounds.min[2], -0.5);
+        assert_eq!(walls[0].1.bounds.max[2], 0.5);
+        let mut absent = view.clone();
         absent.voxels.pop();
-        assert!(DistantElevation::new(&absent).walls(&absent.voxels[0]).is_empty());
-        let mut varied=view.clone();
-        varied.voxels[4].y=73;
-        assert!(DistantElevation::new(&varied).walls(&varied.voxels[0]).is_empty());
-        let mut clipped=view.clone();
-        clipped.y_max=74;
-        assert!(DistantElevation::new(&clipped).walls(&clipped.voxels[0]).is_empty());
-        let mut glass=view;
-        glass.voxels[1].kind=VoxelMaterial::Transparent;
-        assert!(DistantElevation::new(&glass).walls(&glass.voxels[0]).is_empty());
+        let walls = DistantElevation::new(&absent).walls(&absent.voxels[0]);
+        assert_eq!(walls.len(), 1);
+        assert_eq!(walls[0].1.bounds.max[2], 0.);
+        let mut varied = view.clone();
+        varied.voxels[4].y = 73;
+        let walls = DistantElevation::new(&varied).walls(&varied.voxels[0]);
+        assert_eq!(walls.len(), 1);
+        assert_eq!(walls[0].1.bounds.max[2], 0.);
+        let mut clipped = view.clone();
+        clipped.y_max = 74;
+        assert!(DistantElevation::new(&clipped)
+            .walls(&clipped.voxels[0])
+            .is_empty());
+        let mut glass = view;
+        glass.voxels[1].kind = VoxelMaterial::Transparent;
+        let walls = DistantElevation::new(&glass).walls(&glass.voxels[0]);
+        assert_eq!(walls.len(), 1);
+        assert_eq!(walls[0].1.bounds.min[2], 0.);
     }
-    #[test]
+
     fn exact_lod_perimeter_handles_negative_coordinates() {
-        use mcedit2_world::surface::{SurfaceVoxel,VoxelMaterial,ALL_FACES};
-        let tile=|x,z,y,span|SurfaceVoxel{
-            x,y,z,span,state:state("minecraft:stone",&[]),biome:None,
-            original_block_entity:false,staged:false,faces:ALL_FACES,
-            kind:VoxelMaterial::Solid,
+        use mcedit2_world::surface::{SurfaceVoxel, VoxelMaterial, ALL_FACES};
+        let tile = |x, z, y, span| {
+            SurfaceVoxel::new(
+                [x, y, z],
+                mcedit2_world::surface::VoxelData {
+                    span,
+                    fluid: None,
+                    state: state("minecraft:stone", &[]).into(),
+                    biome: None,
+                    original_block_entity: false,
+                    staged: false,
+                    faces: ALL_FACES,
+                    kind: VoxelMaterial::Solid,
+                    light: Default::default(),
+                },
+            )
         };
-        let mut view=SurfaceView{
-            x:-8,z:-4,y_min:-64,y_max:100,width:8,depth:8,
-            voxels:vec![tile(-4,-4,40,4)],source_tiles:vec![],
-            source_chunks:2,missing_columns:0,
+        let mut view = SurfaceView {
+            biomes: Default::default(),
+            x: -8,
+            z: -4,
+            y_min: -64,
+            y_max: 100,
+            width: 8,
+            depth: 8,
+            voxels: vec![tile(-4, -4, 40, 4)],
+            source_tiles: vec![],
+            source_chunks: 2,
+            missing_columns: 0,
         };
-        for z in -4..0{view.voxels.push(tile(-5,z,32,1));}
-        let walls=DistantElevation::new(&view).walls(&view.voxels[0]);
-        assert_eq!(walls.len(),1);
-        assert_eq!(walls[0].0,Face::NegX);
-        assert_eq!(walls[0].1.bounds.min[1],-7.5);
+        for z in -4..0 {
+            view.voxels.push(tile(-5, z, 32, 1));
+        }
+        let walls = DistantElevation::new(&view).walls(&view.voxels[0]);
+        assert_eq!(walls.len(), 1);
+        assert_eq!(walls[0].0, Face::NegX);
+        assert_eq!(walls[0].1.bounds.min[1], -7.5);
     }
-    #[test]
+
+    // 既有几何用例通过真实源角点接口适配，不在建模层重建旧的显示邻格算法。
+    fn source_fluid_vertices(
+        state: &State,
+        pos: (i32, i32, i32),
+        face: Face,
+        cells: &HashMap<(i32, i32, i32), &State>,
+    ) -> Option<[[f32; 3]; 4]> {
+        use mcedit2_world::fluid_surface::{inspect, Sample};
+        use mcedit2_world::surface_visibility::{Cell, Direction, Native, Visibility};
+        let source = Cell {
+            state,
+            kind: mcedit2_world::surface::material(state),
+            position: pos,
+        };
+        let mut visibility = Native;
+        let mask = Direction::ALL.into_iter().fold(0, |mask, direction| {
+            let [dx, dy, dz] = direction.offset();
+            let position = (pos.0 + dx, pos.1 + dy, pos.2 + dz);
+            let neighbor = cells.get(&position).map(|state| Cell {
+                state,
+                kind: mcedit2_world::surface::material(state),
+                position,
+            });
+            if visibility.exposed(source, direction, neighbor) {
+                mask | direction.flag()
+            } else {
+                mask
+            }
+        });
+        inspect(Sample::vanilla(state).unwrap(), pos, &mut |position| {
+            cells
+                .get(&position)
+                .map_or(Ok(Sample::Unknown), |state| Sample::vanilla(state))
+        })
+        .unwrap()
+        .map(|surface| fluid_face_vertices(surface.with_faces(mask).unwrap(), face))
+    }
     fn adjacent_static_fluid_levels_share_sloped_corners_and_side_tops() {
         let source = state("minecraft:water", &[("level", "0")]);
         let flow = state("minecraft:water", &[("level", "4")]);
         let mut cells = HashMap::new();
         cells.insert((0, 70, 0), &source);
         cells.insert((1, 70, 0), &flow);
-        let west = fluid_face_vertices(&source, (0, 70, 0), Face::Top, &cells).unwrap();
-        let east = fluid_face_vertices(&flow, (1, 70, 0), Face::Top, &cells).unwrap();
+        let west = source_fluid_vertices(&source, (0, 70, 0), Face::Top, &cells).unwrap();
+        let east = source_fluid_vertices(&flow, (1, 70, 0), Face::Top, &cells).unwrap();
         assert!((west[1][1] - east[0][1]).abs() < 0.0001);
         assert!((west[2][1] - east[3][1]).abs() < 0.0001);
         assert!(west[1][1] < west[0][1]);
-        let wall = fluid_face_vertices(&source, (0, 70, 0), Face::PosX, &cells).unwrap();
+        let wall = source_fluid_vertices(&source, (0, 70, 0), Face::PosX, &cells).unwrap();
         assert!((wall[1][1] - west[1][1]).abs() < 0.0001);
         assert!((wall[2][1] - west[2][1]).abs() < 0.0001);
-        assert_eq!(wall[0][1], -0.5);
-        assert_eq!(wall[3][1], -0.5);
+        assert_eq!(wall[0][1], -0.499);
+        assert_eq!(wall[3][1], -0.499);
     }
-    #[test]
+
     fn stacked_original_fluids_extend_lower_cell_to_full_height() {
         let source = state("minecraft:water", &[("level", "0")]);
         let shallow = state("minecraft:water", &[("level", "7")]);
@@ -1089,22 +1379,22 @@ mod tests {
         cells.insert((0, 20, 0), &shallow);
         cells.insert((0, 21, 0), &source);
         cells.insert((1, 20, 0), &source);
-        let side = fluid_face_vertices(&shallow, (0, 20, 0), Face::PosZ, &cells).unwrap();
+        let side = source_fluid_vertices(&shallow, (0, 20, 0), Face::PosZ, &cells).unwrap();
         assert_eq!(side[2][1], 0.5);
         assert_eq!(side[3][1], 0.5);
-        assert_eq!(side[0][1], -0.5);
+        assert_eq!(side[0][1], -0.499);
     }
-    #[test]
+
     fn fluid_corners_do_not_invent_missing_neighbors() {
         let fluid = state("minecraft:lava", &[("level", "6")]);
         let map = HashMap::new();
-        let quad = fluid_face_vertices(&fluid, (10, 64, 10), Face::Top, &map).unwrap();
-        let expected = -0.5 + 2.0 / 9.0;
+        let quad = source_fluid_vertices(&fluid, (10, 64, 10), Face::Top, &map).unwrap();
+        let expected = -0.5 + 2.0 / 9.0 - 0.001;
         assert!(quad.iter().all(|v| (v[1] - expected).abs() < 0.0001));
         let stone = state("minecraft:stone", &[]);
-        assert!(fluid_face_vertices(&stone, (10, 64, 10), Face::Top, &map).is_none());
+        assert!(source_fluid_vertices(&stone, (10, 64, 10), Face::Top, &map).is_none());
     }
-    #[test]
+
     fn slab_snow_and_carpet_heights_are_signed_world_offsets() {
         let bottom = boxes(&state("minecraft:stone_slab", &[("type", "bottom")]))[0];
         let top = boxes(&state("minecraft:stone_slab", &[("type", "top")]))[0];
@@ -1119,7 +1409,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn stair_shapes_and_face_culling_require_full_cover() {
         let stairs = boxes(&state(
             "minecraft:oak_stairs",
@@ -1134,7 +1423,7 @@ mod tests {
         assert!(stairs[1].face_on_boundary(1, true));
         assert!(!stairs[0].occluded_by(&stairs[1], 1, true));
     }
-    #[test]
+
     fn five_stair_shapes_select_exact_directional_quarters_for_both_halves() {
         fn footprints(name: &str, facing: &str, shape: &str, half: &str) -> Vec<(bool, bool)> {
             let parts = boxes(&state(
@@ -1209,7 +1498,7 @@ mod tests {
             }
         }
     }
-    #[test]
+
     fn stair_missing_or_unrecognized_properties_do_not_invent_modded_shapes() {
         assert_eq!(
             boxes(&state("example:granite_stairs", &[("shape", "inner_left")])),
@@ -1225,7 +1514,7 @@ mod tests {
         );
         assert_eq!(boxes(&state("minecraft:oak_stairs", &[])).len(), 3);
     }
-    #[test]
+
     fn java_stair_json_parts_override_shape_based_fallbacks() {
         let mut bank = crate::resource_models::ModelBank::default();
         bank.insert(
@@ -1241,14 +1530,18 @@ mod tests {
         .unwrap();
         let source = state(
             "minecraft:oak_stairs",
-            &[("facing", "north"), ("half", "bottom"), ("shape", "inner_left")],
+            &[
+                ("facing", "north"),
+                ("half", "bottom"),
+                ("shape", "inner_left"),
+            ],
         );
         assert_eq!(boxes(&source).len(), 4);
         let model = bank.parts_at(&source, (32, 70, 12)).unwrap();
         assert_eq!(model.len(), 1);
         assert_eq!(model[0].bounds.max[1], -0.25);
     }
-    #[test]
+
     fn zero_thickness_model_planes_are_supported_only_as_explicit_surfaces() {
         let plane = Box3::from_model_units_plane([0.8, 0.0, 8.0], [15.2, 16.0, 8.0]).unwrap();
         assert_eq!(plane.min[2], 0.0);
@@ -1257,7 +1550,7 @@ mod tests {
         assert!(Box3::from_model_units_plane([8.0, 8.0, 0.0], [8.0, 8.0, 16.0]).is_none());
         assert!(Box3::from_model_units_plane([0.0, 0.0, 0.0], [16.0, 16.0, 16.0]).is_none());
     }
-    #[test]
+
     fn bounded_extended_java_models_preserve_outside_block_geometry() {
         let b = Box3::from_model_units([-16.0, 0.0, -8.0], [32.0, 16.0, 24.0]).unwrap();
         assert_eq!(b.min, [-1.5, -0.5, -1.0]);
@@ -1268,7 +1561,7 @@ mod tests {
         assert!(Box3::from_model_units_plane([-16.0, 8.0, 0.0], [32.01, 8.0, 24.0]).is_none());
         assert!(Box3::from_model_units([0.0, 0.0, 0.0], [f32::INFINITY, 16.0, 16.0]).is_none());
     }
-    #[test]
+
     fn model_unit_boxes_check_signed_scale_and_invalid_dimensions() {
         let a = Box3::from_model_units([2.0, 0.0, 4.0], [14.0, 8.0, 12.0]).unwrap();
         assert_eq!(a.min, [-0.375, -0.5, -0.25]);
@@ -1276,7 +1569,7 @@ mod tests {
         assert!(Box3::from_model_units([0.0, 0.0, 0.0], [0.0, 16.0, 16.0]).is_none());
         assert!(Box3::from_model_units([0.0, 0.0, 0.0], [17.0, 16.0, 16.0]).is_some());
     }
-    #[test]
+
     fn java_y_and_x_quarter_turns_preserve_exact_box_dimensions() {
         let box_ = Box3::from_model_units([0.0, 0.0, 0.0], [4.0, 12.0, 16.0]).unwrap();
         let y = box_.rotate(0, 90).unwrap();
@@ -1286,9 +1579,10 @@ mod tests {
         assert_eq!(box_.rotate(360, 0).unwrap(), box_);
         assert!(box_.rotate(45, 0).is_none());
     }
-    #[test]
+
     fn angled_model_face_is_quad_not_axis_aligned_aabb() {
         let part = Part {
+            root: None,
             bounds: Box3::from_model_units([6.0, 0.0, 6.0], [10.0, 16.0, 10.0]).unwrap(),
             rotation: Some(ElementRotation {
                 axis: 1,
@@ -1312,23 +1606,37 @@ mod tests {
         assert!(!part.boundary(0, true));
     }
 
-    #[test]
     fn glass_panes_and_iron_bars_keep_thin_centers_and_only_true_connections() {
-        for material in ["minecraft:glass_pane", "minecraft:lime_stained_glass_pane", "minecraft:iron_bars"] {
+        for material in [
+            "minecraft:glass_pane",
+            "minecraft:lime_stained_glass_pane",
+            "minecraft:iron_bars",
+        ] {
             let disconnected = boxes(&state(material, &[("north", "false")]));
             assert_eq!(disconnected.len(), 1, "{material}");
             assert_eq!(disconnected[0].min, [-0.0625, -0.5, -0.0625]);
-            let joined = boxes(&state(material, &[("north", "true"), ("east", "true"), ("south", "false")]));
+            let joined = boxes(&state(
+                material,
+                &[("north", "true"), ("east", "true"), ("south", "false")],
+            ));
             assert_eq!(joined.len(), 3, "{material}");
             assert!(joined.iter().any(|b| b.min[2] == -0.5));
             assert!(joined.iter().any(|b| b.max[0] == 0.5));
             assert!(!joined.iter().any(|b| b.max[2] == 0.5));
         }
     }
-    #[test]
+
     fn vanilla_walls_follow_none_low_tall_and_up_states() {
         let wall = "minecraft:cobblestone_wall";
-        let shaped = boxes(&state(wall, &[("up", "false"), ("north", "low"), ("west", "tall"), ("east", "none")]));
+        let shaped = boxes(&state(
+            wall,
+            &[
+                ("up", "false"),
+                ("north", "low"),
+                ("west", "tall"),
+                ("east", "none"),
+            ],
+        ));
         assert_eq!(shaped.len(), 2);
         assert!(shaped.iter().any(|b| b.min[2] == -0.5 && b.max[1] == 0.375));
         assert!(shaped.iter().any(|b| b.min[0] == -0.5 && b.max[1] == 0.5));
@@ -1338,13 +1646,18 @@ mod tests {
         assert_eq!(upright[0].min, [-0.25, -0.5, -0.25]);
         assert_eq!(boxes(&state(wall, &[("up", "false")])).len(), 1);
     }
-    #[test]
+
     fn vanilla_double_height_doors_follow_facing_hinge_and_open_state() {
         let state_for = |facing: &str, hinge: &str, open: &str, half: &str| {
-            state("minecraft:oak_door", &[
-                ("facing", facing), ("hinge", hinge),
-                ("open", open), ("half", half),
-            ])
+            state(
+                "minecraft:oak_door",
+                &[
+                    ("facing", facing),
+                    ("hinge", hinge),
+                    ("open", open),
+                    ("half", half),
+                ],
+            )
         };
         let slab = |facing: &str, hinge: &str, open: &str, half: &str| {
             let b = boxes(&state_for(facing, hinge, open, half));
@@ -1381,7 +1694,7 @@ mod tests {
             slab("west", "right", "false", "upper")
         );
     }
-    #[test]
+
     fn door_fallback_does_not_invent_foreign_or_invalid_geometry() {
         assert_eq!(
             boxes(&state("mod:oak_door", &[("open", "true")])),
@@ -1402,7 +1715,7 @@ mod tests {
         assert_eq!(boxes(&state("minecraft:iron_door", &[])).len(), 1);
         assert!(boxes(&state("minecraft:iron_door", &[]))[0].max[2] < 0.0);
     }
-    #[test]
+
     fn custom_java_door_model_json_takes_priority_over_native_fallback() {
         let mut bank = crate::resource_models::ModelBank::default();
         bank.insert(
@@ -1414,16 +1727,28 @@ mod tests {
             br##"{"textures":{"all":"minecraft:block/oak_planks"},"elements":[
                {"from":[0,0,0],"to":[16,6,16],"faces":{"up":{"texture":"#all"}}}
             ]}"##,
-        ).unwrap();
-        let source = state("minecraft:oak_door", &[
-            ("facing", "north"), ("half", "lower"),
-            ("hinge", "left"), ("open", "true"),
-        ]);
-        assert_ne!(boxes(&source)[0], bank.parts_at(&source, (0, 70, 0)).unwrap()[0].bounds);
+        )
+        .unwrap();
+        let source = state(
+            "minecraft:oak_door",
+            &[
+                ("facing", "north"),
+                ("half", "lower"),
+                ("hinge", "left"),
+                ("open", "true"),
+            ],
+        );
+        assert_ne!(
+            boxes(&source)[0],
+            bank.parts_at(&source, (0, 70, 0)).unwrap()[0].bounds
+        );
         assert_eq!(bank.parts_at(&source, (0, 70, 0)).unwrap().len(), 1);
-        assert_eq!(bank.parts_at(&source, (0, 70, 0)).unwrap()[0].bounds.max[1], -0.125);
+        assert_eq!(
+            bank.parts_at(&source, (0, 70, 0)).unwrap()[0].bounds.max[1],
+            -0.125
+        );
     }
-    #[test]
+
     fn vanilla_fence_connected_arms_have_distinct_upper_and_lower_rails() {
         let fence = "minecraft:oak_fence";
         let post = boxes(&state(fence, &[("north", "false")]));
@@ -1441,7 +1766,7 @@ mod tests {
         assert_eq!(crossed[4].max[0], 0.5);
         assert!(!crossed.iter().skip(1).any(|b| b.min[1] < -0.125));
     }
-    #[test]
+
     fn fence_gate_opening_and_facing_change_shape_not_block_identity() {
         let gate = "minecraft:oak_fence_gate";
         let closed = boxes(&state(gate, &[("open", "false"), ("facing", "north")]));
@@ -1450,26 +1775,32 @@ mod tests {
         assert_eq!(closed.len(), 4);
         assert_eq!(open.len(), 6);
         assert_eq!(west.len(), 4);
-        assert!(closed.iter().any(|b| b.min[0] == -0.375 && b.max[0] == 0.375));
+        assert!(closed
+            .iter()
+            .any(|b| b.min[0] == -0.375 && b.max[0] == 0.375));
         assert!(!open.iter().any(|b| b.min[0] == -0.375 && b.max[0] == 0.375));
         assert!(west.iter().any(|b| b.min[2] == -0.375 && b.max[2] == 0.375));
         let lowered = boxes(&state(gate, &[("in_wall", "true")]));
         assert_eq!(lowered[0].max[1], 0.3125);
         assert!(lowered[2].max[1] < closed[2].max[1]);
     }
-    #[test]
+
     fn available_java_resource_model_overrides_fallback_structural_geometry() {
         let mut original = crate::resource_models::ModelBank::default();
-        original.insert(
-            "assets/minecraft/blockstates/iron_bars.json",
-            br#"{"variants":{"":{"model":"minecraft:block/iron_bars_exact"}}}"#,
-        ).unwrap();
-        original.insert(
-            "assets/minecraft/models/block/iron_bars_exact.json",
-            br##"{"textures":{"all":"minecraft:block/iron_bars"},"elements":[
+        original
+            .insert(
+                "assets/minecraft/blockstates/iron_bars.json",
+                br#"{"variants":{"":{"model":"minecraft:block/iron_bars_exact"}}}"#,
+            )
+            .unwrap();
+        original
+            .insert(
+                "assets/minecraft/models/block/iron_bars_exact.json",
+                br##"{"textures":{"all":"minecraft:block/iron_bars"},"elements":[
                 {"from":[6,0,6],"to":[10,8,10],
                  "faces":{"up":{"texture":"#all"}}}]}"##,
-        ).unwrap();
+            )
+            .unwrap();
         let block = state("minecraft:iron_bars", &[]);
         let from_json = original.parts_at(&block, (0, 70, 0)).unwrap();
         assert_eq!(from_json.len(), 1);
@@ -1478,13 +1809,18 @@ mod tests {
         assert_eq!(boxes(&block).len(), 1);
         assert_ne!(from_json[0].bounds, boxes(&block)[0]);
     }
-    #[test]
+
     fn foreign_namespaces_never_inherit_vanilla_thin_geometry() {
-        for block in ["other:iron_bars", "mod:glass_pane", "other:cobblestone_wall", "other:oak_fence_gate"] {
+        for block in [
+            "other:iron_bars",
+            "mod:glass_pane",
+            "other:cobblestone_wall",
+            "other:oak_fence_gate",
+        ] {
             assert_eq!(boxes(&state(block, &[("north", "true")])), vec![Box3::FULL]);
         }
     }
-    #[test]
+
     fn no_modded_block_model_is_invented() {
         assert_eq!(boxes(&state("other:custom_stairs", &[])), vec![Box3::FULL]);
         assert_eq!(boxes(&state("numeric:108", &[])), vec![Box3::FULL]);
@@ -1500,5 +1836,42 @@ mod tests {
                 .min[0],
             0.3125
         );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
+        if category == crate::test_categories::Category::Models {
+            directed_endpoints_match_vertex_winding_through_root_and_variant_rotations();
+            water_and_lava_levels_have_static_source_geometry();
+            lod_walls_join_verified_tiles_without_inventing_missing_cliffs();
+            duplicate_lod_column_keeps_topmost_verified_elevation();
+            lod_edges_handle_negative_chunks_and_lower_fluid_surfaces();
+            water_lod_horizon_stays_above_seabed_solid_layer();
+            exact_lod_perimeter_requires_four_equal_ground_tops();
+            exact_lod_perimeter_handles_negative_coordinates();
+            adjacent_static_fluid_levels_share_sloped_corners_and_side_tops();
+            stacked_original_fluids_extend_lower_cell_to_full_height();
+            fluid_corners_do_not_invent_missing_neighbors();
+            slab_snow_and_carpet_heights_are_signed_world_offsets();
+            stair_shapes_and_face_culling_require_full_cover();
+            five_stair_shapes_select_exact_directional_quarters_for_both_halves();
+            stair_missing_or_unrecognized_properties_do_not_invent_modded_shapes();
+            java_stair_json_parts_override_shape_based_fallbacks();
+            zero_thickness_model_planes_are_supported_only_as_explicit_surfaces();
+            bounded_extended_java_models_preserve_outside_block_geometry();
+            model_unit_boxes_check_signed_scale_and_invalid_dimensions();
+            java_y_and_x_quarter_turns_preserve_exact_box_dimensions();
+            angled_model_face_is_quad_not_axis_aligned_aabb();
+            glass_panes_and_iron_bars_keep_thin_centers_and_only_true_connections();
+            vanilla_walls_follow_none_low_tall_and_up_states();
+            vanilla_double_height_doors_follow_facing_hinge_and_open_state();
+            door_fallback_does_not_invent_foreign_or_invalid_geometry();
+            custom_java_door_model_json_takes_priority_over_native_fallback();
+            vanilla_fence_connected_arms_have_distinct_upper_and_lower_rails();
+            fence_gate_opening_and_facing_change_shape_not_block_identity();
+            available_java_resource_model_overrides_fallback_structural_geometry();
+            foreign_namespaces_never_inherit_vanilla_thin_geometry();
+            no_modded_block_model_is_invented();
+        }
     }
 }

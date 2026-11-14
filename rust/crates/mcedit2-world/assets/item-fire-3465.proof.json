@@ -1,0 +1,70 @@
+{
+  "source": "准确客户端 class 成员引用与静态注册 javap；没有执行客户端或编译参照类",
+  "client_sha256": "56b71336d2b4fdffd197f56595b0da93e32a946f78f382a299b8f4b92758bb0f",
+  "catalog_sha256": "5996a758517b4a3e47db74bfa4e27f86ce21fb898308b47d5d4e7e001d734b82",
+  "items_javap_sha256": "65607cb8763ef7779a871b30ed695ee1a88cd8a3eb9e7a17f47916b254151379",
+  "blocks_javap_sha256": "56642e3bcd3609ece33e655c873aba83d65a6c34b655c0c33be365d8af50a78b",
+  "fire_constructor_callers": [
+    "cgc"
+  ],
+  "component_key_users": [],
+  "property_field_users": [
+    "cfu$a",
+    "cfu"
+  ],
+  "fire_registrations": [
+    {
+      "field": "ap",
+      "id": "minecraft:ancient_debris"
+    },
+    {
+      "field": "aA",
+      "id": "minecraft:netherite_block"
+    },
+    {
+      "field": "nV",
+      "id": "minecraft:netherite_ingot"
+    },
+    {
+      "field": "nW",
+      "id": "minecraft:netherite_scrap"
+    },
+    {
+      "field": "ow",
+      "id": "minecraft:netherite_sword"
+    },
+    {
+      "field": "ox",
+      "id": "minecraft:netherite_shovel"
+    },
+    {
+      "field": "oy",
+      "id": "minecraft:netherite_pickaxe"
+    },
+    {
+      "field": "oz",
+      "id": "minecraft:netherite_axe"
+    },
+    {
+      "field": "oA",
+      "id": "minecraft:netherite_hoe"
+    },
+    {
+      "field": "pe",
+      "id": "minecraft:netherite_helmet"
+    },
+    {
+      "field": "pf",
+      "id": "minecraft:netherite_chestplate"
+    },
+    {
+      "field": "pg",
+      "id": "minecraft:netherite_leggings"
+    },
+    {
+      "field": "ph",
+      "id": "minecraft:netherite_boots"
+    }
+  ],
+  "output_sha256": "ce8c85f9cd20bbece2a8125fad60a392de728a1117aa6cb23b46db45cfb99a75"
+}

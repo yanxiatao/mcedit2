@@ -6,14 +6,13 @@
 //! 4-byte location and 4-byte timestamp header entries are changed.
 //! A future disk transaction must revalidate the WHOLE original file and
 //! stage backups before replacing it.
-use crate::editing::NativeChunkCandidate;
+use crate::editing::{BeProof, NativeChunkCandidate};
+use crate::nbt_envelope::NbtEnvelope;
 use crate::sections::{
-    decode_sections, patch_named_growing_palette, patch_original_block_entity_scalar,
-    patch_original_numeric_arrays, Chunk, InPaletteEdit, Layout,
+    decode_sections, patch_original_block_entity_scalar, Chunk, InPaletteEdit, Layout,
 };
 use crate::{WorldError, WorldSummary};
 use flate2::{
-    read::{GzDecoder, ZlibDecoder},
     write::{GzEncoder, ZlibEncoder},
     Compression,
 };
@@ -40,12 +39,12 @@ fn hash(raw: &[u8]) -> String {
         .collect()
 }
 #[derive(Debug, Clone, Copy)]
-struct Slot {
-    start: usize,
-    sectors: usize,
+pub(crate) struct Slot {
+    pub(crate) start: usize,
+    pub(crate) sectors: usize,
 }
-fn parse_slots(bytes: &[u8]) -> Result<[Option<Slot>; 1024], WorldError> {
-    if bytes.len() < HEADER || bytes.len() % SECTOR != 0 || bytes.len() > MAX_IMAGE {
+pub(crate) fn parse_slots(bytes: &[u8]) -> Result<[Option<Slot>; 1024], WorldError> {
+    if bytes.len() < HEADER || !bytes.len().is_multiple_of(SECTOR) || bytes.len() > MAX_IMAGE {
         return Err(refuse(
             "Region image is truncated, not sector-aligned or exceeds 256 MiB",
         ));
@@ -101,7 +100,10 @@ fn bounded_decompress(reader: impl Read) -> Result<Vec<u8>, WorldError> {
     }
     Ok(out)
 }
-fn original_nbt(image: &[u8], slot: Slot) -> Result<(u8, Vec<u8>), WorldError> {
+pub(crate) fn original_nbt(
+    image: &[u8],
+    slot: Slot,
+) -> Result<(u8, NbtEnvelope, Vec<u8>), WorldError> {
     let base = slot.start * SECTOR;
     let length = u32::from_be_bytes(image[base..base + 4].try_into().unwrap()) as usize;
     if length < 1 || length + 4 > slot.sectors * SECTOR || length > MAX_COMPRESSED {
@@ -114,9 +116,24 @@ fn original_nbt(image: &[u8], slot: Slot) -> Result<(u8, Vec<u8>), WorldError> {
     // A compressor flag with bit 7 set denotes an external .mcc stream.
     // We do not rewrite, relocate or invent external sidecar data.
     let nbt = match method {
-        1 => bounded_decompress(GzDecoder::new(compressed))?,
-        2 => bounded_decompress(ZlibDecoder::new(compressed))?,
+        1 => {
+            let mut decoder = flate2::bufread::GzDecoder::new(std::io::Cursor::new(compressed));
+            let out = bounded_decompress(&mut decoder)?;
+            if decoder.get_ref().position() != compressed.len() as u64 {
+                return Err(refuse("Original GZip chunk has trailing bytes"));
+            }
+            out
+        }
+        2 => {
+            let mut decoder = flate2::bufread::ZlibDecoder::new(std::io::Cursor::new(compressed));
+            let out = bounded_decompress(&mut decoder)?;
+            if decoder.get_ref().position() != compressed.len() as u64 {
+                return Err(refuse("Original Zlib chunk has trailing bytes"));
+            }
+            out
+        }
         3 if compressed.len() <= MAX_NBT => compressed.to_vec(),
+        4 => crate::lz4_block::decode(compressed)?,
         3 => return Err(refuse("Raw original NBT exceeds 64 MiB")),
         _ => {
             return Err(refuse(format!(
@@ -124,9 +141,13 @@ fn original_nbt(image: &[u8], slot: Slot) -> Result<(u8, Vec<u8>), WorldError> {
             )))
         }
     };
-    Ok((method, nbt))
+    if nbt.starts_with(&[0x1f, 0x8b]) {
+        crate::nbt_file::verify_transition(&nbt, &nbt)?;
+    }
+    let (envelope, nbt) = NbtEnvelope::decode(nbt)?;
+    Ok((method, envelope, nbt))
 }
-fn compress(method: u8, nbt: &[u8]) -> Result<Vec<u8>, WorldError> {
+pub(crate) fn compress(method: u8, nbt: &[u8]) -> Result<Vec<u8>, WorldError> {
     if nbt.len() > MAX_NBT {
         return Err(refuse("Modified NBT exceeds 64 MiB"));
     }
@@ -142,6 +163,7 @@ fn compress(method: u8, nbt: &[u8]) -> Result<Vec<u8>, WorldError> {
             zip.finish()?
         }
         3 => nbt.to_vec(),
+        4 => crate::lz4_block::encode(nbt)?,
         _ => return Err(refuse("Cannot encode unknown/external chunk compression")),
     };
     if encoded.len() > MAX_COMPRESSED {
@@ -149,16 +171,142 @@ fn compress(method: u8, nbt: &[u8]) -> Result<Vec<u8>, WorldError> {
     }
     Ok(encoded)
 }
-fn equivalent_metadata(old: &Chunk, new: &Chunk) -> bool {
-    old.layout == new.layout
-        && old.data_version == new.data_version
-        && old.x == new.x
-        && old.z == new.z
-        && old.block_entities == new.block_entities
-        && old.sections.len() == new.sections.len()
-}
 fn count_actual_edits(original: &Chunk, updated: &Chunk) -> Result<usize, WorldError> {
-    if !equivalent_metadata(original, updated) {
+    count_actual_edits_authorized(original, updated, &std::collections::BTreeSet::new())
+}
+/// 旧 numeric 方块阶段的完整字节证明；光照阶段由独立多区块证明处理。
+pub(crate) fn verify_numeric_block_stage(
+    original: &[u8],
+    candidate: &[u8],
+    chunk: (i32, i32),
+) -> Result<Vec<crate::legacy_lighting::Position>, WorldError> {
+    verify_numeric_block_stage_with_be_history(original, candidate, chunk, &[])
+}
+/// 仅供联合保存使用；调用方同时完整重放 BE 历史，独立光照入口没有授权。
+pub(crate) fn verify_numeric_block_stage_with_be_history(
+    original: &[u8],
+    candidate: &[u8],
+    chunk: (i32, i32),
+    history: &[BeProof],
+) -> Result<Vec<crate::legacy_lighting::Position>, WorldError> {
+    if original == candidate {
+        return Ok(Vec::new());
+    }
+    let (expected, positions) =
+        derive_numeric_block_stage_with_be_history(original, candidate, chunk, history)?;
+    if expected != candidate {
+        return Err(refuse("旧版方块阶段含未经证明的 NBT 变化"));
+    }
+    Ok(positions)
+}
+pub(crate) fn derive_numeric_block_stage_with_be_history(
+    original: &[u8],
+    candidate: &[u8],
+    chunk: (i32, i32),
+    history: &[BeProof],
+) -> Result<(Vec<u8>, Vec<crate::legacy_lighting::Position>), WorldError> {
+    let authorized = history
+        .iter()
+        .filter_map(|proof| match proof {
+            BeProof::Structure(proof) => Some(proof.position()),
+            _ => None,
+        })
+        .collect();
+    let before = decode_sections(original).map_err(|e| refuse(e.to_string()))?;
+    let after = decode_sections(candidate).map_err(|e| refuse(e.to_string()))?;
+    if !matches!(before.layout, Layout::McRegion128 | Layout::NumericAnvil112)
+        || before.x != Some(chunk.0)
+        || before.z != Some(chunk.1)
+    {
+        return Err(refuse("旧版光照方块来源格式或位置不匹配"));
+    }
+    if before.layout != after.layout
+        || before.data_version != after.data_version
+        || before.x != after.x
+        || before.z != after.z
+        || before.block_entities != after.block_entities
+    {
+        return Err(refuse("旧版光照候选身份或 BE 变化"));
+    }
+    for section in &after.sections {
+        if !before.sections.iter().any(|v| v.y == section.y)
+            && section.indices.iter().any(|i| {
+                section
+                    .palette
+                    .get(*i as usize)
+                    .is_none_or(|v| v.name != "numeric:0")
+            })
+        {
+            return Err(refuse("旧版光照候选新增了未经证明的非空气 section"));
+        }
+    }
+    let mut edits = Vec::new();
+    let mut positions = Vec::new();
+    for section in &before.sections {
+        let next = after
+            .sections
+            .iter()
+            .find(|v| v.y == section.y)
+            .ok_or_else(|| refuse("旧版光照候选丢失 section"))?;
+        for i in 0..4096usize {
+            let a = section
+                .palette
+                .get(section.indices[i] as usize)
+                .ok_or_else(|| refuse("旧版方块索引无效"))?;
+            let b = next
+                .palette
+                .get(next.indices[i] as usize)
+                .ok_or_else(|| refuse("旧版方块候选索引无效"))?;
+            if a != b {
+                let x = (i % 16) as u8;
+                let z = ((i / 16) % 16) as u8;
+                let y = i32::from(section.y) * 16 + (i / 256) as i32;
+                let wx = chunk
+                    .0
+                    .checked_mul(16)
+                    .and_then(|v| v.checked_add(i32::from(x)))
+                    .ok_or_else(|| refuse("方块坐标溢出"))?;
+                let wz = chunk
+                    .1
+                    .checked_mul(16)
+                    .and_then(|v| v.checked_add(i32::from(z)))
+                    .ok_or_else(|| refuse("方块坐标溢出"))?;
+                edits.push(InPaletteEdit {
+                    local_x: x,
+                    local_z: z,
+                    y,
+                    original: a.clone(),
+                    replacement: b.clone(),
+                });
+                positions.push(crate::legacy_lighting::Position { x: wx, y, z: wz });
+            }
+        }
+    }
+    edits.sort_by_key(|e| (e.local_x, e.y, e.local_z));
+    positions.sort_unstable();
+    let stage = if edits.is_empty() {
+        original.to_vec()
+    } else {
+        crate::sections::patch_numeric_with_authorized_be(original, &edits, &authorized)
+            .map_err(|e| refuse(e.to_string()))?
+    };
+    Ok((stage, positions))
+}
+fn count_actual_edits_authorized(
+    original: &Chunk,
+    updated: &Chunk,
+    authorized: &std::collections::BTreeSet<(i32, i32, i32)>,
+) -> Result<usize, WorldError> {
+    if original.layout != updated.layout
+        || original.data_version != updated.data_version
+        || original.x != updated.x
+        || original.z != updated.z
+        || original.sections.len() != updated.sections.len()
+        || original
+            .block_entities
+            .symmetric_difference(&updated.block_entities)
+            .any(|p| !authorized.contains(p))
+    {
         return Err(refuse(
             "New chunk metadata/Block Entity locations differ from source",
         ));
@@ -184,6 +332,9 @@ fn count_actual_edits(original: &Chunk, updated: &Chunk) -> Result<usize, WorldE
                 let lz = ((idx / 16) % 16) as i32;
                 let y = section.y as i32 * 16 + (idx / 256) as i32;
                 if original.block_entities.iter().any(|&(x, by, z)| {
+                    if authorized.contains(&(x, by, z)) {
+                        return false;
+                    }
                     original
                         .x
                         .is_some_and(|cx| x.div_euclid(16) == cx && x.rem_euclid(16) == lx)
@@ -202,7 +353,8 @@ fn count_actual_edits(original: &Chunk, updated: &Chunk) -> Result<usize, WorldE
 }
 /// Complete, chronological original-BE surgery proof. The only supported
 /// change is an EXISTING Byte/Short/Int/Long/String tag within a fixed BE.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BeReplayStep {
     pub xyz: [i32; 3],
     pub field: String,
@@ -226,6 +378,53 @@ fn replay_be_proofs(raw: &[u8], proofs: &[&BeReplayStep]) -> Result<Vec<u8>, Wor
     }
     Ok(patched)
 }
+pub(crate) fn be_proof_chunk(p: &BeProof) -> (i32, i32) {
+    match p {
+        BeProof::Scalar(p) => p.chunk(),
+        BeProof::ChunkMetadata(p) => p.chunk(),
+        BeProof::ScheduledTicks(p) => p.chunk(),
+        BeProof::RootOrder(p) => p.chunk(),
+        BeProof::Edit(p) => {
+            let (x, _, z) = p.position();
+            (x.div_euclid(16), z.div_euclid(16))
+        }
+        BeProof::EditBatch(p) => {
+            let (x, _, z) = p.position();
+            (x.div_euclid(16), z.div_euclid(16))
+        }
+        BeProof::Structure(p) => {
+            let (x, _, z) = p.position();
+            (x.div_euclid(16), z.div_euclid(16))
+        }
+    }
+}
+pub(crate) fn replay_be_history(raw: &[u8], proofs: &[BeProof]) -> Result<Vec<u8>, WorldError> {
+    let mut out = raw.to_vec();
+    let mut seen = std::collections::BTreeSet::new();
+    for p in proofs {
+        out = match p {
+            BeProof::Scalar(p) => patch_original_block_entity_scalar(
+                &out,
+                (p.xyz[0], p.xyz[1], p.xyz[2]),
+                &p.field,
+                &p.value,
+            )
+            .map_err(|e| refuse(e.to_string()))?,
+            BeProof::Edit(p) => p.replay(&out)?,
+            BeProof::EditBatch(p) => p.replay(&out)?,
+            BeProof::ChunkMetadata(p) => p.replay(&out)?,
+            BeProof::ScheduledTicks(p) => p.replay(&out)?,
+            BeProof::RootOrder(p) => p.replay_blocks(&out)?,
+            BeProof::Structure(p) => {
+                if !seen.insert(p.position()) {
+                    return Err(refuse("同一位置包含重复结构 BE 证明"));
+                }
+                p.replay(&out)?
+            }
+        };
+    }
+    Ok(out)
+}
 
 /// Complete memory-only Region rewrite candidate; original path and original
 /// file SHA-256 are retained for the later backup/atomic writer.
@@ -238,6 +437,9 @@ pub struct NativeRegionCandidate {
     pub modified_chunks: usize,
     /// Exact replay list required for every proposed Block Entity change.
     pub be_replay: Vec<BeReplayStep>,
+    pub be_history: Vec<BeProof>,
+    pub biome_proofs: Vec<crate::biome_editing::Proof>,
+    pub section_proofs: Vec<crate::chunk_creation::SectionCreationProof>,
     pub original_bytes: usize,
     pub planned_bytes: usize,
     /// Full candidate image; NEVER write this directly without a transaction.
@@ -253,12 +455,36 @@ fn plan_region_image(
 ) -> Result<Vec<u8>, WorldError> {
     plan_region_image_with_be(original, region_x, region_z, changes, &[], timestamp)
 }
+#[cfg(test)]
 fn plan_region_image_with_be(
     original: &[u8],
     region_x: i32,
     region_z: i32,
     changes: &[&NativeChunkCandidate],
     proofs: &[BeReplayStep],
+    timestamp: u32,
+) -> Result<Vec<u8>, WorldError> {
+    plan_region_image_with_history(
+        original,
+        region_x,
+        region_z,
+        changes,
+        proofs,
+        &[],
+        &[],
+        &[],
+        timestamp,
+    )
+}
+fn plan_region_image_with_history(
+    original: &[u8],
+    region_x: i32,
+    region_z: i32,
+    changes: &[&NativeChunkCandidate],
+    proofs: &[BeReplayStep],
+    history: &[BeProof],
+    biomes: &[crate::biome_editing::Proof],
+    sections: &[crate::chunk_creation::SectionCreationProof],
     timestamp: u32,
 ) -> Result<Vec<u8>, WorldError> {
     if changes.is_empty() || changes.len() > 1024 {
@@ -281,7 +507,7 @@ fn plan_region_image_with_be(
         }
         let old = locations[slot_index]
             .ok_or_else(|| refuse("Region image has no original chunk for candidate"))?;
-        let (compression, nbt) = original_nbt(original, old)?;
+        let (compression, envelope, nbt) = original_nbt(original, old)?;
         if hash(&nbt) != change.original_nbt_sha256 {
             return Err(refuse(
                 "Original decompressed chunk SHA-256 changed since preview",
@@ -296,68 +522,49 @@ fn plan_region_image_with_be(
                 "Original NBT coordinates mismatch region chunk slot",
             ));
         }
-        let patched = decode_sections(&change.patched_nbt)
-            .map_err(|e| refuse(format!("Modified region NBT rejected: {e}")))?;
-        let changed = count_actual_edits(&decoded, &patched)?;
-        let proof_count = proofs
+        let chunk_proofs = proofs
             .iter()
             .filter(|step| step.chunk() == (change.chunk_x, change.chunk_z))
-            .count();
-        if changed != change.edited_blocks || (changed == 0 && proof_count == 0) {
-            return Err(refuse(
-                "Planned actual block/BE changes mismatch source preview",
-            ));
-        }
-        if proof_count > 0 {
-            let ops = proofs
-                .iter()
-                .filter(|step| step.chunk() == (change.chunk_x, change.chunk_z))
-                .collect::<Vec<_>>();
-            // The only BE edits allowed are exact replayed scalar operations.
-            let expected = if changed == 0 {
-                nbt.clone()
-            } else {
-                // The block-only replay is constructed from the actual
-                // original/updated palettes by the transaction verifier.
-                let mut edits = Vec::new();
-                for section in &decoded.sections {
-                    let next = patched
-                        .sections
-                        .iter()
-                        .find(|s| s.y == section.y)
-                        .ok_or_else(|| refuse("BE candidate Section missing"))?;
-                    for idx in 0..4096usize {
-                        let old = &section.palette[section.indices[idx] as usize];
-                        let new = &next.palette[next.indices[idx] as usize];
-                        if old != new {
-                            edits.push(InPaletteEdit {
-                                local_x: (idx % 16) as u8,
-                                local_z: ((idx / 16) % 16) as u8,
-                                y: section.y as i32 * 16 + (idx / 256) as i32,
-                                original: old.clone(),
-                                replacement: new.clone(),
-                            });
-                        }
-                    }
-                }
-                edits.sort_by_key(|e| (e.local_x, e.y, e.local_z));
-                match decoded.layout {
-                    Layout::Named113 | Layout::Modern118 => {
-                        patch_named_growing_palette(&nbt, &edits)
-                    }
-                    Layout::McRegion128 | Layout::NumericAnvil112 => {
-                        patch_original_numeric_arrays(&nbt, &edits)
-                    }
-                }
-                .map_err(|e| refuse(format!("BE planner block replay failed: {e}")))?
-            };
-            if replay_be_proofs(&expected, &ops)? != change.patched_nbt {
-                return Err(refuse(
-                    "BE Region candidate changes NBT beyond declared scalar proofs",
-                ));
+            .cloned()
+            .collect::<Vec<_>>();
+        let chunk_history = history
+            .iter()
+            .filter(|p| be_proof_chunk(p) == (change.chunk_x, change.chunk_z))
+            .cloned()
+            .collect::<Vec<_>>();
+        let chunk_biomes = biomes
+            .iter()
+            .filter(|p| p.chunk == (change.chunk_x, change.chunk_z))
+            .cloned()
+            .collect::<Vec<_>>();
+        let chunk_sections = sections
+            .iter()
+            .filter(|p| p.chunk == (change.chunk_x, change.chunk_z))
+            .cloned()
+            .collect::<Vec<_>>();
+        if chunk_history.is_empty() && chunk_biomes.is_empty() && chunk_sections.is_empty() {
+            verify_chunk_transition(
+                &nbt,
+                &change.patched_nbt,
+                (change.chunk_x, change.chunk_z),
+                change.edited_blocks,
+                &chunk_proofs,
+            )?;
+        } else {
+            if !chunk_proofs.is_empty() {
+                return Err(refuse("区块历史不能与旧标量证明混用"));
             }
+            verify_chunk_history(
+                &nbt,
+                &change.patched_nbt,
+                (change.chunk_x, change.chunk_z),
+                change.edited_blocks,
+                &chunk_history,
+                &chunk_biomes,
+                &chunk_sections,
+            )?;
         }
-        let encoded = compress(compression, &change.patched_nbt)?;
+        let encoded = compress(compression, &envelope.encode(&change.patched_nbt)?)?;
         let length = encoded
             .len()
             .checked_add(1)
@@ -400,7 +607,7 @@ fn plan_region_image_with_be(
     for change in changes {
         let index =
             change.chunk_z.rem_euclid(32) as usize * 32 + change.chunk_x.rem_euclid(32) as usize;
-        let (_, roundtrip) = original_nbt(
+        let (_, _, roundtrip) = original_nbt(
             &image,
             new_slots[index].ok_or_else(|| refuse("Planned chunk location vanished"))?,
         )?;
@@ -434,6 +641,45 @@ fn plan_region_image_with_be(
     Ok(image)
 }
 
+/// 使用调用方当前批次已读取的不可变 Region 快照规划单个真实 Region。
+pub(crate) fn plan_region_from_source(
+    path: &std::path::Path,
+    coords: (i32, i32),
+    original: &[u8],
+    changes: &[NativeChunkCandidate],
+    history: &[BeProof],
+    biomes: &[crate::biome_editing::Proof],
+    sections: &[crate::chunk_creation::SectionCreationProof],
+    timestamp: u32,
+) -> Result<NativeRegionCandidate, WorldError> {
+    let refs = changes.iter().collect::<Vec<_>>();
+    let image = plan_region_image_with_history(
+        original,
+        coords.0,
+        coords.1,
+        &refs,
+        &[],
+        history,
+        biomes,
+        sections,
+        timestamp,
+    )?;
+    Ok(NativeRegionCandidate {
+        path: path.to_owned(),
+        original_region_sha256: hash(original),
+        region_x: coords.0,
+        region_z: coords.1,
+        modified_chunks: changes.len(),
+        be_replay: Vec::new(),
+        be_history: history.to_vec(),
+        biome_proofs: biomes.to_vec(),
+        section_proofs: sections.to_vec(),
+        original_bytes: original.len(),
+        planned_bytes: image.len(),
+        image,
+    })
+}
+
 /// Reconstruct the expected edited NBT with our ONLY allowed block-byte
 /// adapters, then compare EVERY output byte. This is essential: a public
 /// NativeRegionCandidate must never smuggle changes to opaque modded tags,
@@ -444,8 +690,29 @@ fn verify_exact_block_only_replay(
     before: &Chunk,
     after: &Chunk,
     proofs: &[&BeReplayStep],
+    history: &[BeProof],
+    biomes: &[crate::biome_editing::Proof],
 ) -> Result<(), WorldError> {
-    if !equivalent_metadata(before, after) {
+    let authorized = history
+        .iter()
+        .filter_map(|p| {
+            if let BeProof::Structure(p) = p {
+                Some(p.position())
+            } else {
+                None
+            }
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    if before.layout != after.layout
+        || before.data_version != after.data_version
+        || before.x != after.x
+        || before.z != after.z
+        || before.sections.len() != after.sections.len()
+        || before
+            .block_entities
+            .symmetric_difference(&after.block_entities)
+            .any(|p| !authorized.contains(p))
+    {
         return Err(refuse("Replayed NBT metadata or BE coordinates differ"));
     }
     let mut edits = Vec::new();
@@ -475,7 +742,7 @@ fn verify_exact_block_only_replay(
             }
         }
     }
-    if edits.is_empty() && proofs.is_empty() {
+    if edits.is_empty() && proofs.is_empty() && history.is_empty() && biomes.is_empty() {
         return Err(refuse(
             "No actual block or authenticated BE scalar edits in candidate",
         ));
@@ -488,21 +755,121 @@ fn verify_exact_block_only_replay(
     } else {
         match before.layout {
             Layout::Named113 | Layout::Modern118 => {
-                patch_named_growing_palette(original_nbt, &edits)
+                crate::sections::patch_named_with_authorized_be(original_nbt, &edits, &authorized)
             }
             Layout::McRegion128 | Layout::NumericAnvil112 => {
-                patch_original_numeric_arrays(original_nbt, &edits)
+                crate::sections::patch_numeric_with_authorized_be(original_nbt, &edits, &authorized)
             }
         }
         .map_err(|e| refuse(format!("Canonical NBT block-only replay rejected: {e}")))?
     };
-    let expected = replay_be_proofs(&expected, proofs)?;
+    let expected = if edits.is_empty() {
+        expected
+    } else {
+        crate::chunk_postprocess::invalidate(&expected)?
+    };
+    let mut expected = expected;
+    for proof in biomes {
+        expected = proof.replay(&expected)?;
+    }
+    if !proofs.is_empty() && !history.is_empty() {
+        return Err(refuse("BE 标量证明与完整历史不可混用"));
+    }
+    let expected = if history.is_empty() {
+        replay_be_proofs(&expected, proofs)?
+    } else {
+        replay_be_history(&expected, history)?
+    };
     if expected != patched_nbt {
         return Err(refuse(
             "Region candidate has unproven changes to opaque original NBT",
         ));
     }
     Ok(())
+}
+
+/// 按区块位置、实际方块变更数量与受限 BE 证明重放整个候选。
+pub(crate) fn verify_chunk_transition(
+    original_nbt: &[u8],
+    patched_nbt: &[u8],
+    expected_chunk: (i32, i32),
+    edited_blocks: usize,
+    be_proofs: &[BeReplayStep],
+) -> Result<(), WorldError> {
+    let before = decode_sections(original_nbt)
+        .map_err(|e| refuse(format!("Original chunk decode failed: {e}")))?;
+    let after = decode_sections(patched_nbt)
+        .map_err(|e| refuse(format!("Replacement chunk decode failed: {e}")))?;
+    if before.x.is_some_and(|x| x != expected_chunk.0)
+        || before.z.is_some_and(|z| z != expected_chunk.1)
+        || be_proofs
+            .iter()
+            .any(|proof| proof.chunk() != expected_chunk)
+    {
+        return Err(refuse(
+            "Chunk or BE proof coordinates do not match the expected slot",
+        ));
+    }
+    let count = count_actual_edits(&before, &after)?;
+    if count != edited_blocks || (count == 0 && be_proofs.is_empty()) {
+        return Err(refuse(
+            "Actual block edits differ from preview, or candidate has no proof",
+        ));
+    }
+    let refs = be_proofs.iter().collect::<Vec<_>>();
+    verify_exact_block_only_replay(original_nbt, patched_nbt, &before, &after, &refs, &[], &[])
+}
+pub(crate) fn verify_chunk_history(
+    original: &[u8],
+    patched: &[u8],
+    chunk: (i32, i32),
+    edited: usize,
+    history: &[BeProof],
+    biomes: &[crate::biome_editing::Proof],
+    sections: &[crate::chunk_creation::SectionCreationProof],
+) -> Result<(), WorldError> {
+    let mut base = original.to_vec();
+    for proof in sections {
+        if proof.chunk != chunk {
+            return Err(refuse("新 section 证明区块不匹配"));
+        }
+        base = crate::chunk_creation::insert_section(&base, proof)?;
+    }
+    let before = decode_sections(&base).map_err(|e| refuse(e.to_string()))?;
+    let after = decode_sections(patched).map_err(|e| refuse(e.to_string()))?;
+    if before.x.is_some_and(|x| x != chunk.0)
+        || before.z.is_some_and(|z| z != chunk.1)
+        || history.iter().any(|p| be_proof_chunk(p) != chunk)
+    {
+        return Err(refuse("BE 历史区块坐标不匹配"));
+    }
+    let allowed = history
+        .iter()
+        .filter_map(|p| {
+            if let BeProof::Structure(p) = p {
+                Some(p.position())
+            } else {
+                None
+            }
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    if biomes.iter().any(|p| p.chunk != chunk) {
+        return Err(refuse("生物群系证明区块不匹配"));
+    }
+    let count = count_actual_edits_authorized(&before, &after, &allowed)?;
+    if count != edited
+        || (count == 0 && history.is_empty() && biomes.is_empty() && sections.is_empty())
+    {
+        return Err(refuse("区块历史实际变更数量不匹配"));
+    }
+    if count == 0 && history.is_empty() && biomes.is_empty() {
+        return if base == patched {
+            Ok(())
+        } else {
+            Err(refuse("新 section 候选包含其他改动"))
+        };
+    }
+    verify_exact_block_only_replay(&base, patched, &before, &after, &[], history, biomes)
 }
 /// Prove that a candidate differs from the original region in exactly its
 /// declared chunk-header entries and newly appended sectors. Reject forged,
@@ -519,9 +886,9 @@ pub(crate) fn verify_candidate(
             "Region candidate original digest or image size differs",
         ));
     }
-    if candidate.be_replay.len() > 24 {
+    if !candidate.be_replay.is_empty() && !candidate.be_history.is_empty() {
         return Err(refuse(
-            "Region BE proof exceeds 24 original scalar operations",
+            "Region BE history cannot be mixed with legacy scalar proofs",
         ));
     }
     let original_slots = parse_slots(original)?;
@@ -561,9 +928,10 @@ pub(crate) fn verify_candidate(
                 "Candidate repointed a chunk into original sector bytes",
             ));
         }
-        let (source_method, source_nbt) = original_nbt(original, source)?;
-        let (target_method, target_nbt) = original_nbt(&candidate.image, destination)?;
-        if source_method != target_method {
+        let (source_method, source_envelope, source_nbt) = original_nbt(original, source)?;
+        let (target_method, target_envelope, target_nbt) =
+            original_nbt(&candidate.image, destination)?;
+        if source_method != target_method || source_envelope != target_envelope {
             return Err(refuse(
                 "Candidate changed original chunk compression method",
             ));
@@ -591,12 +959,91 @@ pub(crate) fn verify_candidate(
             .iter()
             .filter(|step| step.chunk() == chunk_coord)
             .collect::<Vec<_>>();
-        if count_actual_edits(&before, &after)? == 0 && proofs.is_empty() {
+        let history = candidate
+            .be_history
+            .iter()
+            .filter(|p| be_proof_chunk(p) == chunk_coord)
+            .cloned()
+            .collect::<Vec<_>>();
+        let sections = candidate
+            .section_proofs
+            .iter()
+            .filter(|p| p.chunk == chunk_coord)
+            .cloned()
+            .collect::<Vec<_>>();
+        if !sections.is_empty() {
+            if !proofs.is_empty() {
+                return Err(refuse("section 创建不能与旧证明混用"));
+            }
+            let mut base = source_nbt.clone();
+            for p in &sections {
+                base = crate::chunk_creation::insert_section(&base, p)?;
+            }
+            let base_chunk = decode_sections(&base).map_err(|e| refuse(e.to_string()))?;
+            let allowed = history
+                .iter()
+                .filter_map(|p| {
+                    if let BeProof::Structure(p) = p {
+                        Some(p.position())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<BTreeSet<_>>();
+            let count = count_actual_edits_authorized(&base_chunk, &after, &allowed)?;
+            let biomes = candidate
+                .biome_proofs
+                .iter()
+                .filter(|p| p.chunk == chunk_coord)
+                .cloned()
+                .collect::<Vec<_>>();
+            verify_chunk_history(
+                &source_nbt,
+                &target_nbt,
+                chunk_coord,
+                count,
+                &history,
+                &biomes,
+                &sections,
+            )?;
+            ranges.push((destination.start, destination.start + destination.sectors));
+            modified += 1;
+            continue;
+        }
+        let allowed = history
+            .iter()
+            .filter_map(|p| {
+                if let BeProof::Structure(p) = p {
+                    Some(p.position())
+                } else {
+                    None
+                }
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        let biomes = candidate
+            .biome_proofs
+            .iter()
+            .filter(|p| p.chunk == chunk_coord)
+            .cloned()
+            .collect::<Vec<_>>();
+        if count_actual_edits_authorized(&before, &after, &allowed)? == 0
+            && proofs.is_empty()
+            && history.is_empty()
+            && biomes.is_empty()
+        {
             return Err(refuse(
                 "Region candidate replaced a chunk without proven edits",
             ));
         }
-        verify_exact_block_only_replay(&source_nbt, &target_nbt, &before, &after, &proofs)?;
+        verify_exact_block_only_replay(
+            &source_nbt,
+            &target_nbt,
+            &before,
+            &after,
+            &proofs,
+            &history,
+            &biomes,
+        )?;
         ranges.push((destination.start, destination.start + destination.sectors));
         modified += 1;
     }
@@ -608,6 +1055,27 @@ pub(crate) fn verify_candidate(
         return Err(refuse(
             "BE proof refers to a chunk not changed by the Region image",
         ));
+    }
+    if candidate
+        .be_history
+        .iter()
+        .any(|p| !touched.contains(&be_proof_chunk(p)))
+    {
+        return Err(refuse("BE 历史指向未改变的区块"));
+    }
+    if candidate
+        .biome_proofs
+        .iter()
+        .any(|p| !touched.contains(&p.chunk))
+    {
+        return Err(refuse("生物群系证明指向未改变的区块"));
+    }
+    if candidate
+        .section_proofs
+        .iter()
+        .any(|p| !touched.contains(&p.chunk))
+    {
+        return Err(refuse("section 证明指向未改变的区块"));
     }
     if modified != candidate.modified_chunks || modified == 0 {
         return Err(refuse("Region candidate modified-chunk count mismatch"));
@@ -645,8 +1113,20 @@ pub(crate) fn plan_world_regions_with_be(
     proofs: &[BeReplayStep],
     timestamp: u32,
 ) -> Result<Vec<NativeRegionCandidate>, WorldError> {
-    if proofs.len() > 24 {
-        return Err(refuse("Too many BE scalar proofs"));
+    plan_world_regions_with_history(world, dimension, changes, proofs, &[], &[], &[], timestamp)
+}
+pub(crate) fn plan_world_regions_with_history(
+    world: &WorldSummary,
+    dimension: &str,
+    changes: &[NativeChunkCandidate],
+    proofs: &[BeReplayStep],
+    history: &[BeProof],
+    biomes: &[crate::biome_editing::Proof],
+    sections: &[crate::chunk_creation::SectionCreationProof],
+    timestamp: u32,
+) -> Result<Vec<NativeRegionCandidate>, WorldError> {
+    if !proofs.is_empty() && !history.is_empty() {
+        return Err(refuse("BE 历史不能与旧标量证明混用"));
     }
     let changed = changes
         .iter()
@@ -656,6 +1136,18 @@ pub(crate) fn plan_world_regions_with_be(
         return Err(refuse(
             "Region planner was supplied an unrelated BE edit proof",
         ));
+    }
+    if history
+        .iter()
+        .any(|p| !changed.contains(&be_proof_chunk(p)))
+    {
+        return Err(refuse("BE 历史包含无关区块"));
+    }
+    if biomes.iter().any(|p| !changed.contains(&p.chunk)) {
+        return Err(refuse("生物群系证明包含无关区块"));
+    }
+    if sections.iter().any(|p| !changed.contains(&p.chunk)) {
+        return Err(refuse("section 证明包含无关区块"));
     }
     let dim = world
         .dimensions
@@ -706,8 +1198,35 @@ pub(crate) fn plan_world_regions_with_be(
             .filter(|p| p.chunk().0.div_euclid(32) == rx && p.chunk().1.div_euclid(32) == rz)
             .cloned()
             .collect::<Vec<_>>();
-        let image =
-            plan_region_image_with_be(&original, rx, rz, &changed, &region_proofs, timestamp)?;
+        let region_history = history
+            .iter()
+            .filter(|p| {
+                let (x, z) = be_proof_chunk(p);
+                x.div_euclid(32) == rx && z.div_euclid(32) == rz
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let region_biomes = biomes
+            .iter()
+            .filter(|p| p.chunk.0.div_euclid(32) == rx && p.chunk.1.div_euclid(32) == rz)
+            .cloned()
+            .collect::<Vec<_>>();
+        let region_sections = sections
+            .iter()
+            .filter(|p| p.chunk.0.div_euclid(32) == rx && p.chunk.1.div_euclid(32) == rz)
+            .cloned()
+            .collect::<Vec<_>>();
+        let image = plan_region_image_with_history(
+            &original,
+            rx,
+            rz,
+            &changed,
+            &region_proofs,
+            &region_history,
+            &region_biomes,
+            &region_sections,
+            timestamp,
+        )?;
         // Catch concurrent modifications during planning.
         if hash(&fs::read(&path)?) != stamp {
             return Err(refuse(
@@ -721,12 +1240,20 @@ pub(crate) fn plan_world_regions_with_be(
             original_region_sha256: stamp,
             modified_chunks: changed.len(),
             be_replay: region_proofs,
+            be_history: region_history,
+            biome_proofs: region_biomes,
+            section_proofs: region_sections,
             original_bytes: original.len(),
             planned_bytes: image.len(),
             image,
         });
     }
     Ok(result)
+}
+
+#[cfg(test)]
+pub(crate) fn run_test_category(category: crate::test_categories::Category) {
+    tests::run_test_category(category);
 }
 
 #[cfg(test)]
@@ -823,10 +1350,10 @@ mod tests {
             chunk_z: 0,
             edited_blocks: 1,
             original_nbt_sha256: hash(&source),
-            patched_nbt: altered,
+            patched_nbt: crate::chunk_postprocess::invalidate(&altered).unwrap(),
         }
     }
-    #[test]
+
     fn original_zlib_gzip_and_raw_sectors_survive_append_only_edit_plan() {
         for method in [1u8, 2, 3] {
             let original = region(method);
@@ -839,13 +1366,13 @@ mod tests {
             assert_eq!(parse_slots(&new).unwrap()[1].unwrap().start, 3);
             let target = parse_slots(&new).unwrap()[0].unwrap();
             assert!(target.start >= 4);
-            let (actual_method, raw) = original_nbt(&new, target).unwrap();
+            let (actual_method, _, raw) = original_nbt(&new, target).unwrap();
             assert_eq!(actual_method, method);
             assert_eq!(raw, changed().patched_nbt);
             assert_eq!(original, region(method)); // original input remains byte identical
         }
     }
-    #[test]
+
     fn stale_digest_duplicate_missing_and_cross_region_fail_without_writing() {
         let original = region(2);
         let candidate = changed();
@@ -859,7 +1386,7 @@ mod tests {
         assert!(plan_region_image(&original, 0, 0, &[&missing], 3).is_err());
         assert_eq!(original, region(2));
     }
-    #[test]
+
     fn overlapping_invalid_and_external_chunk_sectors_are_refused() {
         let mut overlap = region(2);
         overlap[4..8].copy_from_slice(&((2u32 << 8) | 1).to_be_bytes());
@@ -870,5 +1397,67 @@ mod tests {
         let mut external = region(2);
         external[2 * SECTOR + 4] = 130;
         assert!(plan_region_image(&external, 0, 0, &[&changed()], 5).is_err());
+    }
+
+    fn original_numeric_inner_gzip_block_patch_preserves_its_envelope() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../test_files/AnvilWorld_1.8/region/r.0.0.mca");
+        let original = fs::read(&path).unwrap();
+        let slot = parse_slots(&original)
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .next()
+            .unwrap();
+        let (method, envelope, raw) = original_nbt(&original, slot).unwrap();
+        assert!(matches!(envelope, NbtEnvelope::Gzip(_)));
+        let chunk = decode_sections(&raw).unwrap();
+        let section = chunk.sections.first().unwrap();
+        let before = section.block(0, 0, 0).unwrap().clone();
+        let after = crate::editing::parse_state(if before.name == "numeric:1" {
+            "numeric:2[data=0]"
+        } else {
+            "numeric:1[data=0]"
+        })
+        .unwrap();
+        let updated = crate::sections::patch_original_numeric_arrays(
+            &raw,
+            &[InPaletteEdit {
+                local_x: 0,
+                local_z: 0,
+                y: i32::from(section.y) * 16,
+                original: before,
+                replacement: after.clone(),
+            }],
+        )
+        .unwrap();
+        let compressed = compress(method, &envelope.encode(&updated).unwrap()).unwrap();
+        let sectors = (compressed.len() + 5).div_ceil(SECTOR);
+        let mut image = vec![0; HEADER + sectors * SECTOR];
+        image[0..4].copy_from_slice(&((2u32 << 8) | sectors as u32).to_be_bytes());
+        image[HEADER..HEADER + 4].copy_from_slice(&((compressed.len() + 1) as u32).to_be_bytes());
+        image[HEADER + 4] = method;
+        image[HEADER + 5..HEADER + 5 + compressed.len()].copy_from_slice(&compressed);
+        let (_, retained, decoded) =
+            original_nbt(&image, parse_slots(&image).unwrap()[0].unwrap()).unwrap();
+        assert_eq!(retained, envelope);
+        assert_eq!(decoded, updated);
+        assert_eq!(
+            decode_sections(&decoded)
+                .unwrap()
+                .block(0, i32::from(section.y) * 16, 0),
+            Some(&after)
+        );
+        assert_eq!(fs::read(&path).unwrap(), original);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
+        if category == crate::test_categories::Category::Recovery {
+            original_numeric_inner_gzip_block_patch_preserves_its_envelope();
+            original_zlib_gzip_and_raw_sectors_survive_append_only_edit_plan();
+            stale_digest_duplicate_missing_and_cross_region_fail_without_writing();
+            overlapping_invalid_and_external_chunk_sectors_are_refused();
+        }
     }
 }

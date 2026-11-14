@@ -1,0 +1,72 @@
+{
+  "source": "准确客户端 class 成员引用与静态注册 javap；没有执行客户端或编译参照类",
+  "client_sha256": "499f6897d1837516680f3114072d8106e11c9adcd933fe5cf051b551089b0c99",
+  "catalog_sha256": "40d80dad14456c360442a7f3b39fa2184dc4f1db2052d17e7e0388da3e5c1bdc",
+  "items_javap_sha256": "ed8dcff4e8bec2827f1c21e93562dbf9992a49effb56691da62f3e897e30b777",
+  "blocks_javap_sha256": "a3efc37d7bf6bd77814c41aff46d0a6cfdfccb46a14f2c4fa6ad1ac0c2f9a743",
+  "fire_constructor_callers": [
+    "cut"
+  ],
+  "component_key_users": [
+    "kq",
+    "cjh",
+    "cul$a",
+    "cuq"
+  ],
+  "property_field_users": [],
+  "fire_registrations": [
+    {
+      "field": "aC",
+      "id": "minecraft:ancient_debris"
+    },
+    {
+      "field": "aO",
+      "id": "minecraft:netherite_block"
+    },
+    {
+      "field": "oK",
+      "id": "minecraft:netherite_ingot"
+    },
+    {
+      "field": "oL",
+      "id": "minecraft:netherite_scrap"
+    },
+    {
+      "field": "pl",
+      "id": "minecraft:netherite_sword"
+    },
+    {
+      "field": "pm",
+      "id": "minecraft:netherite_shovel"
+    },
+    {
+      "field": "pn",
+      "id": "minecraft:netherite_pickaxe"
+    },
+    {
+      "field": "po",
+      "id": "minecraft:netherite_axe"
+    },
+    {
+      "field": "pp",
+      "id": "minecraft:netherite_hoe"
+    },
+    {
+      "field": "pS",
+      "id": "minecraft:netherite_helmet"
+    },
+    {
+      "field": "pT",
+      "id": "minecraft:netherite_chestplate"
+    },
+    {
+      "field": "pU",
+      "id": "minecraft:netherite_leggings"
+    },
+    {
+      "field": "pV",
+      "id": "minecraft:netherite_boots"
+    }
+  ],
+  "output_sha256": "a0c67b48251665b285d476091887c6f74c731d5e34c70b0dcea1925e84fb824c"
+}

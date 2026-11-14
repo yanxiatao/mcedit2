@@ -92,6 +92,31 @@ pub(crate) fn decode(stream: &[u8]) -> Result<Vec<u8>, WorldError> {
         output.extend_from_slice(&raw);
     }
 }
+/// 使用 lz4-java 支持的原始块格式输出；保留方法 4，不伪造标准 LZ4 帧。
+pub(crate) fn encode(data: &[u8]) -> Result<Vec<u8>, WorldError> {
+    if data.len() > MAX_NBT {
+        return Err(refuse("Java LZ4Block 输入超过 64 MiB"));
+    }
+    let mut out = Vec::new();
+    for raw in data.chunks(65536) {
+        out.extend_from_slice(MAGIC);
+        out.push(0x16);
+        let n = raw.len() as u32;
+        out.extend(n.to_le_bytes());
+        out.extend(n.to_le_bytes());
+        out.extend((xxhash_rust::xxh32::xxh32(raw, XXH_SEED) & 0x0fff_ffff).to_le_bytes());
+        out.extend_from_slice(raw);
+    }
+    out.extend_from_slice(MAGIC);
+    out.push(0x16);
+    out.extend([0u8; 12]);
+    Ok(out)
+}
+#[cfg(test)]
+pub(crate) fn run_test_category(category: crate::test_categories::Category) {
+    tests::run_test_category(category);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,7 +142,7 @@ mod tests {
         end.extend_from_slice(&[0u8; 12]);
         end
     }
-    #[test]
+
     fn java_block_stream_supports_raw_and_lz4_blocks_and_exact_end() {
         let data = vec![0x45; 4096];
         let mut stream = block(&data, false);
@@ -130,13 +155,13 @@ mod tests {
         stream.truncate(stream.len() - HEADER);
         assert!(decode(&stream).is_err());
     }
-    #[test]
+
     fn malformed_checksum_and_lengths_cannot_be_silently_loaded() {
-        let mut bytes = block(&vec![0x55; 128], false);
+        let mut bytes = block(&[0x55; 128], false);
         bytes.extend(terminal());
         bytes[17] ^= 1;
         assert!(decode(&bytes).is_err());
-        let mut lengths = block(&vec![0x55; 128], false);
+        let mut lengths = block(&[0x55; 128], false);
         lengths[13..17].copy_from_slice(&((MAX_NBT as u32) + 1).to_le_bytes());
         lengths.extend(terminal());
         assert!(decode(&lengths).is_err());
@@ -144,5 +169,13 @@ mod tests {
         unknown[8] = 0xf6;
         unknown.extend(terminal());
         assert!(decode(&unknown).is_err());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
+        if category == crate::test_categories::Category::Formats {
+            java_block_stream_supports_raw_and_lz4_blocks_and_exact_end();
+            malformed_checksum_and_lengths_cannot_be_silently_loaded();
+        }
     }
 }

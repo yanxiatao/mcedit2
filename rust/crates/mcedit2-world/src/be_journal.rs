@@ -7,7 +7,6 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 const MAX_FILE: u64 = 256 * 1024;
-const MAX_EDITS: usize = 24;
 fn refuse(s: impl Into<String>) -> WorldError {
     WorldError::Invalid(s.into())
 }
@@ -43,17 +42,13 @@ impl BeJournal {
                 "BE journal does not match original world/dimension/DataVersion",
             ));
         }
-        if self.edits.is_empty() || self.edits.len() > MAX_EDITS {
-            return Err(refuse(
-                "BE journal requires 1..24 original scalar operations",
-            ));
+        if self.edits.is_empty() {
+            return Err(refuse("BE journal requires original scalar operations"));
         }
         for e in &self.edits {
             if !valid_hash(&e.original_chunk_sha256)
                 || !valid_hash(&e.resulting_chunk_sha256)
                 || e.field.is_empty()
-                || e.field.len() > 128
-                || e.value.len() > 4096
                 || matches!(e.field.as_str(), "x" | "y" | "z" | "id" | "keepPacked")
             {
                 return Err(refuse("BE journal contains invalid scalar edit metadata"));
@@ -92,7 +87,11 @@ pub fn save(
     let writing = out.write_all(&bytes).and_then(|_| out.sync_all());
     drop(out);
     if let Err(e) = writing {
-        let _ = fs::remove_file(path);
+        if let Err(cleanup) = fs::remove_file(path) {
+            return Err(refuse(format!(
+                "BE 日志写入失败：{e}；清理未完成文件失败：{cleanup}"
+            )));
+        }
         return Err(e.into());
     }
     Ok(())

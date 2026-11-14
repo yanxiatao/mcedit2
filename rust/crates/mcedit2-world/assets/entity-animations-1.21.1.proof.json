@@ -1,0 +1,24 @@
+{
+  "version": "1.21.1",
+  "client_sha256": "499f6897d1837516680f3114072d8106e11c9adcd933fe5cf051b551089b0c99",
+  "mappings_sha256": "140c47931cccc8fc9e4c22d7603e2d714d1a953a146f51ea7397d95c955536ec",
+  "entries_sha256": {
+    "fhg.class": "2d1e7cbf2ebf9eaa0c46e910f835107fd31f895b79f0dd47065ff7eba0e23fdf",
+    "fhh.class": "334e35094faf5145f0daedff26da08c27b3df3ea887b71b7e5d546de7d8b3428",
+    "fhi.class": "6164ba8111597f7f87ce5b4c115a89ea0badffd37cf2e1cc4a8d902a36b667c9",
+    "fhj.class": "6896430aed83e34775021cbcc8f7140c9748a2b337278d6aafc3fa9abb0948e8",
+    "fhk.class": "d07f7ff3930859bed773f8701264bcb95e7dd7e420e0f106f83d270889f5f480",
+    "fhl.class": "f23dfa7b47e7e67f631c22114cbe9252549e4a3d29b2ee309876dd6412deb89c",
+    "fhm.class": "2b11e91e67d0438d53de31e001e09cd5dea304e75f23e587a049856b45030e8a",
+    "fhd$a.class": "43718360f753385715322bfddacf46b77835d27a01f8ae89b33b8d1fb66cc8c1",
+    "fhd.class": "94acb8b08e53398c6f317c7b0bcffb51ce166ee367150b7cfc8115c47abd6e8a",
+    "fhf.class": "867ae474740c07a746a3e7e95bb4124b64561955da8b81207fe59e8254122cd3",
+    "fhe.class": "391aa3dc429c007f01d6f0d998179a484914ec2d88364cb4903b8e329a95ff00",
+    "fhc.class": "c8c7d90c8bf4a847641e5268c28bb7de772acddd36987277af8ce04ac7fa4fdd",
+    "fhc$d.class": "36cf5278bf7a4196e242f3f03d8d227d05fd1e167e6d04dbf608ad8bb5744a6d",
+    "fhc$b.class": "2af56e8ad5771552e79bd90dd8649ab0b80c716639b4a79c3cdf253ef13b1e0d"
+  },
+  "extractor_sha256": "07ca1bf95674e2965916468f20f453082a28fa64b3e979ee3d180f5af966a9ff",
+  "output_sha256": "f615d4fff9c68f863b6badad8f90e54a76f500c1ee68f24f7e4784187654ea1d",
+  "scope": "仅静态读取 class 常量构造数据流；不加载或执行客户端类，无编译或测试"
+}

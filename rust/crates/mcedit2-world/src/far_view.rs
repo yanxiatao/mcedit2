@@ -9,30 +9,38 @@ use crate::surface::{
 use crate::WorldError;
 use std::collections::BTreeSet;
 
-pub const MAX_DISTANCE_CHUNKS: u16 = 2047;
+/// 显示宽度使用 u16 方块数，半径由实际表示范围推导。
+pub const MAX_DISTANCE_CHUNKS: u16 = (u16::MAX / 16 - 1) / 2;
 pub const FAR_BATCH_CHUNKS: usize = 128;
 /// Limit decoded source chunks per batch, but amortize UI refreshes for
 /// distant one-sample LODs. Only one background read batch runs at a time.
 pub fn batch_size_for(span: u8) -> usize {
     match span {
         1 => 12,
+        2 => 24,
         4 => 32,
         8 => 64,
         _ => FAR_BATCH_CHUNKS,
     }
 }
-pub const MAX_PLANNED_CHUNKS: usize = 36_000;
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FarChunkRequest {
     pub cx: i32,
     pub cz: i32,
-    /// 1=full sampled column density; 4/8/16 are visual-only terrain LODs.
+    /// 1=full sampled column density; 2/4/8/16 are visual-only terrain LODs.
     pub span: u8,
 }
 #[derive(Clone, Debug)]
 pub struct FarChunkPatch {
+    /// 完整读取已经解码的真实八邻列群系，流式到达顺序不应改变颜色邻域。
+    pub biome_neighbors:
+        std::sync::Arc<[((i32, i32), std::sync::Arc<crate::biome_source::Column>)]>,
+    /// 本区块的完整 biome 调色板；流式快照共享邻块，不复制整份 Chunk。
+    pub biomes: Option<std::sync::Arc<crate::biome_source::Column>>,
     pub tile: SourceChunkTile,
     pub voxels: Vec<SurfaceVoxel>,
+    /// 只有完整、资源感知的源读取才提供；采样或未知来源没有遮挡证明。
+    pub sections: Option<std::sync::Arc<[crate::section_visibility::Section]>>,
 }
 fn reject(reason: &str) -> WorldError {
     WorldError::Invalid(reason.to_string())
@@ -49,9 +57,9 @@ fn lod_for(radius: i32) -> u8 {
     }
 }
 fn validate_height(y_min: i32, y_max: i32) -> Result<(), WorldError> {
-    if y_min > y_max || y_max as i64 - y_min as i64 + 1 > 512 {
+    if y_min > y_max || y_min < -2048 || y_max > 2047 {
         return Err(reject(
-            "Far 3D terrain height must fit 1..512 source levels",
+            "远景源高度必须位于有符号 Section Y 的 -2048..2047 范围",
         ));
     }
     Ok(())
@@ -68,11 +76,7 @@ fn extrema(center_x: i32, center_z: i32, radius: u16) -> Result<(i32, i32, u16),
     let convert = |n: i64| i32::try_from(n).map_err(|_| reject("Far view coordinate overflow"));
     let x0 = convert(xmin)?;
     let z0 = convert(zmin)?;
-    let _ = Bounds::new((x0, 0, z0), (x0, 0, z0))?;
-    let _ = Bounds::new(
-        (convert(xmax)?, 0, convert(zmax)?),
-        (convert(xmax)?, 0, convert(zmax)?),
-    )?;
+    Bounds::new((x0, 0, z0), (convert(xmax)?, 0, convert(zmax)?))?;
     Ok((x0, z0, span as u16))
 }
 /// Camera-centric concentric source-chunk rings, including outermost
@@ -146,9 +150,6 @@ pub fn plan_far_chunks(
                         cz: key.1,
                         span: lod_for(ring),
                     });
-                    if out.len() > MAX_PLANNED_CHUNKS {
-                        return Err(reject("Far chunk plan exceeds read-only memory budget"));
-                    }
                 }
             }
         }
@@ -166,6 +167,7 @@ pub fn empty_far_view(
     let (x, z, side) = extrema(center_x, center_z, radius)?;
     let _ = Bounds::new((x, y_min, z), (x, y_min, z))?;
     Ok(SurfaceView {
+        biomes: Default::default(),
         x,
         z,
         y_min,
@@ -218,7 +220,7 @@ pub fn inspect_far_chunk(
     y_min: i32,
     y_max: i32,
 ) -> Result<FarChunkPatch, WorldError> {
-    let mut cache = ReadOnlyRegionCache::new(session.original_world(), session.dimension())?;
+    let mut cache = session.source_reader()?;
     inspect_far_chunk_cached(session, &mut cache, request, y_min, y_max)
 }
 /// One verified source chunk using a worker-local Region header index cache.
@@ -230,9 +232,29 @@ pub fn inspect_far_chunk_cached(
     y_min: i32,
     y_max: i32,
 ) -> Result<FarChunkPatch, WorldError> {
+    inspect_far_chunk_inner(session, cache, None, request, y_min, y_max)
+}
+pub fn inspect_far_chunk_parallel(
+    session: &Session,
+    cache: &mut ReadOnlyRegionCache<'_>,
+    shared: &crate::block_lookup::SharedRegionBatch,
+    request: FarChunkRequest,
+    y_min: i32,
+    y_max: i32,
+) -> Result<FarChunkPatch, WorldError> {
+    inspect_far_chunk_inner(session, cache, Some(shared), request, y_min, y_max)
+}
+fn inspect_far_chunk_inner(
+    session: &Session,
+    cache: &mut ReadOnlyRegionCache<'_>,
+    shared: Option<&crate::block_lookup::SharedRegionBatch>,
+    request: FarChunkRequest,
+    y_min: i32,
+    y_max: i32,
+) -> Result<FarChunkPatch, WorldError> {
     validate_height(y_min, y_max)?;
-    if !matches!(request.span, 1 | 4 | 8 | 16) {
-        return Err(reject("Far preview LOD must be 1,4,8 or 16"));
+    if !matches!(request.span, 1 | 2 | 4 | 8 | 16) {
+        return Err(reject("Far preview LOD must be 1,2,4,8 or 16"));
     }
     let x = i32::try_from(request.cx as i64 * 16).map_err(|_| reject("Source chunk X overflow"))?;
     let z = i32::try_from(request.cz as i64 * 16).map_err(|_| reject("Source chunk Z overflow"))?;
@@ -246,14 +268,26 @@ pub fn inspect_far_chunk_cached(
         unknown_columns: 0,
         exposed_voxels: 0,
     };
-    let Some(chunk) = cache.read_chunk(request.cx, request.cz)? else {
+    let (chunk, on_disk) = if let Some(shared) = shared {
+        session.visible_chunk_base_parallel(shared, cache, request.cx, request.cz)?
+    } else {
+        session.visible_chunk_base_shared_cached(cache, request.cx, request.cz)?
+    };
+    let Some(chunk) = chunk else {
         tile.unknown_columns = 256 / (request.span as usize * request.span as usize);
         return Ok(FarChunkPatch {
+            biome_neighbors: Default::default(),
+            biomes: None,
             tile,
             voxels: Vec::new(),
+            sections: None,
         });
     };
-    tile.source_present = true;
+    let (biome, be) =
+        crate::surface::staged_metadata_cached(session, cache, request.cx, request.cz)?;
+    let biome = biome.as_ref().unwrap_or(chunk.as_ref());
+    let be = be.as_ref().unwrap_or(chunk.as_ref());
+    tile.source_present = on_disk;
     // Traverse only sections that actually exist, highest first: do not
     // inspect 384 heights through the full 128-section linear search
     // for each original block position.
@@ -265,9 +299,10 @@ pub fn inspect_far_chunk_cached(
             start <= y_max && start + 15 >= y_min
         })
         .collect();
-    sections.sort_unstable_by(|a, b| b.y.cmp(&a.y));
+    sections.sort_unstable_by_key(|section| std::cmp::Reverse(section.y));
     let stride = request.span as i32;
     let mut voxels = Vec::new();
+    let palette = cache.display_palette();
     for dz in (0..16).step_by(stride as usize) {
         for dx in (0..16).step_by(stride as usize) {
             let sx = (dx + stride / 2).min(15);
@@ -307,30 +342,66 @@ pub fn inspect_far_chunk_cached(
                 let wz = z + dz;
                 let kind = material(&state);
                 let exact = request.span == 1;
-                voxels.push(SurfaceVoxel {
-                    x: wx,
-                    y,
-                    z: wz,
-                    state,
-                    biome: chunk.biome(sx as u8, y, sz as u8).map(str::to_owned),
-                    original_block_entity: exact && chunk.has_block_entity(wx, y, wz),
-                    faces: ALL_FACES,
-                    kind,
-                    staged: exact && session.is_staged_block((wx, y, wz)),
-                    span: request.span,
+                voxels.push({
+                    let data = crate::surface::VoxelData {
+                        state: palette.state(&state),
+                        biome: palette.biome(biome.biome(sx as u8, y, sz as u8)),
+                        original_block_entity: exact && be.has_block_entity(wx, y, wz),
+                        faces: ALL_FACES,
+                        kind,
+                        staged: exact && session.is_staged_block((wx, y, wz)),
+                        span: request.span,
+                        fluid: None,
+                        light: Default::default(),
+                    };
+                    palette.voxel([wx, y, wz], data)
                 });
             }
         }
     }
+    let mut neighbors = std::collections::BTreeMap::from([(
+        (request.cx, request.cz),
+        Some(std::sync::Arc::clone(&chunk)),
+    )]);
+    if request.span == 1 {
+        crate::surface::inspect_fluid_geometry(
+            session,
+            cache,
+            &mut neighbors,
+            &mut voxels,
+            &mut crate::surface_visibility::Native,
+            None,
+            &|| false,
+        )?;
+    }
     tile.exposed_voxels = voxels.len();
-    Ok(FarChunkPatch { tile, voxels })
+    voxels.shrink_to_fit();
+    Ok(FarChunkPatch {
+        biome_neighbors: Default::default(),
+        tile,
+        voxels,
+        sections: None,
+        biomes: Some(crate::biome_source::Column::from_chunk(biome)?),
+    })
 }
 pub fn append_chunk(view: &mut SurfaceView, patch: FarChunkPatch) {
+    if let Some(biomes) = patch.biomes {
+        std::sync::Arc::make_mut(&mut view.biomes).insert(
+            patch.tile.chunk_x,
+            patch.tile.chunk_z,
+            biomes,
+        );
+    }
     view.source_chunks += 1;
     view.missing_columns += patch.tile.unknown_columns;
     view.source_tiles.push(patch.tile);
     view.voxels.extend(patch.voxels);
 }
+#[cfg(test)]
+pub(crate) fn run_test_category(category: crate::test_categories::Category) {
+    tests::run_test_category(category);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,7 +411,7 @@ mod tests {
             properties: vec![],
         }
     }
-    #[test]
+
     fn distant_canopy_preserves_verified_ground_without_inventing_more_layers() {
         let mut selection = FarLayers::default();
         assert!(!selection.observe(82, state("minecraft:oak_leaves"), 8));
@@ -351,7 +422,7 @@ mod tests {
         assert_eq!((layers[0].0, layers[1].0), (82, 72));
         assert_eq!(layers[1].1.name, "minecraft:grass_block");
     }
-    #[test]
+
     fn exact_and_opaque_lod_columns_never_acquire_extra_ground() {
         for (top, span) in [
             ("minecraft:water", 1),
@@ -368,7 +439,7 @@ mod tests {
         assert!(water.observe(61, state("minecraft:sand"), 16));
         assert_eq!(water.layers().count(), 2);
     }
-    #[test]
+
     fn asynchronous_batch_budget_grows_only_as_source_sample_density_falls() {
         assert_eq!(batch_size_for(1), 12);
         assert_eq!(batch_size_for(4), 32);
@@ -376,11 +447,10 @@ mod tests {
         assert_eq!(batch_size_for(16), 128);
         assert!(batch_size_for(16) <= FAR_BATCH_CHUNKS);
     }
-    #[test]
+
     fn far_view_plans_distant_horizon_without_scanning_every_cell() {
         let p = plan_far_chunks(0, 0, 128).unwrap();
         assert!(!p.is_empty());
-        assert!(p.len() <= MAX_PLANNED_CHUNKS);
         assert_eq!(
             p[0],
             FarChunkRequest {
@@ -398,17 +468,15 @@ mod tests {
         assert_eq!(view.depth, 4112);
         assert!(view.voxels.is_empty());
         assert!(empty_far_view(0, 0, -64, 447, 128).is_ok());
-        assert!(empty_far_view(0, 0, -64, 448, 128).is_err());
+        assert!(empty_far_view(0, 0, -2048, 2048, 128).is_err());
         let extreme = plan_far_chunks(0, 0, 1024).unwrap();
         assert!(extreme
             .iter()
             .any(|r| r.cx.abs() == 1024 || r.cz.abs() == 1024));
-        assert!(extreme.len() <= MAX_PLANNED_CHUNKS);
         let view = empty_far_view(0, 0, -64, 255, 1024).unwrap();
         assert_eq!(view.width, 32784);
         assert_eq!(view.depth, 32784);
         let beyond = plan_far_chunks(0, 0, 2047).unwrap();
-        assert!(beyond.len() <= MAX_PLANNED_CHUNKS);
         assert!(beyond
             .iter()
             .any(|r| r.cx.abs() == 2047 || r.cz.abs() == 2047));
@@ -420,9 +488,20 @@ mod tests {
         assert_eq!((panorama.width, panorama.depth), (65520, 65520));
         assert!(plan_far_chunks(0, 0, 2048).is_err());
     }
-    #[test]
+
     fn far_view_negative_coordinates_use_floor_chunk_grid() {
         let p = plan_far_chunks(-17, -31, 16).unwrap();
         assert_eq!((p[0].cx, p[0].cz), (-2, -2));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
+        if category == crate::test_categories::Category::Geometry {
+            distant_canopy_preserves_verified_ground_without_inventing_more_layers();
+            exact_and_opaque_lod_columns_never_acquire_extra_ground();
+            asynchronous_batch_budget_grows_only_as_source_sample_density_falls();
+            far_view_plans_distant_horizon_without_scanning_every_cell();
+            far_view_negative_coordinates_use_floor_chunk_grid();
+        }
     }
 }

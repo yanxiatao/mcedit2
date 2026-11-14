@@ -8,6 +8,11 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[path = "support/large_edit_cases.rs"]
+mod large_edit_cases;
+#[path = "support/large_structure_cases.rs"]
+mod large_structure_cases;
+
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 struct NativeWorld {
@@ -80,7 +85,7 @@ fn modern_chunk(id: &str) -> Vec<u8> {
         10,
         "",
         &compound(vec![
-            tag(3, "DataVersion", &5125i32.to_be_bytes()),
+            tag(3, "DataVersion", &3955i32.to_be_bytes()),
             tag(3, "xPos", &0i32.to_be_bytes()),
             tag(3, "zPos", &0i32.to_be_bytes()),
             tag(9, "sections", &sections),
@@ -143,18 +148,13 @@ impl NativeWorld {
     }
     fn metadata(&self) -> WorldSummary {
         WorldSummary {
+            world_data: Default::default(),
+            seed: Default::default(),
             root: self.path.clone(),
             level_name: Some("Original 3D test".to_owned()),
-            data_version: self.modern.then_some(5125),
+            data_version: self.modern.then_some(3955),
             storage_format: Some(if self.modern { 19133 } else { 19132 }),
-            version_name: Some(
-                if self.modern {
-                    "26.4 Snapshot 5"
-                } else {
-                    "Beta"
-                }
-                .to_owned(),
-            ),
+            version_name: Some(if self.modern { "1.21.1" } else { "Beta" }.to_owned()),
             dimensions: vec![DimensionSummary {
                 name: "minecraft:overworld".into(),
                 region_dir: self.path.join("region"),
@@ -174,8 +174,7 @@ impl NativeWorld {
     }
 }
 
-#[test]
-fn safe_named_snapshot_selection_commit_undo_redo_and_no_disk_writes() {
+fn safe_named_selection_commit_undo_redo_and_no_disk_writes() {
     let original = NativeWorld::create(true);
     let mut session = Session::new(original.metadata(), "minecraft:overworld").unwrap();
     let bounds = Bounds::new((0, -64, 0), (1, -64, 1)).unwrap();
@@ -207,7 +206,6 @@ fn safe_named_snapshot_selection_commit_undo_redo_and_no_disk_writes() {
     assert_eq!(original.bytes_now(), original.original_region);
 }
 
-#[test]
 fn layered_original_edit_transactions_recover_exact_prior_state() {
     let original = NativeWorld::create(true);
     let mut editor = Session::new(original.metadata(), "minecraft:overworld").unwrap();
@@ -234,7 +232,6 @@ fn layered_original_edit_transactions_recover_exact_prior_state() {
     assert_eq!(original.bytes_now(), original.original_region);
 }
 
-#[test]
 fn old_numeric_mcregion_states_remain_numeric_without_id_mapping() {
     let original = NativeWorld::create(false);
     let mut editor = Session::new(original.metadata(), "minecraft:overworld").unwrap();
@@ -255,8 +252,7 @@ fn old_numeric_mcregion_states_remain_numeric_without_id_mapping() {
     assert_eq!(original.bytes_now(), original.original_region);
 }
 
-#[test]
-fn refusal_for_missing_chunks_sections_oversize_and_mismatched_layout() {
+fn refusal_for_missing_chunks_sections_and_mismatched_layout() {
     let original = NativeWorld::create(true);
     let editor = Session::new(original.metadata(), "minecraft:overworld").unwrap();
     let state = parse_state("minecraft:air").unwrap();
@@ -277,13 +273,18 @@ fn refusal_for_missing_chunks_sections_oversize_and_mismatched_layout() {
             None
         )
         .is_err());
-    assert!(Bounds::new((0, 0, 0), (64, 64, 64)).is_err());
     assert!(Bounds::new((0, -3000, 0), (0, -3000, 0)).is_err());
+    let large = Bounds::new((0, 0, 0), (64, 64, 64)).unwrap();
+    assert_eq!(large.volume().unwrap(), 65usize.pow(3));
+    let slice = editor
+        .inspect_slice(Bounds::new((0, -64, 0), (128, -64, 64)).unwrap())
+        .unwrap();
+    assert_eq!(slice.rows.len(), 65);
+    assert_eq!(slice.rows[0].len(), 129);
     assert_eq!(editor.pending_cells(), 0);
     assert_eq!(original.bytes_now(), original.original_region);
 }
 
-#[test]
 fn planned_edits_refuse_original_world_change_after_preview() {
     let source = NativeWorld::create(true);
     let mut editor = Session::new(source.metadata(), "minecraft:overworld").unwrap();
@@ -299,7 +300,6 @@ fn planned_edits_refuse_original_world_change_after_preview() {
     assert_eq!(fs::read(filepath).unwrap(), changed);
 }
 
-#[test]
 fn target_parser_strictly_rejects_unsafe_and_ambiguous_ids() {
     let accepted = parse_state("minecraft:oak_log[waterlogged=false,axis=y]").unwrap();
     assert_eq!(
@@ -374,7 +374,6 @@ fn overwrite_region(world: &NativeWorld, chunk: &[u8]) {
     .unwrap();
 }
 
-#[test]
 fn original_modded_block_entity_is_protected_but_neighbor_can_be_staged() {
     let world = NativeWorld::create(true);
     let chunk = chunk_with_be("minecraft:stone", (1, -64, 1));
@@ -402,7 +401,6 @@ fn original_modded_block_entity_is_protected_but_neighbor_can_be_staged() {
     assert_eq!(world.bytes_now(), untouched);
 }
 
-#[test]
 fn late_block_entity_appearance_cancels_prepared_transaction_atomically() {
     let world = NativeWorld::create(true);
     let mut editor = Session::new(world.metadata(), "minecraft:overworld").unwrap();
@@ -417,7 +415,6 @@ fn late_block_entity_appearance_cancels_prepared_transaction_atomically() {
     assert_eq!(world.bytes_now(), on_disk);
 }
 
-#[test]
 fn block_entity_with_invalid_or_external_coordinates_fails_closed() {
     let world = NativeWorld::create(true);
     overwrite_region(&world, &chunk_with_be("minecraft:stone", (16, -64, 0)));
@@ -433,7 +430,6 @@ fn block_entity_with_invalid_or_external_coordinates_fails_closed() {
     assert_eq!(editor.pending_cells(), 0);
 }
 
-#[test]
 fn clone_uses_frozen_effective_source_with_overlap_and_one_undo() {
     let world = NativeWorld::create(true);
     let mut editor = Session::new(world.metadata(), "minecraft:overworld").unwrap();
@@ -463,7 +459,6 @@ fn clone_uses_frozen_effective_source_with_overlap_and_one_undo() {
     assert_eq!(world.bytes_now(), world.original_region);
 }
 
-#[test]
 fn clone_refuses_original_block_entities_in_source_and_destination() {
     let world = NativeWorld::create(true);
     overwrite_region(&world, &chunk_with_be("minecraft:stone", (1, -64, 0)));
@@ -481,7 +476,6 @@ fn clone_refuses_original_block_entities_in_source_and_destination() {
     assert_eq!(editor.pending_cells(), 1);
 }
 
-#[test]
 fn clone_preview_is_invalidated_by_source_overlay_or_original_disk_change() {
     let world = NativeWorld::create(true);
     let mut editor = Session::new(world.metadata(), "minecraft:overworld").unwrap();
@@ -503,7 +497,6 @@ fn clone_preview_is_invalidated_by_source_overlay_or_original_disk_change() {
     assert_eq!(world.bytes_now(), bytes);
 }
 
-#[test]
 fn clone_legacy_numeric_preserves_original_id_and_never_writes() {
     let world = NativeWorld::create(false);
     let mut editor = Session::new(world.metadata(), "minecraft:overworld").unwrap();
@@ -522,7 +515,6 @@ fn clone_legacy_numeric_preserves_original_id_and_never_writes() {
     assert_eq!(world.bytes_now(), world.original_region);
 }
 
-#[test]
 fn read_only_slice_distinguishes_missing_chunks_and_current_overlay() {
     let world = NativeWorld::create(true);
     let mut editor = Session::new(world.metadata(), "minecraft:overworld").unwrap();
@@ -544,7 +536,7 @@ fn read_only_slice_distinguishes_missing_chunks_and_current_overlay() {
         .contains("minecraft:gold_block"));
     assert_eq!(world.bytes_now(), world.original_region);
 }
-#[test]
+
 fn slice_shows_be_marker_without_changing_opaque_nbt() {
     let world = NativeWorld::create(true);
     overwrite_region(&world, &chunk_with_be("minecraft:stone", (0, -64, 0)));
@@ -560,7 +552,7 @@ fn slice_shows_be_marker_without_changing_opaque_nbt() {
         .inspect_slice(Bounds::new((0, -64, 0), (0, -63, 0)).unwrap())
         .is_err());
 }
-#[test]
+
 fn numeric_slice_displays_original_modded_id() {
     let world = NativeWorld::create(false);
     let mut editor = Session::new(world.metadata(), "minecraft:overworld").unwrap();
@@ -577,7 +569,6 @@ fn numeric_slice_displays_original_modded_id() {
     assert_eq!(world.bytes_now(), world.original_region);
 }
 
-#[test]
 fn connected_fill_respects_staged_state_barrier_and_undo_group() {
     let world = NativeWorld::create(true);
     let mut editor = Session::new(world.metadata(), "minecraft:overworld").unwrap();
@@ -605,7 +596,7 @@ fn connected_fill_respects_staged_state_barrier_and_undo_group() {
     assert_eq!(check(&editor, 0), parse_state("minecraft:stone").unwrap());
     assert_eq!(world.bytes_now(), world.original_region);
 }
-#[test]
+
 fn connected_fill_refuses_be_and_missing_original_chunks_atomically() {
     let world = NativeWorld::create(true);
     overwrite_region(&world, &chunk_with_be("minecraft:stone", (1, -64, 0)));
@@ -635,7 +626,7 @@ fn connected_fill_refuses_be_and_missing_original_chunks_atomically() {
         .is_err());
     assert_eq!(world.bytes_now(), bytes);
 }
-#[test]
+
 fn connected_fill_legacy_numeric_guards_identity_and_late_change() {
     let world = NativeWorld::create(false);
     let mut editor = Session::new(world.metadata(), "minecraft:overworld").unwrap();
@@ -654,7 +645,6 @@ fn connected_fill_legacy_numeric_guards_identity_and_late_change() {
     assert_eq!(world.bytes_now(), world.original_region);
 }
 
-#[test]
 fn exact_native_chunk_bytes_match_stored_compressed_chunk_source() {
     use mcedit2_world::block_lookup::{read_world_chunk, read_world_chunk_bytes};
     use mcedit2_world::sections::decode_sections;
@@ -685,7 +675,7 @@ fn journal_path() -> PathBuf {
         COUNTER.fetch_add(1, Ordering::Relaxed)
     ))
 }
-#[test]
+
 fn external_journal_restores_old_numeric_and_modern_original_blocks_without_world_writes() {
     for modern in [false, true] {
         let world = NativeWorld::create(modern);
@@ -725,7 +715,7 @@ fn external_journal_restores_old_numeric_and_modern_original_blocks_without_worl
         fs::remove_file(&path).unwrap();
     }
 }
-#[test]
+
 fn journal_refuses_changed_opaque_nbt_and_preserves_empty_session() {
     let world = NativeWorld::create(true);
     let path = journal_path();
@@ -746,7 +736,7 @@ fn journal_refuses_changed_opaque_nbt_and_preserves_empty_session() {
     assert_eq!(world.bytes_now(), actual);
     fs::remove_file(path).unwrap();
 }
-#[test]
+
 fn malformed_journal_duplicate_coordinate_and_foreign_dimension_fail_closed() {
     let world = NativeWorld::create(true);
     let path = journal_path();
@@ -773,7 +763,7 @@ fn malformed_journal_duplicate_coordinate_and_foreign_dimension_fail_closed() {
     assert!(empty.import_patch(&path).is_err());
     fs::remove_file(path).unwrap();
 }
-#[test]
+
 fn journal_cannot_be_saved_inside_the_actual_world_or_over_existing_checkpoint() {
     let world = NativeWorld::create(true);
     let mut editor = Session::new(world.metadata(), "minecraft:overworld").unwrap();
@@ -795,7 +785,6 @@ fn journal_cannot_be_saved_inside_the_actual_world_or_over_existing_checkpoint()
     fs::remove_file(outside).unwrap();
 }
 
-#[test]
 fn original_byte_native_palette_candidate_is_in_memory_and_retains_opaque_data() {
     use mcedit2_world::sections::decode_sections;
     let world = NativeWorld::create(true);
@@ -824,8 +813,8 @@ fn original_byte_native_palette_candidate_is_in_memory_and_retains_opaque_data()
         .any(|v| v == b"never rewrite me"));
     assert_eq!(world.bytes_now(), original);
 }
-#[test]
-fn native_nbt_preview_grows_palette_and_edits_legacy_numeric_without_mutations() {
+
+fn native_palette_growth_and_legacy_staging_keep_their_save_contracts() {
     let world = NativeWorld::create(true);
     let mut editor = Session::new(world.metadata(), "minecraft:overworld").unwrap();
     let single = Bounds::new((0, -64, 0), (0, -64, 0)).unwrap();
@@ -859,20 +848,16 @@ fn native_nbt_preview_grows_palette_and_edits_legacy_numeric_without_mutations()
             .unwrap(),
     )
     .unwrap();
-    let candidates = old.prepare_native_palette_candidates().unwrap();
-    assert_eq!(candidates.len(), 1);
-    assert_eq!(
-        mcedit2_world::sections::decode_sections(&candidates[0].patched_nbt)
-            .unwrap()
-            .block(0, 64, 0)
-            .unwrap()
-            .name,
-        "numeric:201"
-    );
+    assert!(old.prepare_native_palette_candidates().is_err());
+    match old.visible_block((0, 64, 0)).unwrap() {
+        Lookup::Present(block) => {
+            assert_eq!(block.state, parse_state("numeric:201[data=7]").unwrap())
+        }
+        other => panic!("未保留旧版暂存方块：{other:?}"),
+    }
     assert_eq!(legacy.bytes_now(), legacy.original_region);
 }
 
-#[test]
 fn session_produces_complete_append_only_region_image_without_changing_java_world() {
     for modern in [true, false] {
         let fixture = NativeWorld::create(modern);
@@ -889,6 +874,14 @@ fn session_produces_complete_append_only_region_image_without_changing_java_worl
         editor
             .commit(editor.prepare(bounds, &replacement, None).unwrap())
             .unwrap();
+        if !modern {
+            assert!(editor
+                .prepare_native_region_candidates(1_600_000_000)
+                .is_err());
+            assert_eq!(fixture.bytes_now(), original);
+            assert_eq!(editor.pending_cells(), 2);
+            continue;
+        }
         let images = editor
             .prepare_native_region_candidates(1_600_000_000)
             .unwrap();
@@ -920,7 +913,6 @@ fn session_produces_complete_append_only_region_image_without_changing_java_worl
     }
 }
 
-#[test]
 fn region_image_plan_rejects_unrepresentable_mcregion_modded_id_without_disk_changes() {
     let fixture = NativeWorld::create(false);
     let original = fixture.bytes_now();
@@ -938,7 +930,6 @@ fn region_image_plan_rejects_unrepresentable_mcregion_modded_id_without_disk_cha
     assert_eq!(fixture.bytes_now(), original);
 }
 
-#[test]
 fn one_region_transaction_can_be_finalized_and_retains_original_backup() {
     use mcedit2_world::region_transaction::finalize_single_region;
     let fixture = NativeWorld::create(true);
@@ -971,33 +962,33 @@ fn one_region_transaction_can_be_finalized_and_retains_original_backup() {
         other => panic!("Unexpected saved region {other:?}"),
     }
 }
-#[test]
+
 fn pending_region_crash_recovery_restores_original_verbatim() {
     use mcedit2_world::region_transaction::{finalize_single_region, rollback_pending_region};
-    let fixture = NativeWorld::create(false);
+    let fixture = NativeWorld::create(true);
     let before = fixture.bytes_now();
     let mut editor = Session::new(fixture.metadata(), "minecraft:overworld").unwrap();
-    let cell = Bounds::new((1, 64, 1), (1, 64, 1)).unwrap();
+    let cell = Bounds::new((1, -64, 1), (1, -64, 1)).unwrap();
     editor
         .commit(
             editor
-                .prepare(cell, &parse_state("numeric:7[data=3]").unwrap(), None)
+                .prepare(cell, &parse_state("minecraft:bedrock").unwrap(), None)
                 .unwrap(),
         )
         .unwrap();
     let receipt = editor.apply_single_region_save(99).unwrap();
     assert_ne!(fixture.bytes_now(), before);
     let restored =
-        rollback_pending_region(&fixture.metadata(), "minecraft:overworld", 0, 0, "mcr").unwrap();
+        rollback_pending_region(&fixture.metadata(), "minecraft:overworld", 0, 0, "mca").unwrap();
     assert_eq!(fixture.bytes_now(), before);
     assert_eq!(fs::read(&restored.backup_path).unwrap(), before);
     assert!(restored.marker_path.exists());
     assert!(!receipt.marker_path.exists());
     assert!(
-        finalize_single_region(&fixture.metadata(), "minecraft:overworld", 0, 0, "mcr").is_err()
+        finalize_single_region(&fixture.metadata(), "minecraft:overworld", 0, 0, "mca").is_err()
     );
 }
-#[test]
+
 fn stale_or_tampered_region_backup_refuses_unsafe_recovery() {
     use mcedit2_world::region_transaction::{finalize_single_region, rollback_pending_region};
     let fixture = NativeWorld::create(true);
@@ -1021,7 +1012,7 @@ fn stale_or_tampered_region_backup_refuses_unsafe_recovery() {
     );
     assert_eq!(fixture.bytes_now(), current);
 }
-#[test]
+
 fn second_save_refuses_unresolved_marker_and_does_not_clobber_backup() {
     let fixture = NativeWorld::create(true);
     let mut editor = Session::new(fixture.metadata(), "minecraft:overworld").unwrap();
@@ -1049,7 +1040,6 @@ fn second_save_refuses_unresolved_marker_and_does_not_clobber_backup() {
     assert_eq!(fs::read(receipt.backup_path).unwrap(), backup);
 }
 
-#[test]
 fn incomplete_pending_region_write_stage_can_be_recovered_without_modifying_original() {
     use mcedit2_world::region_transaction::rollback_pending_region;
     let fixture = NativeWorld::create(true);
@@ -1096,7 +1086,6 @@ fn incomplete_pending_region_write_stage_can_be_recovered_without_modifying_orig
     assert_eq!(fs::read(&backup_path).unwrap(), before);
 }
 
-#[test]
 fn canonical_region_candidate_identity_and_transaction_marker_are_recoverable() {
     use mcedit2_world::region_transaction::{finalize_single_region, rollback_pending_region};
     let fixture = NativeWorld::create(true);
@@ -1120,7 +1109,6 @@ fn canonical_region_candidate_identity_and_transaction_marker_are_recoverable() 
     );
 }
 
-#[test]
 fn original_world_block_clipboard_survives_reopen_and_pastes_one_undo_group() {
     let fixture = NativeWorld::create(true);
     let unchanged = fixture.bytes_now();
@@ -1157,16 +1145,20 @@ fn original_world_block_clipboard_survives_reopen_and_pastes_one_undo_group() {
     assert_eq!(fixture.bytes_now(), unchanged);
     fs::remove_file(path).unwrap();
 }
-#[test]
-fn original_block_only_clipboard_refuses_be_wrong_dimension_and_corrupted_size() {
+
+fn original_structure_clipboard_validates_size_and_preserves_cross_dimension_payload() {
     let fixture = NativeWorld::create(true);
     let path = std::env::temp_dir().join(format!(
         "mcedit2-block-clipboard-invalid-{}-{}.mcedit2clip",
         std::process::id(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
-    let editor = Session::new(fixture.metadata(), "minecraft:overworld").unwrap();
+    let mut editor = Session::new(fixture.metadata(), "minecraft:overworld").unwrap();
     let select = Bounds::new((0, -64, 0), (0, -64, 0)).unwrap();
+    let preview = editor
+        .prepare(select, &parse_state("minecraft:oak_log").unwrap(), None)
+        .unwrap();
+    editor.commit(preview).unwrap();
     editor.export_clipboard(select, &path).unwrap();
     let original = fs::read(&path).unwrap();
     let mut obj: serde_json::Value = serde_json::from_slice(&original).unwrap();
@@ -1178,17 +1170,35 @@ fn original_block_only_clipboard_refuses_be_wrong_dimension_and_corrupted_size()
     obj = serde_json::from_slice(&original).unwrap();
     obj["dimension"] = serde_json::json!("minecraft:the_end");
     fs::write(&path, serde_json::to_vec(&obj).unwrap()).unwrap();
-    assert!(editor
+    let preview = editor
         .prepare_paste_clipboard_file(&path, (1, -64, 1))
-        .is_err());
-    assert_eq!(editor.pending_cells(), 0);
-    fs::remove_file(path).unwrap();
+        .unwrap();
+    assert_eq!(preview.changed(), 1);
+    assert_eq!(editor.pending_cells(), 1);
+    fs::remove_file(&path).unwrap();
+    drop(editor);
     overwrite_region(&fixture, &chunk_with_be("minecraft:stone", (0, -64, 0)));
     let newer = Session::new(fixture.metadata(), "minecraft:overworld").unwrap();
     assert!(newer.capture_clipboard(select).is_err());
+    let clip = newer
+        .capture_structure_cancellable(
+            select,
+            mcedit2_world::clipboard::CaptureOptions {
+                entities: false,
+                biomes: false,
+            },
+            || false,
+        )
+        .unwrap();
+    assert_eq!(clip.block_entities.len(), 1);
+    assert_eq!(clip.block_entities[0].position, [0, 0, 0]);
+    mcedit2_world::clipboard::save(&fixture.metadata(), &path, &clip).unwrap();
+    let loaded =
+        mcedit2_world::clipboard::load(&fixture.metadata(), "minecraft:overworld", &path).unwrap();
+    assert_eq!(loaded.block_entities, clip.block_entities);
+    fs::remove_file(path).unwrap();
 }
 
-#[test]
 fn opaque_original_block_entity_inspection_preserves_moded_fields_verbatim() {
     let fixture = NativeWorld::create(true);
     let chunk = chunk_with_be("minecraft:stone", (2, -64, 3));
@@ -1213,7 +1223,6 @@ fn opaque_original_block_entity_inspection_preserves_moded_fields_verbatim() {
     assert_eq!(fixture.bytes_now(), original);
 }
 
-#[test]
 fn original_vertical_plane_reports_negative_y_missing_sections_and_exact_block_selection() {
     use mcedit2_world::editing::{SliceCell, VerticalAxis};
     let world = NativeWorld::create(true);
@@ -1236,7 +1245,6 @@ fn original_vertical_plane_reports_negative_y_missing_sections_and_exact_block_s
     assert_eq!(z_plane.coordinate(0, 2), Some((0, -63, 2)));
 }
 
-#[test]
 fn original_numeric_and_named_moves_clear_source_preserve_overlap_and_undo() {
     for modern in [false, true] {
         let world = NativeWorld::create(modern);
@@ -1280,7 +1288,7 @@ fn original_numeric_and_named_moves_clear_source_preserve_overlap_and_undo() {
         assert_eq!(world.bytes_now(), unchanged);
     }
 }
-#[test]
+
 fn original_be_refuses_move_of_source_or_destination_without_partial_stage() {
     let world = NativeWorld::create(true);
     overwrite_region(&world, &chunk_with_be("minecraft:stone", (1, -64, 0)));
@@ -1294,7 +1302,6 @@ fn original_be_refuses_move_of_source_or_destination_without_partial_stage() {
     assert_eq!(world.bytes_now(), original);
 }
 
-#[test]
 fn legacy_numeric_schematic_export_import_roundtrips_addblocks_and_meta() {
     use mcedit2_world::schematic;
     let world = NativeWorld::create(false);
@@ -1320,7 +1327,6 @@ fn legacy_numeric_schematic_export_import_roundtrips_addblocks_and_meta() {
     assert_eq!(world.bytes_now(), original);
 }
 
-#[test]
 fn bounded_isometric_voxel_surface_uses_original_height_and_overlay_without_world_writes() {
     let world = NativeWorld::create(true);
     let original = world.bytes_now();
@@ -1338,11 +1344,12 @@ fn bounded_isometric_voxel_surface_uses_original_height_and_overlay_without_worl
             .sum::<usize>(),
         4096
     );
-    // Top-down height sampling supports a full 384-block dimension, while
-    // volumetric 3D inspection still has the separate 48-level budget.
+    // 俯视读取完整 Section 坐标范围，与保留三维体素的 48 层预算分开。
     assert!(editor.inspect_surface(0, 0, -64, -16, 16, 16).is_ok());
     assert!(editor.inspect_surface(0, 0, -64, 319, 16, 16).is_ok());
-    assert!(editor.inspect_surface(0, 0, -64, 320, 16, 16).is_err());
+    let tall = editor.inspect_surface(0, 0, -2048, 2047, 1, 1).unwrap();
+    assert_eq!(tall.voxels[0].y, -49);
+    assert!(editor.inspect_surface(0, 0, -2048, 2048, 1, 1).is_err());
     assert!(editor.inspect_surface(0, 0, -64, -17, 65, 16).is_err());
     let view = editor.inspect_surface(0, 0, -64, -63, 2, 2).unwrap();
     assert_eq!(view.voxels.len(), 4);
@@ -1361,7 +1368,6 @@ fn bounded_isometric_voxel_surface_uses_original_height_and_overlay_without_worl
     assert_eq!(world.bytes_now(), original);
 }
 
-#[test]
 fn surgical_be_scalar_candidate_changes_only_target_and_preserves_other_nbt() {
     use mcedit2_world::sections;
     let world = NativeWorld::create(true);
@@ -1418,7 +1424,6 @@ fn surgical_be_scalar_candidate_changes_only_target_and_preserves_other_nbt() {
     assert_eq!(world.bytes_now(), original_file);
 }
 
-#[test]
 fn external_original_be_nbt_snapshot_preserves_modded_compound_and_detects_source_drift() {
     let world = NativeWorld::create(true);
     overwrite_region(&world, &chunk_with_be("minecraft:stone", (2, -64, 3)));
@@ -1445,7 +1450,6 @@ fn external_original_be_nbt_snapshot_preserves_modded_compound_and_detects_sourc
     fs::remove_file(file).unwrap();
 }
 
-#[test]
 fn declarative_plugin_preview_uses_original_chunk_safety_and_a_single_undo() {
     let world = NativeWorld::create(true);
     let before = world.bytes_now();
@@ -1456,7 +1460,7 @@ fn declarative_plugin_preview_uses_original_chunk_safety_and_a_single_undo() {
     ));
     let manifest = serde_json::json!({
         "schema_version":1,"name":"test original-only 3D replacement",
-        "only_data_version":5125,
+        "only_data_version":3955,
         "only_dimension":"minecraft:overworld",
         "operation":{
             "kind":"replace_blocks",
@@ -1478,7 +1482,6 @@ fn declarative_plugin_preview_uses_original_chunk_safety_and_a_single_undo() {
     fs::remove_file(path).unwrap();
 }
 
-#[test]
 fn native_multilayer_original_exposed_volume_culls_hidden_blocks_and_shows_real_cavities() {
     use mcedit2_world::surface::{FACE_NEG_X, FACE_POS_X, FACE_TOP};
     let world = NativeWorld::create(true);
@@ -1517,16 +1520,22 @@ fn native_multilayer_original_exposed_volume_culls_hidden_blocks_and_shows_real_
     assert_eq!(world.bytes_now(), original);
 }
 
-#[test]
 fn original_be_scalar_memory_staging_is_undoable_and_never_disk_writable() {
     let world = NativeWorld::create(true);
     overwrite_region(&world, &chunk_with_be("minecraft:stone", (2, -64, 3)));
     let untouched = world.bytes_now();
     let mut editor = Session::new(world.metadata(), "minecraft:overworld").unwrap();
+    use mcedit2_world::edit_sources::SourceChanges;
+    let original_display = editor.display_source();
     let candidate = editor
         .prepare_be_edit((2, -64, 3), "UnrecognizedPayload", "FIRST STAGED")
         .unwrap();
     editor.commit_be_edit(candidate).unwrap();
+    let staged_display = editor.display_source();
+    assert_eq!(
+        staged_display.changes_since(&original_display),
+        SourceChanges::Chunks([(0, 0)].into_iter().collect())
+    );
     assert_eq!(editor.pending_be_chunks(), 1);
     assert!(editor.has_pending_changes());
     assert!(editor.prepare_native_region_candidates(123).is_err());
@@ -1544,14 +1553,26 @@ fn original_be_scalar_memory_staging_is_undoable_and_never_disk_writable() {
             .original_compound_sha256
     );
     assert!(editor.undo_be_edit().unwrap());
+    assert_eq!(
+        editor.display_source().changes_since(&original_display),
+        SourceChanges::Unchanged
+    );
     assert_eq!(editor.pending_be_chunks(), 0);
     assert!(editor.redo_be_edit().unwrap());
+    assert_eq!(
+        editor.display_source().changes_since(&original_display),
+        SourceChanges::Chunks([(0, 0)].into_iter().collect())
+    );
     assert_eq!(editor.pending_be_chunks(), 1);
     editor.discard();
+    assert_eq!(
+        editor.display_source().changes_since(&original_display),
+        SourceChanges::Unchanged
+    );
     assert!(!editor.has_pending_changes());
     assert_eq!(world.bytes_now(), untouched);
 }
-#[test]
+
 fn be_scalar_stale_preview_and_changed_disk_are_rejected() {
     let world = NativeWorld::create(true);
     overwrite_region(&world, &chunk_with_be("minecraft:stone", (2, -64, 3)));
@@ -1573,7 +1594,6 @@ fn be_scalar_stale_preview_and_changed_disk_are_rejected() {
     assert_eq!(editor.pending_be_chunks(), 1);
 }
 
-#[test]
 fn be_journal_restores_modded_scalar_operations_and_separate_undo_atomically() {
     let world = NativeWorld::create(true);
     overwrite_region(&world, &chunk_with_be("minecraft:stone", (2, -64, 3)));
@@ -1616,7 +1636,7 @@ fn be_journal_restores_modded_scalar_operations_and_separate_undo_atomically() {
     assert_eq!(world.bytes_now(), original);
     fs::remove_file(path).unwrap();
 }
-#[test]
+
 fn be_journal_source_drift_and_invalid_entry_are_refused_without_partial_import() {
     let world = NativeWorld::create(true);
     overwrite_region(&world, &chunk_with_be("minecraft:stone", (2, -64, 3)));
@@ -1645,7 +1665,6 @@ fn be_journal_source_drift_and_invalid_entry_are_refused_without_partial_import(
     fs::remove_file(path).unwrap();
 }
 
-#[test]
 fn be_only_and_combined_block_be_region_candidates_preserve_opaque_data() {
     let world = NativeWorld::create(true);
     overwrite_region(&world, &chunk_with_be("minecraft:stone", (2, -64, 3)));
@@ -1657,7 +1676,8 @@ fn be_only_and_combined_block_be_region_candidates_preserve_opaque_data() {
     editor.commit_be_edit(change).unwrap();
     let preview = editor.preview_be_region_candidates(47).unwrap();
     assert_eq!(preview.len(), 1);
-    assert_eq!(preview[0].be_replay.len(), 1);
+    assert_eq!(preview[0].be_history.len(), 1);
+    assert!(preview[0].be_replay.is_empty());
     assert!(preview[0].image.len() > unchanged.len());
     assert!(
         mcedit2_world::region_transaction::apply_single_region(
@@ -1679,11 +1699,11 @@ fn be_only_and_combined_block_be_region_candidates_preserve_opaque_data() {
         .unwrap();
     let mixed = editor.preview_be_region_candidates(49).unwrap();
     assert_eq!(mixed.len(), 1);
-    assert_eq!(mixed[0].be_replay.len(), 1);
+    assert_eq!(mixed[0].be_history.len(), 1);
+    assert!(mixed[0].be_replay.is_empty());
     assert_eq!(world.bytes_now(), unchanged);
 }
 
-#[test]
 fn explicitly_confirmed_existing_be_scalar_region_save_is_recoverable_verbatim() {
     use mcedit2_world::region_transaction::rollback_pending_region;
     let world = NativeWorld::create(true);
@@ -1728,7 +1748,6 @@ fn explicitly_confirmed_existing_be_scalar_region_save_is_recoverable_verbatim()
     assert_eq!(world.bytes_now(), unchanged);
 }
 
-#[test]
 fn opaque_be_float_and_double_scalar_edits_preserve_all_other_modded_nbt() {
     let source = chunk_with_be("minecraft:stone", (2, -64, 3));
     let baseline = mcedit2_world::sections::inspect_original_block_entity(&source, (2, -64, 3))
@@ -1781,7 +1800,6 @@ fn opaque_be_float_and_double_scalar_edits_preserve_all_other_modded_nbt() {
     );
 }
 
-#[test]
 fn compound_path_scalar_surgery_changes_one_leaf_without_reserializing_siblings() {
     let source = chunk_with_be("minecraft:stone", (2, -64, 3));
     let changed = mcedit2_world::sections::patch_original_block_entity_scalar(
@@ -1828,7 +1846,6 @@ fn compound_path_scalar_surgery_changes_one_leaf_without_reserializing_siblings(
     }
 }
 
-#[test]
 fn declarative_modded_be_batch_is_all_or_nothing_without_world_writes() {
     let world = NativeWorld::create(true);
     overwrite_region(&world, &chunk_with_be("minecraft:stone", (2, -64, 3)));
@@ -1867,7 +1884,6 @@ fn declarative_modded_be_batch_is_all_or_nothing_without_world_writes() {
     fs::remove_file(path).unwrap();
 }
 
-#[test]
 fn region_batch_manifest_detects_stale_source_and_unmodified_world() {
     let world = NativeWorld::create(true);
     let unchanged = world.bytes_now();
@@ -1897,7 +1913,6 @@ fn region_batch_manifest_detects_stale_source_and_unmodified_world() {
     fs::remove_file(path).unwrap();
 }
 
-#[test]
 fn original_modded_be_tree_lists_nested_scalar_paths_without_mutating_data() {
     let source = chunk_with_be("minecraft:stone", (2, -64, 3));
     let entries = mcedit2_world::sections::inspect_original_be_tree(&source, (2, -64, 3)).unwrap();
@@ -1930,7 +1945,6 @@ fn original_modded_be_tree_lists_nested_scalar_paths_without_mutating_data() {
     assert!(absent.is_empty());
 }
 
-#[test]
 fn five_geometry_brushes_produce_atomic_edit_previews_and_restore_original_bytes() {
     use mcedit2_world::editing::BrushShape;
     let world = NativeWorld::create(true);
@@ -1953,7 +1967,7 @@ fn five_geometry_brushes_produce_atomic_edit_previews_and_restore_original_bytes
     }
     assert_eq!(world.bytes_now(), unchanged);
 }
-#[test]
+
 fn hollow_3d_brush_skips_original_be_outside_mask_and_refuses_inside() {
     use mcedit2_world::editing::BrushShape;
     let world = NativeWorld::create(true);
@@ -1969,7 +1983,6 @@ fn hollow_3d_brush_skips_original_be_outside_mask_and_refuses_inside() {
         .is_err());
 }
 
-#[test]
 fn version2_plugin_composes_dependent_original_edits_as_one_undo() {
     let world = NativeWorld::create(true);
     let unchanged = world.bytes_now();
@@ -2001,7 +2014,7 @@ fn version2_plugin_composes_dependent_original_edits_as_one_undo() {
     assert_eq!(world.bytes_now(), unchanged);
     fs::remove_file(&path).unwrap();
 }
-#[test]
+
 fn version2_plugin_refuses_any_late_bad_step_without_staging() {
     let world = NativeWorld::create(true);
     let path = std::env::temp_dir().join(format!(
@@ -2025,7 +2038,6 @@ fn version2_plugin_refuses_any_late_bad_step_without_staging() {
     fs::remove_file(path).unwrap();
 }
 
-#[test]
 fn modern_entities_sidecar_is_inspected_and_snapshotted_without_modded_nbt_loss() {
     let world = NativeWorld::create(true);
     let original = world.bytes_now();
@@ -2084,7 +2096,6 @@ fn modern_entities_sidecar_is_inspected_and_snapshotted_without_modded_nbt_loss(
     fs::remove_file(filename).unwrap();
 }
 
-#[test]
 fn displayed_3d_material_and_staged_markers_do_not_write_world_data() {
     use mcedit2_world::surface::VoxelMaterial;
     let world = NativeWorld::create(true);
@@ -2115,3 +2126,549 @@ fn displayed_3d_material_and_staged_markers_do_not_write_world_data() {
         .all(|v| !v.staged));
     assert_eq!(world.bytes_now(), original);
 }
+
+#[test]
+fn source_sessions_and_block_entities() {
+    large_edit_cases::blocks_and_history();
+    brush_stroke_cases::continuous_block_brush_pipeline();
+    safe_named_selection_commit_undo_redo_and_no_disk_writes();
+    layered_original_edit_transactions_recover_exact_prior_state();
+    refusal_for_missing_chunks_sections_and_mismatched_layout();
+    planned_edits_refuse_original_world_change_after_preview();
+    target_parser_strictly_rejects_unsafe_and_ambiguous_ids();
+    original_modded_block_entity_is_protected_but_neighbor_can_be_staged();
+    late_block_entity_appearance_cancels_prepared_transaction_atomically();
+    block_entity_with_invalid_or_external_coordinates_fails_closed();
+    read_only_slice_distinguishes_missing_chunks_and_current_overlay();
+    slice_shows_be_marker_without_changing_opaque_nbt();
+    numeric_slice_displays_original_modded_id();
+    exact_native_chunk_bytes_match_stored_compressed_chunk_source();
+    second_save_refuses_unresolved_marker_and_does_not_clobber_backup();
+    opaque_original_block_entity_inspection_preserves_moded_fields_verbatim();
+    original_vertical_plane_reports_negative_y_missing_sections_and_exact_block_selection();
+    bounded_isometric_voxel_surface_uses_original_height_and_overlay_without_world_writes();
+    external_original_be_nbt_snapshot_preserves_modded_compound_and_detects_source_drift();
+    native_multilayer_original_exposed_volume_culls_hidden_blocks_and_shows_real_cavities();
+    original_be_scalar_memory_staging_is_undoable_and_never_disk_writable();
+    be_scalar_stale_preview_and_changed_disk_are_rejected();
+    opaque_be_float_and_double_scalar_edits_preserve_all_other_modded_nbt();
+    compound_path_scalar_surgery_changes_one_leaf_without_reserializing_siblings();
+    declarative_modded_be_batch_is_all_or_nothing_without_world_writes();
+    original_modded_be_tree_lists_nested_scalar_paths_without_mutating_data();
+    modern_entities_sidecar_is_inspected_and_snapshotted_without_modded_nbt_loss();
+    displayed_3d_material_and_staged_markers_do_not_write_world_data();
+}
+
+#[test]
+fn save_and_recovery_transactions() {
+    old_numeric_mcregion_states_remain_numeric_without_id_mapping();
+    original_byte_native_palette_candidate_is_in_memory_and_retains_opaque_data();
+    native_palette_growth_and_legacy_staging_keep_their_save_contracts();
+    session_produces_complete_append_only_region_image_without_changing_java_world();
+    region_image_plan_rejects_unrepresentable_mcregion_modded_id_without_disk_changes();
+    one_region_transaction_can_be_finalized_and_retains_original_backup();
+    pending_region_crash_recovery_restores_original_verbatim();
+    stale_or_tampered_region_backup_refuses_unsafe_recovery();
+    incomplete_pending_region_write_stage_can_be_recovered_without_modifying_original();
+    canonical_region_candidate_identity_and_transaction_marker_are_recoverable();
+    surgical_be_scalar_candidate_changes_only_target_and_preserves_other_nbt();
+    be_only_and_combined_block_be_region_candidates_preserve_opaque_data();
+    explicitly_confirmed_existing_be_scalar_region_save_is_recoverable_verbatim();
+    region_batch_manifest_detects_stale_source_and_unmodified_world();
+}
+
+#[test]
+fn editing_tools_and_history() {
+    large_structure_cases::capture_transform_and_transfer();
+    complete_clone_patterns_preserve_frozen_source_payload_and_history();
+    clone_uses_frozen_effective_source_with_overlap_and_one_undo();
+    clone_refuses_original_block_entities_in_source_and_destination();
+    clone_preview_is_invalidated_by_source_overlay_or_original_disk_change();
+    clone_legacy_numeric_preserves_original_id_and_never_writes();
+    connected_fill_respects_staged_state_barrier_and_undo_group();
+    connected_fill_refuses_be_and_missing_original_chunks_atomically();
+    connected_fill_legacy_numeric_guards_identity_and_late_change();
+    original_numeric_and_named_moves_clear_source_preserve_overlap_and_undo();
+    original_be_refuses_move_of_source_or_destination_without_partial_stage();
+    five_geometry_brushes_produce_atomic_edit_previews_and_restore_original_bytes();
+    hollow_3d_brush_skips_original_be_outside_mask_and_refuses_inside();
+}
+
+/// 整批克隆验收：真实 Region、重叠来源、XYZ/缩放平铺、完整 NBT、UUID 与组合历史。
+fn complete_clone_patterns_preserve_frozen_source_payload_and_history() {
+    use mcedit2_world::{
+        editing::{ClonePattern, TransferKind, TransferOptions},
+        nbt_document::{Document, Value},
+        structure_transform::Transform,
+    };
+    let fixture = NativeWorld::create(true);
+    let mut editor = Session::new(fixture.metadata(), "minecraft:overworld").unwrap();
+    let point = Bounds::new((6, -64, 6), (6, -64, 6)).unwrap();
+    editor
+        .commit(
+            editor
+                .prepare(point, &parse_state("minecraft:gold_block").unwrap(), None)
+                .unwrap(),
+        )
+        .unwrap();
+    let bounds = Bounds::new((6, -64, 6), (7, -63, 7)).unwrap();
+    let options = TransferOptions {
+        kind: TransferKind::Clone,
+        entities: false,
+        biomes: false,
+        proof_budget: 16 * 1024 * 1024,
+    };
+    let pattern = ClonePattern {
+        transform: Transform {
+            rotation: [0., 90., 0.],
+            scale: [2., 1., 1.],
+            rotate_states: true,
+        },
+        copies: 3,
+        rotate_repeats: true,
+        rotate_offset: true,
+        copy_air: true,
+    };
+    let preview = editor
+        .prepare_clone_pattern_cancellable(bounds, (8, -64, 6), options, pattern, None, || false)
+        .unwrap();
+    assert_eq!(preview.copies, 3);
+    let candidate = preview.candidate();
+    let gold = |s: &Session, position| matches!(s.visible_block(position).unwrap(),Lookup::Present(ref details) if details.state.name=="minecraft:gold_block");
+    for position in [
+        (7, -64, 7),
+        (8, -64, 7),
+        (9, -64, 5),
+        (10, -64, 5),
+        (7, -64, 4),
+        (8, -64, 4),
+    ] {
+        assert!(gold(&candidate, position), "候选 {position:?}");
+        assert!(!gold(&editor, position), "准备阶段不能修改真实会话");
+    }
+    editor
+        .commit_transfer_cancellable(preview, || false)
+        .unwrap();
+    for position in [(7, -64, 7), (9, -64, 5), (7, -64, 4)] {
+        assert!(gold(&editor, position));
+    }
+    assert!(editor.undo().unwrap());
+    assert_eq!(editor.pending_cells(), 1);
+    assert!(gold(&editor, (6, -64, 6)));
+    assert!(editor.redo().unwrap());
+    assert!(gold(&editor, (7, -64, 4)));
+    assert_eq!(fixture.bytes_now(), fixture.original_region);
+    let before = editor.revision();
+    assert!(editor
+        .prepare_clone_pattern_cancellable(bounds, (15, -64, 15), options, pattern, None, || false)
+        .is_err());
+    assert!(std::sync::Arc::ptr_eq(&before, &editor.revision()));
+    assert!(editor
+        .prepare_clone_pattern_cancellable(bounds, (8, -64, 6), options, pattern, None, || true)
+        .is_err());
+
+    let fixture = NativeWorld::create(true);
+    overwrite_region(&fixture, &chunk_with_be("minecraft:stone", (0, -64, 0)));
+    fn doubles(values: [f64; 3]) -> Vec<u8> {
+        let mut out = vec![6];
+        out.extend(3i32.to_be_bytes());
+        for v in values {
+            out.extend(v.to_be_bytes());
+        }
+        out
+    }
+    let mut uuid = 4i32.to_be_bytes().to_vec();
+    for n in [11i32, 22, 33, 44] {
+        uuid.extend(n.to_be_bytes());
+    }
+    let mut rotation = vec![5];
+    rotation.extend(2i32.to_be_bytes());
+    rotation.extend(0f32.to_be_bytes());
+    rotation.extend(0f32.to_be_bytes());
+    let entity = compound(vec![
+        tag(8, "id", &nbt_string("minecraft:pig")),
+        tag(11, "UUID", &uuid),
+        tag(9, "Pos", &doubles([0.5, -63.5, 0.5])),
+        tag(9, "Motion", &doubles([0., 0., 0.])),
+        tag(9, "Rotation", &rotation),
+        tag(8, "OpaqueClonePayload", &nbt_string("原始实体内容")),
+    ]);
+    let mut entities = vec![10];
+    entities.extend(1i32.to_be_bytes());
+    entities.extend(entity);
+    let mut position = 2i32.to_be_bytes().to_vec();
+    position.extend(0i32.to_be_bytes());
+    position.extend(0i32.to_be_bytes());
+    let source_entities = tag(
+        10,
+        "",
+        &compound(vec![
+            tag(3, "DataVersion", &3955i32.to_be_bytes()),
+            tag(11, "Position", &position),
+            tag(9, "Entities", &entities),
+        ]),
+    );
+    fs::create_dir_all(fixture.path.join("entities")).unwrap();
+    let entity_region = region_bytes(&source_entities);
+    fs::write(fixture.path.join("entities/r.0.0.mca"), &entity_region).unwrap();
+    let original = fixture.bytes_now();
+    let mut editor = Session::new(fixture.metadata(), "minecraft:overworld").unwrap();
+    let bounds = Bounds::new((0, -64, 0), (1, -63, 1)).unwrap();
+    let options = TransferOptions {
+        entities: true,
+        ..options
+    };
+    let identities = editor
+        .scan_entity_identities(16 * 1024 * 1024, || false)
+        .unwrap();
+    let proof = mcedit2_world::entity_editing::clone_entity(
+        &source_entities,
+        Some(&source_entities),
+        (0, 0),
+        (0, 0),
+        true,
+        true,
+        0,
+        [4, 0, 4],
+        &identities,
+        mcedit2_world::entity_editing::DimensionChange::within(Some("minecraft:overworld")),
+    )
+    .unwrap();
+    let json = serde_json::to_vec(&proof).unwrap();
+    let replayed: mcedit2_world::entity_editing::CloneEntity =
+        serde_json::from_slice(&json).unwrap();
+    assert_eq!(
+        proof
+            .replay(&source_entities, Some(&source_entities))
+            .unwrap(),
+        replayed
+            .replay(&source_entities, Some(&source_entities))
+            .unwrap()
+    );
+    let pattern = ClonePattern {
+        transform: Transform {
+            scale: [2., 1., 1.],
+            rotate_states: false,
+            ..Default::default()
+        },
+        copies: 2,
+        copy_air: true,
+        ..Default::default()
+    };
+    let preview = editor
+        .prepare_clone_pattern_cancellable(bounds, (4, -64, 4), options, pattern, None, || false)
+        .unwrap();
+    assert_eq!(preview.block_entities, 4);
+    assert_eq!(preview.entities, 2);
+    let candidate = preview.candidate();
+    let be = candidate.staged_be_chunk(0, 0).unwrap().unwrap();
+    let doc = Document::new(be.to_vec()).unwrap();
+    let Value::List(list) = doc.inspect("/block_entities").unwrap() else {
+        panic!("BE 列表")
+    };
+    assert_eq!(list.items.len(), 5);
+    for i in 0..5 {
+        assert_eq!(
+            doc.inspect(&format!("/block_entities/{i}/id")).unwrap(),
+            Value::String("mod:precious_machine".into())
+        );
+        assert_eq!(
+            doc.inspect(&format!("/block_entities/{i}/UnrecognizedPayload"))
+                .unwrap(),
+            Value::String("KEEP EXACTLY".into())
+        );
+    }
+    let entities = candidate.staged_entity_chunk(0, 0).unwrap().unwrap();
+    let doc = Document::new(entities.to_vec()).unwrap();
+    let Value::List(list) = doc.inspect("/Entities").unwrap() else {
+        panic!("实体列表")
+    };
+    assert_eq!(list.items.len(), 3);
+    let mut ids = std::collections::BTreeSet::new();
+    for i in 0..3 {
+        ids.insert(
+            serde_json::to_string(&doc.inspect(&format!("/Entities/{i}/UUID")).unwrap()).unwrap(),
+        );
+        assert_eq!(
+            doc.inspect(&format!("/Entities/{i}/OpaqueClonePayload"))
+                .unwrap(),
+            Value::String("原始实体内容".into())
+        );
+    }
+    assert_eq!(ids.len(), 3);
+    editor
+        .commit_transfer_cancellable(preview, || false)
+        .unwrap();
+    assert_eq!(editor.staged_be_chunk(0, 0).unwrap().unwrap(), be);
+    assert!(editor.undo().unwrap());
+    assert!(!editor.has_pending_changes());
+    assert!(editor.redo().unwrap());
+    assert_eq!(fixture.bytes_now(), original);
+    assert_eq!(
+        fs::read(fixture.path.join("entities/r.0.0.mca")).unwrap(),
+        entity_region
+    );
+}
+
+#[test]
+fn exchange_journals_and_plugin_edits() {
+    large_structure_cases::format_roundtrips();
+    large_plugin_cases::complete_large_plugin_pipeline();
+    large_edit_cases::biomes_and_payloads();
+    biome_brush_cases::complete_biome_brush_pipeline();
+    numeric_biome_cases::complete_legacy_biome_pipeline();
+    complete_structure_exchange_and_resampled_source_proofs();
+    external_journal_restores_old_numeric_and_modern_original_blocks_without_world_writes();
+    journal_refuses_changed_opaque_nbt_and_preserves_empty_session();
+    malformed_journal_duplicate_coordinate_and_foreign_dimension_fail_closed();
+    journal_cannot_be_saved_inside_the_actual_world_or_over_existing_checkpoint();
+    original_world_block_clipboard_survives_reopen_and_pastes_one_undo_group();
+    original_structure_clipboard_validates_size_and_preserves_cross_dimension_payload();
+    legacy_numeric_schematic_export_import_roundtrips_addblocks_and_meta();
+    declarative_plugin_preview_uses_original_chunk_safety_and_a_single_undo();
+    be_journal_restores_modded_scalar_operations_and_separate_undo_atomically();
+    be_journal_source_drift_and_invalid_entry_are_refused_without_partial_import();
+    version2_plugin_composes_dependent_original_edits_as_one_undo();
+    version2_plugin_refuses_any_late_bad_step_without_staging();
+}
+
+#[path = "support/biome_brush_cases.rs"]
+mod biome_brush_cases;
+#[path = "support/brush_stroke_cases.rs"]
+mod brush_stroke_cases;
+#[path = "support/numeric_biome_cases.rs"]
+mod numeric_biome_cases;
+
+/// 完整格式往返、绑定 BE 的一对多采样、源变化拒绝及实际粘贴历史。
+fn complete_structure_exchange_and_resampled_source_proofs() {
+    use mcedit2_world::{
+        clipboard::{CaptureOptions, OpaqueEntity, PasteOptions},
+        nbt_document::{self, Document, Operation, Value},
+        structure_exchange::Format,
+        structure_transform::Transform,
+    };
+    let fixture = NativeWorld::create(true);
+    overwrite_region(&fixture, &chunk_with_be("minecraft:stone", (0, -64, 0)));
+    let mut editor = Session::new(fixture.metadata(), "minecraft:overworld").unwrap();
+    let options = CaptureOptions {
+        entities: false,
+        biomes: false,
+    };
+    let bounds = Bounds::new((0, -64, 0), (1, -63, 1)).unwrap();
+    let source = editor
+        .capture_structure_cancellable(bounds, options, || false)
+        .unwrap();
+    let transform = Transform {
+        scale: [2., 1., 1.],
+        rotate_states: false,
+        ..Default::default()
+    };
+    let (preview, visual) = editor
+        .prepare_resampled_structure_paste_cancellable(
+            &source,
+            transform,
+            (5, -64, 4),
+            PasteOptions {
+                include_biomes: false,
+            },
+            None,
+            || false,
+        )
+        .unwrap();
+    assert_eq!(visual.block_entities.len(), 2);
+    editor.commit_structure(preview).unwrap();
+    let doc = Document::new(editor.staged_be_chunk(0, 0).unwrap().unwrap().to_vec()).unwrap();
+    let Value::List(be) = doc.inspect("/block_entities").unwrap() else {
+        panic!("BE 列表")
+    };
+    assert_eq!(be.items.len(), 3);
+    for i in 0..3 {
+        assert_eq!(
+            doc.inspect(&format!("/block_entities/{i}/UnrecognizedPayload"))
+                .unwrap(),
+            Value::String("KEEP EXACTLY".into())
+        );
+    }
+    assert!(editor.undo().unwrap());
+    assert!(!editor.has_pending_changes());
+    let (preview, _) = editor
+        .prepare_resampled_structure_paste_cancellable(
+            &source,
+            transform,
+            (5, -64, 4),
+            PasteOptions {
+                include_biomes: false,
+            },
+            None,
+            || false,
+        )
+        .unwrap();
+    let changed = nbt_document::patch(
+        &chunk_with_be("minecraft:stone", (0, -64, 0)),
+        &Operation::Replace {
+            path: "/block_entities/0/UnrecognizedPayload".into(),
+            value: Value::String("CHANGED".into()),
+        },
+    )
+    .unwrap();
+    overwrite_region(&fixture, &changed);
+    assert!(editor.commit_structure(preview).is_err());
+    assert!(!editor.has_pending_changes());
+
+    let fixture = NativeWorld::create(true);
+    let chunk = nbt_document::patch(
+        &chunk_with_be("minecraft:chest", (0, -64, 0)),
+        &Operation::Replace {
+            path: "/block_entities/0/id".into(),
+            value: Value::String("minecraft:chest".into()),
+        },
+    )
+    .unwrap();
+    overwrite_region(&fixture, &chunk);
+    let world = fixture.metadata();
+    let original = fixture.bytes_now();
+    let mut editor = Session::new(world.clone(), "minecraft:overworld").unwrap();
+    let mut clip = editor
+        .capture_structure_cancellable(bounds, options, || false)
+        .unwrap();
+    clip.source_bound = false;
+    fn doubles(v: [f64; 3]) -> Vec<u8> {
+        let mut out = vec![6];
+        out.extend(3i32.to_be_bytes());
+        for n in v {
+            out.extend(n.to_be_bytes());
+        }
+        out
+    }
+    let mut uuid = 4i32.to_be_bytes().to_vec();
+    for n in [4i32, 5, 6, 7] {
+        uuid.extend(n.to_be_bytes());
+    }
+    clip.entities.push(OpaqueEntity {
+        position: [0.5, 0.5, 0.5],
+        block_position: None,
+        compound: compound(vec![
+            tag(8, "id", &nbt_string("minecraft:pig")),
+            tag(11, "UUID", &uuid),
+            tag(9, "Pos", &doubles([0.5, -63.5, 0.5])),
+            tag(8, "Extra", &nbt_string("完整实体")),
+        ]),
+    });
+    clip.metadata = Some(compound(vec![tag(8, "author", &nbt_string("完整原稿"))]));
+    let directory = std::env::temp_dir().join(format!(
+        "mcedit2-structure-exchange-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&directory).unwrap();
+    for (i, format) in [
+        Format::Clipboard,
+        Format::SpongeV2,
+        Format::SpongeV3,
+        Format::Structure,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let path = directory.join(format!("structure-{i}.{}", format.extension()));
+        format.write(&world, &clip, &path).unwrap();
+        assert!(format.write(&world, &clip, &path).is_err());
+        let imported = format.read(&world, "minecraft:overworld", &path).unwrap();
+        assert_eq!(imported.blocks, clip.blocks);
+        assert_eq!(imported.size, clip.size);
+        assert_eq!(imported.entities.len(), 1);
+        assert_eq!(imported.block_entities.len(), 1);
+        assert_eq!(imported.metadata, clip.metadata);
+        let mut raw = vec![10, 0, 0];
+        raw.extend(&imported.block_entities[0].compound);
+        assert_eq!(
+            Document::new(raw)
+                .unwrap()
+                .inspect("/UnrecognizedPayload")
+                .unwrap(),
+            Value::String("KEEP EXACTLY".into())
+        );
+        let (preview, visual) = editor
+            .prepare_resampled_structure_paste_cancellable(
+                &imported,
+                transform,
+                (5, -64, 4),
+                PasteOptions {
+                    include_biomes: false,
+                },
+                None,
+                || false,
+            )
+            .unwrap();
+        assert_eq!(visual.block_entities.len(), 2);
+        editor.commit_structure(preview).unwrap();
+        assert!(editor.undo().unwrap());
+        assert!(!editor.has_pending_changes());
+        let (preview, _) = editor
+            .prepare_resampled_structure_paste_cancellable(
+                &imported,
+                Transform::default(),
+                (4, -64, 4),
+                PasteOptions {
+                    include_biomes: false,
+                },
+                None,
+                || false,
+            )
+            .unwrap();
+        fs::write(&path, b"source changed").unwrap();
+        assert!(editor.commit_structure(preview).is_err());
+    }
+    // 大世界坐标下任意角度的实体 NBT / 局部坐标必须准确相等。
+    let mut rotated_source = clip.clone();
+    rotated_source.block_entities.clear();
+    rotated_source.metadata = None;
+    rotated_source.source_min = [123456789, -64, -123456789];
+    let position = [123456789.3, -63.7, -123456788.7];
+    rotated_source.entities[0].position =
+        std::array::from_fn(|i| position[i] - f64::from(rotated_source.source_min[i]));
+    let mut raw = vec![10, 0, 0];
+    raw.extend(&rotated_source.entities[0].compound);
+    let raw = nbt_document::patch(
+        &raw,
+        &Operation::Replace {
+            path: "/Pos".into(),
+            value: Value::List(nbt_document::List {
+                element_type: 6,
+                items: position.into_iter().map(Value::Double).collect(),
+            }),
+        },
+    )
+    .unwrap();
+    rotated_source.entities[0].compound = raw[3..].to_vec();
+    let rotated = rotated_source
+        .resampled_cancellable(
+            Transform {
+                rotation: [25., 38., 17.],
+                ..Default::default()
+            },
+            || false,
+        )
+        .unwrap();
+    rotated.validate(&world, "minecraft:overworld").unwrap();
+    assert_eq!(fixture.bytes_now(), original);
+    let legacy = NativeWorld::create(false);
+    let old_world = legacy.metadata();
+    let editor = Session::new(old_world.clone(), "minecraft:overworld").unwrap();
+    let mut old = editor
+        .capture_structure_cancellable(Bounds::new((0, 0, 0), (1, 1, 1)).unwrap(), options, || {
+            false
+        })
+        .unwrap();
+    old.source_bound = false;
+    let path = directory.join("legacy.schematic");
+    Format::Legacy.write(&old_world, &old, &path).unwrap();
+    let imported = Format::Legacy
+        .read(&old_world, "minecraft:overworld", &path)
+        .unwrap();
+    assert_eq!(imported.blocks, old.blocks);
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[path = "support/large_plugin_cases.rs"]
+mod large_plugin_cases;

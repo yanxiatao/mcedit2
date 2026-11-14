@@ -1,20 +1,36 @@
 //! Minecraft-style free-flight spectator camera with genuine 3D world-space
 //! model triangles and GPU perspective correction. No entity simulation and
 //! no implicit mutations to Java Region / Block Entity source NBT.
+use crate::gpu_mesh::Vertex;
 use crate::{
-    gpu_mesh::{model_cache_key, ModelCacheKey, Quality, Vertex},
+    gpu_mesh::{model_cache_key, ModelCacheKey, Quality},
     isometric::Face,
     models, palette,
     textures::{AlphaMode, TextureBank},
-    Message,
+    world_mesh::WorldQuad,
 };
-use iced::widget::canvas::{self, Frame, Path, Stroke};
-use iced::{mouse, Color, Point, Rectangle, Renderer, Size, Theme};
+use iced::{Color, Point, Size};
 use mcedit2_world::surface::{SurfaceView, SurfaceVoxel, VoxelMaterial};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
 };
+
+#[path = "spectator_build.rs"]
+mod parallel;
+#[path = "spectator_sources.rs"]
+mod sources;
+#[path = "spectator_templates.rs"]
+mod templates;
+pub(crate) use templates::Cache as TemplateCache;
+
+type LodFaceStyleKey<'a> = (ModelCacheKey<'a>, u8, usize);
+type FaceVisibility = (Option<bool>, Option<Option<Face>>);
+type RepeatingFace = Option<(
+    [[f32; 2]; 4],
+    crate::textures::AtlasUv,
+    Option<crate::textures::texture_sampler::Sampler>,
+)>;
 
 const NEAR: f32 = 0.05;
 const FAR: f32 = 8192.0;
@@ -28,11 +44,20 @@ const FACES: [Face; 6] = [
     Face::NegZ,
 ];
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Camera {
     pub position: [f64; 3],
     pub yaw: f32,
     pub pitch: f32,
+    /// 镜头倍率独立于其他投影；只改变投影和拾取射线，不重建源网格。
+    pub zoom: f32,
+    /// 自由相机共用位置和朝向，正交模式使用原版平行射线及每格像素比例。
+    #[serde(default = "perspective_default")]
+    pub perspective: bool,
+}
+fn perspective_default() -> bool {
+    true
 }
 impl Default for Camera {
     fn default() -> Self {
@@ -40,15 +65,49 @@ impl Default for Camera {
             position: [0.0, 82.0, 0.0],
             yaw: 0.0,
             pitch: 0.0,
+            zoom: 1.0,
+            perspective: true,
         }
     }
 }
 impl Camera {
+    /// 与旧 CameraMoveMouseAction 一致：沿当前偏航在地面平面拖动，每像素四分之一格。
+    pub(crate) fn pan(&mut self, delta: iced::Vector) -> Result<bool, String> {
+        if ![delta.x, delta.y].into_iter().all(f32::is_finite) {
+            return Err("相机移动包含非有限输入".into());
+        }
+        let (s, c) = self.yaw.to_radians().sin_cos();
+        let mut position = self.position;
+        position[0] += f64::from((delta.x * c - delta.y * s) / 4.);
+        position[2] += f64::from((delta.x * s + delta.y * c) / 4.);
+        if !position.into_iter().all(f64::is_finite)
+            || ![position[0], position[2]]
+                .into_iter()
+                .all(|v| (-30_000_000. ..30_000_000.).contains(&v))
+        {
+            return Err("相机移动超出 Java 世界坐标范围".into());
+        }
+        let changed = position != self.position;
+        self.position = position;
+        Ok(changed)
+    }
+    pub(crate) fn zoom_by(&mut self, steps: f32) -> Result<bool, String> {
+        let next = crate::view_navigation::zoom_after(self.zoom, steps)?;
+        let changed = self.zoom != next;
+        self.zoom = next;
+        Ok(changed)
+    }
+    /// 普通世界透视最多使用 90° 垂直视野；工作区正交缩放不受影响。
+    pub(crate) fn limit_player_fov(&mut self) {
+        if self.perspective {
+            self.zoom = self.zoom.max((FOV_Y.to_radians() * 0.5).tan());
+        }
+    }
     /// Minecraft yaw=0 faces +Z; positive yaw looks toward -X.
     pub fn basis(&self) -> ([f32; 3], [f32; 3], [f32; 3]) {
         let (s, c) = self.yaw.to_radians().sin_cos();
         let (sp, cp) = self.pitch.to_radians().sin_cos();
-        ([c, 0.0, s], [-s * sp, cp, c * sp], [-s * cp, -sp, c * cp])
+        ([-c, 0.0, -s], [-s * sp, cp, c * sp], [-s * cp, -sp, c * cp])
     }
     pub fn look(&mut self, dx: f32, dy: f32) {
         self.yaw = (self.yaw + dx * 0.19).rem_euclid(360.0);
@@ -78,23 +137,80 @@ impl Camera {
             *coordinate += step as f64 * dt as f64;
         }
     }
-    pub(crate) fn uniform(&self, view: &SurfaceView, size: Size) -> CameraUniform {
+    /// 真实窗口坐标的观察射线；正交原点随屏幕移动，方向保持平行。
+    pub(crate) fn ray(self, point: Point, size: Size) -> Option<([f64; 3], [f64; 3], [f64; 2])> {
+        if size.width <= 0. || size.height <= 0. {
+            return None;
+        }
+        let uniform = self.uniform_at_origin([0; 3], size);
+        let x = f64::from(2. * point.x / size.width - 1.) / f64::from(uniform.projection[0]);
+        let y = f64::from(1. - 2. * point.y / size.height) / f64::from(uniform.projection[1]);
+        let offset: [f64; 3] =
+            std::array::from_fn(|i| f64::from(uniform.right[i]) * x + f64::from(uniform.up[i]) * y);
+        let direction = if self.perspective {
+            std::array::from_fn(|i| f64::from(uniform.forward[i]) + offset[i])
+        } else {
+            std::array::from_fn(|i| f64::from(uniform.forward[i]))
+        };
+        let origin = if self.perspective {
+            self.position
+        } else {
+            std::array::from_fn(|i| self.position[i] + offset[i])
+        };
+        Some((
+            origin,
+            direction,
+            [
+                f64::from(uniform.projection[2]),
+                f64::from(uniform.projection[3]),
+            ],
+        ))
+    }
+    /// 相机与所绘制的完整网格使用相同原点，异步场景切换期间也不混用坐标。
+    pub(crate) fn uniform_at_origin(&self, origin: [i32; 3], size: Size) -> CameraUniform {
         let (right, up, forward) = self.basis();
         let half_tan = (FOV_Y.to_radians() * 0.5).tan();
         let aspect = (size.width / size.height.max(1.0)).max(0.1);
+        let projection = if self.perspective {
+            [
+                self.zoom / (half_tan * aspect),
+                self.zoom / half_tan,
+                NEAR,
+                FAR,
+            ]
+        } else {
+            // 原 WorldView.scale=1/16；CameraWorldView 另乘 sqrt(2)。
+            let pixels = self.zoom * 16. / std::f32::consts::SQRT_2;
+            [
+                2. * pixels / size.width,
+                2. * pixels / size.height,
+                -2000.,
+                2000.,
+            ]
+        };
         CameraUniform {
             position: [
-                (self.position[0] - view.x as f64) as f32,
-                (self.position[1] - view.y_min as f64) as f32,
-                (self.position[2] - view.z as f64) as f32,
-                0.0,
+                (self.position[0] - origin[0] as f64) as f32,
+                (self.position[1] - origin[1] as f64) as f32,
+                (self.position[2] - origin[2] as f64) as f32,
+                if self.perspective { 0. } else { 1. },
             ],
             right: [right[0], right[1], right[2], 0.0],
             up: [up[0], up[1], up[2], 0.0],
             forward: [forward[0], forward[1], forward[2], 0.0],
-            projection: [1.0 / (half_tan * aspect), 1.0 / half_tan, NEAR, FAR],
+            projection,
         }
     }
+}
+/// 两种自由相机投影沿用同一观察状态、资源和工具；等轴工作区单独保留。
+pub(crate) fn projection_controls(app: &crate::App) -> iced::Element<'_, crate::Message> {
+    iced::widget::checkbox(app.spectator_camera.perspective)
+        .label(app.language.pick(
+            "相机透视投影（关闭使用正交投影）",
+            "Perspective camera (off: orthographic)",
+        ))
+        .on_toggle(crate::Message::CameraPerspective)
+        .into()
 }
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable, Default)]
@@ -113,16 +229,111 @@ pub(crate) struct CompletedFrame {
     pub surface: Arc<SurfaceView>,
     pub atlas: Option<Arc<crate::textures::TextureAtlas>>,
 }
+/// 实际已提交的世界画面；交互只使用与当前像素一致的网格与投影。
+#[derive(Clone, Debug)]
+pub(crate) struct PresentedView {
+    pub camera: crate::world_camera::WorldCamera,
+    pub viewport: crate::render_viewport::RenderViewport,
+    pub quality: Quality,
+    pub mesh: Arc<StreamMesh>,
+    pub atlas: Option<Arc<crate::textures::TextureAtlas>>,
+}
+impl PresentedView {
+    /// 方块检查只命中当前已显示的地形层；实体模型不改变其背后方块的选择。
+    pub(crate) fn pick_terrain(&self, point: Point) -> Option<crate::picking::Hit> {
+        let mut result = None;
+        let mut limit = f64::INFINITY;
+        for (near, index) in self
+            .mesh
+            .chunks
+            .candidates(self.camera, point, self.viewport.logical)
+        {
+            if near > limit {
+                break;
+            }
+            let chunk = &self.mesh.chunks[index];
+            let marker = |group| {
+                (chunk.key.2 == 0)
+                    .then(|| {
+                        self.mesh
+                            .entities
+                            .as_ref()?
+                            .marker((chunk.key.0, chunk.key.1), group)
+                    })
+                    .flatten()
+            };
+            let hit = chunk.picking.cast_filtered(
+                self.camera,
+                point,
+                self.viewport,
+                self.atlas.as_deref(),
+                self.quality,
+                limit,
+                chunk.opaque_only,
+                |group, source| {
+                    source.owner.is_some()
+                        || marker(group).is_some_and(|reference| {
+                            let marker = reference.marker();
+                            marker.kind == mcedit2_world::scene_annotations::Kind::BlockEntity
+                                && marker.block_state.is_some()
+                        })
+                },
+            );
+            if let Some(mut hit) = hit {
+                if hit.owner.is_none() {
+                    let reference = marker(hit.group_index).expect("已按方块实体源组筛选");
+                    let marker = reference.marker();
+                    hit.owner = Some(crate::picking::Owner {
+                        position: marker.position.map(|v| v as i32),
+                        state: Arc::clone(
+                            marker.block_state.as_ref().expect("已按真实方块状态筛选"),
+                        ),
+                    });
+                }
+                limit = hit.depth;
+                result = Some(hit);
+            }
+        }
+        result
+    }
+    pub(crate) fn pick(&self, point: Point) -> Option<crate::picking::Hit> {
+        self.mesh.pick_with_atlas(
+            self.camera,
+            point,
+            self.viewport,
+            self.quality,
+            self.atlas.as_deref(),
+        )
+    }
+}
+pub(crate) type PresentedViewCache = Arc<Mutex<Option<PresentedView>>>;
+impl CompletedFrame {
+    /// 流式网格记录自己的顶点原点；平面预览使用对应源视图的原点。
+    pub(crate) fn origin(&self) -> [i32; 3] {
+        self.stream_mesh.as_ref().map_or(
+            [self.surface.x, self.surface.y_min, self.surface.z],
+            |mesh| mesh.origin,
+        )
+    }
+}
 #[derive(Clone)]
 pub(crate) struct SpectatorScene {
+    pub entity_frame: Option<Arc<crate::entity_geometry::Frame>>,
+    pub entity_enabled: bool,
+    pub(crate) lighting: Arc<crate::lighting::Table>,
+    pub entity_cache: Arc<Mutex<Option<Arc<StreamMesh>>>>,
     pub surface: Arc<SurfaceView>,
     pub texture_bank: Option<Arc<TextureBank>>,
     pub show_textures: bool,
+    pub(crate) block_layers: crate::block_visibility::Layers,
     pub camera: Camera,
     pub quality: Quality,
     /// Scene mesh identity is independent of camera orientation and position.
     /// Pan/look only changes the small GPU camera uniform.
-    pub cache: Arc<Mutex<Option<Arc<Vec<Vertex>>>>>,
+    pub cache: Arc<Mutex<Option<Arc<StreamMesh>>>>,
+    /// GPU 已选定的网格与其图集，交互只从该快照拾取。
+    pub presented: Arc<Mutex<Option<Arc<StreamMesh>>>>,
+    pub presented_view: PresentedViewCache,
     pub pending: Arc<Mutex<bool>>,
     /// Last *complete* spectator snapshot kept visible until the next mesh
     /// finishes. The matching source origin is necessary for camera uniforms.
@@ -133,6 +344,109 @@ pub(crate) struct SpectatorScene {
     /// Source-exact chunk fragment cache shared across streamed scenes.
     pub chunk_cache: Arc<Mutex<crate::chunk_mesh_cache::ChunkMeshCache>>,
 }
+impl SpectatorScene {
+    /// 新流式世代优先于旧近景缓存；部分区块发布不代表整个后台任务完成。
+    pub(crate) fn mesh_complete(&self) -> bool {
+        if let Some(snapshot) = &self.snapshot {
+            snapshot
+                .ready
+                .lock()
+                .expect("世界网格与呈现状态锁被毒化")
+                .as_ref()
+                .is_some_and(|mesh| mesh.complete)
+        } else {
+            self.cache
+                .lock()
+                .expect("世界网格与呈现状态锁被毒化")
+                .as_ref()
+                .is_some_and(|mesh| mesh.complete)
+        }
+    }
+}
+/// 动态方块实体使用相同的资源 / OBJ、UV、透明和四角后端，返回以实际源格心为基底的面。
+/// 实体搬运等原生 renderSingleBlock 路径：全邻面、实际资源模型、没有世界群系。
+pub(crate) fn single_block_quads(
+    bank: &TextureBank,
+    state: &mcedit2_world::sections::State,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<WorldQuad>, String> {
+    if bank.single_block_geometry(state).is_none()
+        && bank
+            .static_obj_at(state, bank.single_block_sample())
+            .is_none()
+    {
+        return Err(format!("独立方块 {} 没有可解析的资源模型", state.name));
+    }
+    let atlas = bank.atlas().ok_or("独立方块缺少资源图集")?;
+    let voxel = SurfaceVoxel::new(
+        [0; 3],
+        mcedit2_world::surface::VoxelData {
+            state: Arc::new(state.clone()),
+            kind: mcedit2_world::surface::material(state),
+            faces: 63,
+            biome: None,
+            original_block_entity: false,
+            staged: false,
+            span: 1,
+            fluid: None,
+            light: Default::default(),
+        },
+    );
+    let template = templates::Template::compile_single_block(
+        bank,
+        &voxel,
+        [atlas.white.sample(0.5, 0.5); 4],
+        cancelled,
+    )?;
+    let mut quads = Vec::new();
+    template
+        .append(&mut quads, 63, [0.; 3], &voxel, &mut None, cancelled)
+        .ok_or("独立方块模型编译已取消")?;
+    Ok(quads)
+}
+pub(crate) fn resource_block_quads(
+    bank: &TextureBank,
+    state: &mcedit2_world::sections::State,
+    position: (i32, i32, i32),
+    biomes: &mcedit2_world::biome_source::Region,
+    textures: bool,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<WorldQuad>, String> {
+    if bank.geometry_at(state, position).is_none() && bank.static_obj_at(state, position).is_none()
+    {
+        return Err(format!("移动方块 {} 没有可解析的资源模型", state.name));
+    }
+    let atlas = bank.atlas().ok_or("移动方块缺少资源图集")?;
+    let voxel = SurfaceVoxel::new(
+        [position.0, position.1, position.2],
+        mcedit2_world::surface::VoxelData {
+            state: Arc::new(state.clone()),
+            kind: mcedit2_world::surface::material(state),
+            faces: 63,
+            biome: biomes.sample(position).map(Into::into),
+            original_block_entity: false,
+            staged: false,
+            span: 1,
+            fluid: None,
+            light: Default::default(),
+        },
+    );
+    let template = templates::Template::compile_model(
+        Some(bank),
+        textures,
+        true,
+        &voxel,
+        [atlas.white.sample(0.5, 0.5); 4],
+        cancelled,
+    )
+    .ok_or("移动方块模型准备已取消")?;
+    let mut quads = Vec::new();
+    let mut colors = Some(bank.tint_context(biomes));
+    template
+        .append(&mut quads, 63, [0.; 3], &voxel, &mut colors, cancelled)
+        .ok_or("移动方块模型编译已取消")?;
+    Ok(quads)
+}
 fn rgba(voxel: &SurfaceVoxel, face: Face) -> Color {
     let base = palette::tint(&voxel.state, voxel.kind, face == Face::Top)
         .unwrap_or_else(|| palette::unknown_tint(&voxel.state, voxel.kind));
@@ -140,25 +454,28 @@ fn rgba(voxel: &SurfaceVoxel, face: Face) -> Color {
     Color::from_rgba(base.r, base.g, base.b, base.a)
 }
 fn quad_vertices(
-    out: &mut Vec<Vertex>,
+    out: &mut Vec<WorldQuad>,
     xyz: [[f32; 3]; 4],
     uv: [[f32; 2]; 4],
     shade: Color,
     alpha: AlphaMode,
     page: u32,
+    normal: Option<[f32; 3]>,
 ) {
-    for corner in [0, 1, 2, 0, 2, 3] {
-        out.push(Vertex {
-            xy: [0.0, 0.0],
-            depth: 0.0,
-            rgba: [shade.r, shade.g, shade.b, shade.a],
-            uv: uv[corner],
-            mode: alpha as u32,
-            xyz: xyz[corner],
-            world_mode: 1,
-            atlas_page: page,
-        });
+    let mut quad = WorldQuad {
+        xyz,
+        uv,
+        rgba: [[shade.r, shade.g, shade.b, shade.a]; 4],
+        mode: alpha.gpu_bits(),
+        atlas_page: page,
+        light: crate::lighting::FULLBRIGHT,
+    };
+    if let Some(normal) = normal {
+        quad.mode |= crate::material_mode::SINGLE_SIDED;
+        quad.align_winding(normal);
+        quad.classify_axis_facing();
     }
+    out.push(quad);
 }
 fn face_on_boundary(element: &models::Part, face: Face, direction: Face) -> bool {
     if element.rotation.is_some() {
@@ -180,26 +497,33 @@ fn face_on_boundary(element: &models::Part, face: Face, direction: Face) -> bool
 }
 /// Original face mask includes missing-Section uncertainty. A face is
 /// culled only when a verified neighboring original block is a full occluder.
-fn should_emit(
+fn should_emit_resolved(
     voxel: &SurfaceVoxel,
     element: &models::Part,
     face: Face,
-    bank: Option<&TextureBank>,
-    element_index: usize,
-    position: (i32, i32, i32),
+    (declared, cull): FaceVisibility,
 ) -> bool {
-    let declared =
-        bank.and_then(|b| b.face_defined_at(&voxel.state, face, element_index, position));
+    required_face(element, face, (declared, cull))
+        .is_some_and(|mask| mask == 0 || voxel.faces & mask != 0)
+}
+/// None 表示模型没有该面；零掩码表示不依赖邻块，其余位保留实际源面遮挡。
+fn required_face(
+    element: &models::Part,
+    face: Face,
+    (declared, cull): FaceVisibility,
+) -> Option<u8> {
     if declared == Some(false) {
-        return false;
+        return None;
     }
-    let cull =
-        bank.and_then(|b| b.face_cull_direction_at(&voxel.state, face, element_index, position));
     if let Some(Some(dir)) = cull {
-        return !face_on_boundary(element, face, dir) || voxel.faces & dir.flag() != 0;
+        return Some(if face_on_boundary(element, face, dir) {
+            dir.flag()
+        } else {
+            0
+        });
     }
     if cull == Some(None) {
-        return true;
+        return Some(0);
     }
     let (x, y, z) = face.normal();
     let (axis, positive) = if x != 0 {
@@ -209,7 +533,11 @@ fn should_emit(
     } else {
         (2, z > 0)
     };
-    !element.boundary(axis, positive) || voxel.faces & face.flag() != 0
+    Some(if element.boundary(axis, positive) {
+        face.flag()
+    } else {
+        0
+    })
 }
 /// A JSON element face can disappear only if another unrotated element
 /// fully covers its rectangle on the *same plane*. Rotation and unknown
@@ -232,539 +560,758 @@ pub(crate) fn build(view: &SpectatorScene) -> Vec<Vertex> {
     build_cancellable(view, &|| false).expect("uninterruptible spectator mesh")
 }
 fn source_chunk_group(voxel: &SurfaceVoxel) -> Option<(i32, i32)> {
-    (voxel.span == 1).then(|| (
-        voxel.x.div_euclid(16), voxel.z.div_euclid(16),
-    ))
+    (voxel.span == 1).then(|| (voxel.x.div_euclid(16), voxel.z.div_euclid(16)))
 }
 /// Complete source-owned chunk geometry, without a flattened scene mesh.
 #[derive(Clone, Debug)]
 pub(crate) struct MeshChunk {
     pub key: (i32, i32, u8, usize, usize),
-    pub vertices: Arc<Vec<Vertex>>,
+    /// 顶点的独立坐标基底；相机移动不复制区块顶点。
+    pub origin: [i32; 3],
+    geometry: Arc<crate::mesh_geometry::Geometry>,
+    pub picking: Arc<crate::picking::Index>,
+    /// 渐进发布只绘制普通不透明面；共享完整源索引，射线时排除其余通道。
+    pub(crate) opaque_only: bool,
+}
+impl MeshChunk {
+    pub(crate) fn new(
+        key: (i32, i32, u8, usize, usize),
+        origin: [i32; 3],
+        quads: Arc<Vec<WorldQuad>>,
+        picking: Arc<crate::picking::Index>,
+    ) -> Self {
+        Self::from_geometry(
+            key,
+            origin,
+            Arc::new(crate::mesh_geometry::Geometry::new(quads)),
+            picking,
+        )
+    }
+    pub(crate) fn from_geometry(
+        key: (i32, i32, u8, usize, usize),
+        origin: [i32; 3],
+        geometry: Arc<crate::mesh_geometry::Geometry>,
+        picking: Arc<crate::picking::Index>,
+    ) -> Self {
+        Self {
+            key,
+            origin,
+            geometry,
+            picking,
+            opaque_only: false,
+        }
+    }
+    pub(crate) fn geometry(&self) -> &Arc<crate::mesh_geometry::Geometry> {
+        &self.geometry
+    }
+    pub(crate) fn quads(&self) -> &Arc<Vec<WorldQuad>> {
+        self.geometry.quads()
+    }
 }
 #[derive(Clone, Debug)]
 pub(crate) struct StreamMesh {
-    pub chunks: Vec<MeshChunk>,
+    /// 与完整地形和当前资源同代的空域证明；部分发布及无纹理模式不使用。
+    pub visibility: Option<Arc<crate::section_culling::Topology>>,
+    /// 复合帧的地形来源；用于流式交接，避免实体批次影响地形世代判定。
+    pub terrain: Option<Arc<StreamMesh>>,
+    pub entities: Option<Arc<crate::entity_geometry::Frame>>,
+    /// 当前源快照已全部建模；区块渐进发布时为 false。
+    pub complete: bool,
+    pub chunks: crate::picking::Chunks,
     pub origin: [i32; 3],
+    /// UV 与其生成时的图集一起提交，异步资源切换不能给旧网格绑定新图集。
+    pub atlas: Option<Arc<crate::textures::TextureAtlas>>,
+}
+impl StreamMesh {
+    pub(crate) fn same_terrain(a: &Arc<Self>, b: &Arc<Self>) -> bool {
+        Arc::ptr_eq(
+            a.terrain.as_ref().unwrap_or(a),
+            b.terrain.as_ref().unwrap_or(b),
+        )
+    }
+    pub(crate) fn covers(&self, previous: &Self) -> bool {
+        let current = self.terrain.as_ref().map_or(self, |t| t.as_ref());
+        let previous = previous.terrain.as_ref().map_or(previous, |t| t.as_ref());
+        current.chunks.covers(&previous.chunks)
+    }
+    #[cfg(test)]
+    pub(crate) fn pick(
+        &self,
+        camera: impl Into<crate::world_camera::WorldCamera>,
+        point: Point,
+        viewport: crate::render_viewport::RenderViewport,
+        quality: Quality,
+    ) -> Option<crate::picking::Hit> {
+        self.pick_with_atlas(camera, point, viewport, quality, self.atlas.as_deref())
+    }
+    pub(crate) fn pick_with_atlas(
+        &self,
+        camera: impl Into<crate::world_camera::WorldCamera>,
+        point: Point,
+        viewport: crate::render_viewport::RenderViewport,
+        quality: Quality,
+        atlas: Option<&crate::textures::TextureAtlas>,
+    ) -> Option<crate::picking::Hit> {
+        let camera = camera.into();
+        let candidates = self.chunks.candidates(camera, point, viewport.logical);
+        let mut result = None;
+        let mut limit = f64::INFINITY;
+        for (near, index) in candidates {
+            let chunk = &self.chunks[index];
+            if near > limit {
+                break;
+            }
+            if let Some(mut hit) = chunk.picking.cast_filtered(
+                camera,
+                point,
+                viewport,
+                atlas,
+                quality,
+                limit,
+                chunk.opaque_only,
+                |_, _| true,
+            ) {
+                if chunk.key.2 == 0 {
+                    hit.marker = self
+                        .entities
+                        .as_ref()
+                        .and_then(|frame| frame.marker((chunk.key.0, chunk.key.1), hit.group_index))
+                        .cloned();
+                }
+                limit = hit.depth;
+                result = Some(hit);
+            }
+        }
+        result
+    }
+}
+#[derive(Clone, Copy)]
+struct SourceFrame<'a> {
+    biomes: &'a mcedit2_world::biome_source::Region,
+    origin: [i32; 3],
+    y_max: i32,
+    #[cfg(test)]
+    reference: bool,
 }
 pub(crate) fn build_stream_cancellable(
     view: &SpectatorScene,
     snapshot: &crate::spectator_stream::SceneSnapshot,
-    cancelled: &impl Fn() -> bool,
+    cancelled: &dyn Fn() -> bool,
 ) -> Option<StreamMesh> {
+    let stream_started = std::time::Instant::now();
+    let filtered = snapshot.filtered_for_mesh();
+    let snapshot = &filtered;
+    let biomes = snapshot.biomes();
     let sources = snapshot.sources().collect::<Vec<_>>();
     // Per-source seam indexes are cached across streamed generations;
     // only newly arrived or replaced source patches need indexing.
-    let neighbors = snapshot.exact_neighbors();
-    let contexts = snapshot.lod_contexts();
-    let chunks = build_sources(view, &sources, snapshot.origin(),
-        snapshot.y_max(), Some(&neighbors), Some(&contexts), cancelled)?;
-    Some(StreamMesh { chunks, origin: snapshot.origin() })
+    let neighbors = snapshot.exact_neighbors_cancellable(cancelled)?;
+    let contexts = snapshot.chunk_contexts();
+    let atlas = view.texture_bank.as_ref().and_then(|b| b.atlas()).cloned();
+    let base = view
+        .presented
+        .lock()
+        .expect("世界呈现状态锁被毒化")
+        .clone()
+        .map(|mesh| mesh.terrain.clone().unwrap_or(mesh))
+        .filter(|mesh| {
+            mesh.origin == snapshot.origin()
+                && match (&mesh.atlas, &atlas) {
+                    (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                    (None, None) => true,
+                    _ => false,
+                }
+        });
+    let mut last = std::time::Instant::now();
+    let mut published = false;
+    let mut publish = |chunks: &[MeshChunk]| {
+        // 已有世界时直接交接本轮完整建模结果，避免中间 CPU 目标占用 GPU 交接周期。
+        // GPU 仍按 Section 渐进显示；首次载入保留列级进度。
+        if base.is_none()
+            && !snapshot.edit_refresh
+            && !cancelled()
+            && (!published || last.elapsed().as_millis() >= 50)
+        {
+            if published {
+                let previous = snapshot
+                    .ready
+                    .lock()
+                    .expect("世界网格与呈现状态锁被毒化")
+                    .clone();
+                if let Some(previous) = previous {
+                    let displayed = view
+                        .presented
+                        .lock()
+                        .expect("世界网格与呈现状态锁被毒化")
+                        .clone();
+                    if !displayed
+                        .as_ref()
+                        .is_some_and(|frame| StreamMesh::same_terrain(&previous, frame))
+                    {
+                        return;
+                    }
+                }
+            }
+            // 未完成的列继续显示已有完整几何；只用整列完成结果覆盖，避免制造空洞。
+            let columns: std::collections::HashSet<_> = chunks
+                .iter()
+                .map(|p| (p.key.0, p.key.1, p.key.2, p.key.3))
+                .collect();
+            let mut parts = base
+                .iter()
+                .flat_map(|m| m.chunks.iter())
+                .filter(|p| {
+                    p.key.2 != 0 && !columns.contains(&(p.key.0, p.key.1, p.key.2, p.key.3))
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            parts.extend_from_slice(chunks);
+            let frame = Arc::new(StreamMesh {
+                terrain: None,
+                visibility: None,
+                entities: None,
+                complete: false,
+                chunks: parts.into(),
+                origin: snapshot.origin(),
+                atlas: atlas.clone(),
+            });
+            crate::mesh_async::publish_completed(&snapshot.ready, frame, cancelled);
+            published = true;
+            last = std::time::Instant::now();
+        }
+    };
+    let chunks = build_sources(
+        view,
+        &sources,
+        SourceFrame {
+            biomes: &biomes,
+            origin: snapshot.origin(),
+            y_max: snapshot.y_max(),
+            #[cfg(test)]
+            reference: false,
+        },
+        Some(&neighbors),
+        Some(&contexts),
+        cancelled,
+        &mut publish,
+    )?;
+    #[cfg(test)]
+    if std::env::var_os("MCEDIT2_VERIFY_STREAM_MESH").is_some() {
+        static VERIFIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let radius = std::env::var("MCEDIT2_MESH_RADIUS")
+            .expect("真实网格核对须指定半径")
+            .parse::<usize>()
+            .expect("核对半径必须为整数");
+        if contexts
+            .iter()
+            .filter(|context| {
+                snapshot
+                    .visible_columns
+                    .as_ref()
+                    .is_none_or(|columns| columns.contains(&context.coordinates()))
+            })
+            .count()
+            == (radius * 2 + 1).pow(2)
+            && !VERIFIED.swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            let mut oracle = view.clone();
+            oracle.chunk_cache = Default::default();
+            oracle.presented = Default::default();
+            let expected = build_sources(
+                &oracle,
+                &sources,
+                SourceFrame {
+                    biomes: &biomes,
+                    origin: snapshot.origin(),
+                    y_max: snapshot.y_max(),
+                    reference: true,
+                },
+                Some(&neighbors),
+                Some(&contexts),
+                cancelled,
+                &mut |_| {},
+            )
+            .expect("真实网格参考构建必须成功");
+            assert_eq!(chunks.len(), expected.len());
+            for (actual, expected) in chunks.iter().zip(&expected) {
+                assert_eq!((actual.key, actual.origin), (expected.key, expected.origin));
+                assert!(
+                    bytemuck::cast_slice::<WorldQuad, u8>(actual.quads())
+                        == bytemuck::cast_slice::<WorldQuad, u8>(expected.quads()),
+                    "真实流式网格与完整邻面参考不同：{:?}",
+                    actual.key
+                );
+                assert_eq!(
+                    actual.picking.source_groups(),
+                    expected.picking.source_groups()
+                );
+            }
+            eprintln!(
+                "真实流式网格核对通过：{} Section，{} 面逐字节及源拾取一致",
+                chunks
+                    .iter()
+                    .filter(|part| snapshot
+                        .visible_columns
+                        .as_ref()
+                        .is_none_or(|columns| columns.contains(&(part.key.0, part.key.1))))
+                    .count(),
+                chunks
+                    .iter()
+                    .filter(|part| snapshot
+                        .visible_columns
+                        .as_ref()
+                        .is_none_or(|columns| columns.contains(&(part.key.0, part.key.1))))
+                    .map(|c| c.quads().len())
+                    .sum::<usize>()
+            );
+        }
+    }
+    let chunks: crate::picking::Chunks = chunks.into();
+    // 完整几何无需等待可选空域剔除的全局连通分量；同代来源先交给 GPU，
+    // 随后的拓扑仅更新提交掩码，不再重复编码或上传面。编辑仍保留完整原子交接。
+    if base.is_some() && !snapshot.edit_refresh && !cancelled() {
+        crate::mesh_async::publish_completed(
+            &snapshot.ready,
+            Arc::new(StreamMesh {
+                terrain: None,
+                visibility: None,
+                entities: None,
+                complete: true,
+                chunks: chunks.clone(),
+                origin: snapshot.origin(),
+                atlas: atlas.clone(),
+            }),
+            cancelled,
+        );
+    }
+    let visibility = if view.show_textures && view.texture_bank.is_some() {
+        let visible = contexts
+            .iter()
+            .filter(|context| {
+                snapshot
+                    .visible_columns
+                    .as_ref()
+                    .is_none_or(|columns| columns.contains(&context.coordinates()))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        crate::section_culling::Topology::build(&visible, cancelled)
+    } else {
+        None
+    };
+    if cancelled() {
+        return None;
+    }
+    log::debug!(
+        "[mesh-stage] 流式构建总计 {:?}，原点 {:?}",
+        stream_started.elapsed(),
+        snapshot.origin()
+    );
+    Some(StreamMesh {
+        terrain: None,
+        visibility,
+        entities: None,
+        complete: true,
+        chunks,
+        origin: snapshot.origin(),
+        atlas,
+    })
 }
-/// Abandon stale meshes between source voxels. An interrupted build returns
-/// no vertices at all: incomplete geometry must never be cached or uploaded.
-pub(crate) fn build_cancellable(
+/// 取消时丢弃未完成区块；流式路径可以保留先前已完整发布的独立区块。
+pub(crate) fn build_scene_cancellable(
     view: &SpectatorScene,
-    cancelled: &impl Fn() -> bool,
-) -> Option<Vec<Vertex>> {
+    cancelled: &dyn Fn() -> bool,
+) -> Option<StreamMesh> {
     let sources = [view.surface.voxels.as_slice()];
     let origin = [view.surface.x, view.surface.y_min, view.surface.z];
-    build_sources(view, &sources, origin, view.surface.y_max, None, None, cancelled)
-        .map(|chunks| chunks.into_iter()
-            .flat_map(|part| part.vertices.as_ref().clone().into_iter())
-            .collect())
+    build_sources(
+        view,
+        &sources,
+        SourceFrame {
+            biomes: &view.surface.biomes,
+            origin,
+            y_max: view.surface.y_max,
+            #[cfg(test)]
+            reference: false,
+        },
+        None,
+        None,
+        cancelled,
+        &mut |_| {},
+    )
+    .map(|chunks| StreamMesh {
+        terrain: None,
+        visibility: None,
+        entities: None,
+        complete: true,
+        chunks: chunks.into(),
+        origin,
+        atlas: view.texture_bank.as_ref().and_then(|b| b.atlas()).cloned(),
+    })
 }
+#[cfg(test)]
+pub(crate) fn build_cancellable(
+    view: &SpectatorScene,
+    cancelled: &dyn Fn() -> bool,
+) -> Option<Vec<Vertex>> {
+    build_scene_cancellable(view, cancelled).map(|mesh| {
+        mesh.chunks
+            .into_iter()
+            .flat_map(|chunk| {
+                let delta = std::array::from_fn(|i| {
+                    (i64::from(chunk.origin[i]) - i64::from(mesh.origin[i])) as f32
+                });
+                chunk
+                    .quads()
+                    .iter()
+                    .flat_map(|q| q.translated(delta).expanded())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    })
+}
+// 此阶段只调用一次；固定共享编译边界，避免随诊断 / 发布闭包复制整条建模管线。
+#[inline(never)]
 fn build_sources(
     view: &SpectatorScene,
     sources: &[&[SurfaceVoxel]],
-    origin: [i32; 3],
-    y_max: i32,
+    frame: SourceFrame<'_>,
     neighbors: Option<&crate::spectator_stream::ExactNeighbors<'_>>,
-    lod_contexts: Option<&[crate::spectator_stream::LodContext]>,
-    cancelled: &impl Fn() -> bool,
+    chunk_contexts: Option<&[crate::spectator_stream::ChunkContext]>,
+    cancelled: &dyn Fn() -> bool,
+    publish: &mut dyn FnMut(&[MeshChunk]),
 ) -> Option<Vec<MeshChunk>> {
-    if cancelled() { return None; }
-    let mut chunks = Vec::new();
-    let mut cache: HashMap<ModelCacheKey<'_>, Vec<models::Part>> = HashMap::new();
-    let atlas = view.texture_bank.as_ref().and_then(|b| b.atlas());
-    let default_uv = atlas
-        .map(|a| {
-            [
-                a.white.sample(0.0, 0.0),
-                a.white.sample(1.0, 0.0),
-                a.white.sample(1.0, 1.0),
-                a.white.sample(0.0, 1.0),
-            ]
-        })
-        .unwrap_or([[0.5, 0.5]; 4]);
+    let started = std::time::Instant::now();
+    view.chunk_cache
+        .lock()
+        .expect("世界网格群系来源缓存锁被毒化")
+        .prepare_biomes(frame.biomes);
+    let work = sources::Work::prepare(view, sources, chunk_contexts, frame.y_max, cancelled)?;
+    log::debug!(
+        "[mesh-sources] {} 来源，{} 份完整 patch 复用，{} 份来源参与本次邻域扫描",
+        sources.len(),
+        work.cached.iter().filter(|v| v.is_some()).count(),
+        work.needed.iter().filter(|v| **v).count()
+    );
     let bank = view.texture_bank.as_deref();
+    let local_neighbors = if neighbors.is_none() && bank.is_some() {
+        Some(crate::spectator_stream::ExactNeighbors::new_cancellable(
+            sources, cancelled,
+        )?)
+    } else {
+        None
+    };
+    let neighbors = neighbors.or(local_neighbors.as_ref());
+    let chests = if let Some(index) = neighbors {
+        crate::legacy_chest_context::Context::build(bank, index.chests(), cancelled)?
+    } else {
+        crate::legacy_chest_context::Context::build(
+            bank,
+            sources.iter().flat_map(|v| v.iter()),
+            cancelled,
+        )?
+    };
     let distant = models::DistantElevation::from_sources(
-        || sources.iter().flat_map(|part| (*part).iter()), y_max,
+        || {
+            sources
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| work.has_distant && work.needed[*index])
+                .flat_map(|(_, part)| (*part).iter())
+        },
+        frame.y_max,
     );
-    let liquid_cells: HashMap<(i32, i32, i32), &mcedit2_world::sections::State> = sources
-        .iter().flat_map(|part| part.iter())
-        .filter(|v| v.span == 1 && v.kind == VoxelMaterial::Liquid)
-        .map(|v| ((v.x, v.y, v.z), &v.state))
-        .collect();
-    // A vanilla client JAR or a large modpack often has thousands of
-    // repeated states. Cache sampled LOD face textures by exact palette
-    // properties and the deterministic weighted model variant.
-    let mut styles: HashMap<
-        (ModelCacheKey<'_>, u8, usize),
-        Option<([[f32; 2]; 4], AlphaMode, u32)>,
-    > = HashMap::new();
-    // Include every original visible face; never budget away valid chunks.
-    // The per-chunk cache is invalidated only by source or style changes.
-    let style = crate::chunk_mesh_cache::ChunkMeshCache::style(
-        view.texture_bank.as_ref(), view.show_textures, view.quality,
+    let templates = {
+        let mut cache = view.chunk_cache.lock().expect("世界网格与呈现状态锁被毒化");
+        cache.retain_visible(&work.visible);
+        cache.templates(&work.style)
+    };
+    let setup = started.elapsed();
+    // 来源或群系邻域变化不一定改变绘制结果；核对完整面字节后沿用 GPU 来源身份。
+    let previous = view.presented.lock().expect("世界呈现状态锁被毒化").clone();
+    let previous = previous
+        .as_ref()
+        .map(|mesh| mesh.terrain.as_ref().unwrap_or(mesh))
+        .filter(|mesh| {
+            match (
+                &mesh.atlas,
+                view.texture_bank.as_ref().and_then(|b| b.atlas()),
+            ) {
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            }
+        })
+        .into_iter()
+        .flat_map(|m| m.chunks.iter())
+        .filter(|p| p.key.2 != 0)
+        .map(|p| (p.key, p.clone()))
+        .collect::<HashMap<_, _>>();
+    let shared = parallel::Shared {
+        view,
+        sources,
+        frame,
+        neighbors,
+        contexts: chunk_contexts,
+        style: work.style,
+        distant,
+        chests,
+        templates: &templates,
+        previous: &previous,
+    };
+    let (chunks, mut stats, workers) = parallel::build(shared, work.cached, cancelled, publish)?;
+    view.chunk_cache
+        .lock()
+        .expect("世界模板缓存锁被毒化")
+        .store_templates(std::mem::take(&mut stats.templates_used));
+    let face_count: usize = chunks.iter().map(|c| c.quads().len()).sum();
+    log::debug!("[mesh-cache] {:?}: {} chunks reused, {} rebuilt, {} source faces / {} MiB CPU geometry, {} workers", started.elapsed(), stats.reused, stats.rebuilt, face_count, face_count.saturating_mul(std::mem::size_of::<WorldQuad>()) / (1024 * 1024), workers);
+    log::debug!("[mesh-time] setup={setup:?}, worker_sum: prepare={:?}, emit={:?}, picking={:?}, cache={:?}, template_prepare={:?}, templates={}",stats.preparation,stats.emission,stats.indexing,stats.storing,stats.template_preparation,stats.templates);
+    log::debug!(
+        "[mesh-intern] {} 个重建后逐字节相同的 Section 沿用原 GPU 几何",
+        stats.unchanged
     );
-    let visible_chunks = sources.iter().flat_map(|part| (*part).iter())
-        .map(|voxel| (voxel.x.div_euclid(16), voxel.z.div_euclid(16)))
-        .collect::<std::collections::HashSet<_>>();
-    view.chunk_cache.lock().unwrap_or_else(|e| e.into_inner())
-        .retain_visible(&visible_chunks);
-    // Borrow contiguous source-chunk slices in place. Building Vec<&Voxel>
-    // for every block of every chunk doubled temporary allocations and made
-    // 128-chunk-radius renders especially expensive.
-    for (source_index, source) in sources.iter().enumerate() {
-      for (run_index, original) in source.chunk_by(|left, right|
-          source_chunk_group(left) == source_chunk_group(right)).enumerate()
-      {
-        if cancelled() { return None; }
-        // Keep original source arrays immutable; only rewrite a chunk's
-        // affected face flags if exact neighboring chunks prove occlusion.
-        let corrected = neighbors.and_then(|index| {
-            // Most source runs have unchanged original face masks. Avoid
-            // allocating a masks Vec for every loaded chunk: copy the run
-            // only after the first actual seam correction is found.
-            let mut corrected: Option<Vec<SurfaceVoxel>> = None;
-            for (offset, voxel) in original.iter().enumerate() {
-                let faces = index.faces(voxel);
-                if let Some(patched) = corrected.as_mut() {
-                    patched[offset].faces = faces;
-                } else if faces != voxel.faces {
-                    let mut patched = original.to_vec();
-                    patched[offset].faces = faces;
-                    corrected = Some(patched);
-                }
-            }
-            corrected
-        });
-        let run = corrected.as_deref().unwrap_or(original);
-        let chunk = source_chunk_group(&run[0]);
-        let first = &run[0];
-        // The position in the arriving patch list is NOT a stable GPU
-        // identity. Its index shifts whenever a different patch completes.
-        // Keep only the source category (near/far) and local run index.
-        let chunk_id = (first.x.div_euclid(16), first.z.div_euclid(16),
-            first.span, usize::from(source_index != 0), run_index);
-        let context = if source_index > 0 && first.span > 1 {
-            lod_contexts.and_then(|contexts| contexts.get(source_index - 1))
-        } else {
-            None
-        };
-        let mut out = Vec::new();
-        if let Some(context) = context {
-            let cached = view.chunk_cache.lock().unwrap_or_else(|e| e.into_inner())
-                .get_lod(style, (chunk_id.0, chunk_id.1, chunk_id.2), context);
-            if let Some((vertices, from_origin)) = cached {
-                let mesh = if from_origin == origin {
-                    vertices
-                } else {
-                    let mut rebased = Vec::with_capacity(vertices.len());
-                    crate::chunk_mesh_cache::ChunkMeshCache::append_rebased(
-                        &mut rebased, &vertices, from_origin, origin);
-                    Arc::new(rebased)
-                };
-                chunks.push(MeshChunk { key: chunk_id, vertices: mesh });
-                continue;
-            }
-        }
-        let id = chunk.map(|(cx, cz)| (cx, cz, first.x, first.y, first.z));
-        if let Some(id) = id {
-            let cached = view.chunk_cache.lock().unwrap_or_else(|e| e.into_inner())
-                .get(style, id, run);
-            if let Some((vertices, from_origin)) = cached {
-                let vertices = if from_origin == origin {
-                    vertices
-                } else {
-                    let mut translated = Vec::with_capacity(vertices.len());
-                    crate::chunk_mesh_cache::ChunkMeshCache::append_rebased(
-                        &mut translated, &vertices, from_origin, origin);
-                    Arc::new(translated)
-                };
-                chunks.push(MeshChunk { key: chunk_id, vertices });
-                continue;
-            }
-        }
-        for (voxel_index, voxel) in run.iter().enumerate() {
-            if cancelled() { return None; }
-        // Only witnessed height transitions, without a global face cap.
-        let wall_parts = if voxel.span > 1 {
-            distant.walls(voxel)
-        } else {
-            Vec::new()
-        };
-        let pos = (voxel.x, voxel.y, voxel.z);
-        // Distant samples came from the CENTER of their source tile,
-        // not the lower corner. Resolve variant/texture using that same
-        // source coordinate to avoid mismatched random blockstate textures.
-        let sample = (
-            voxel.x.saturating_add(voxel.span as i32 / 2),
-            voxel.y,
-            voxel.z.saturating_add(voxel.span as i32 / 2),
-        );
-        // Generic special static geometry: original blockstate JSON selects
-        // a supported external mesh loader and real source asset. No per-block
-        // fallback table, game rendering code or dynamic entity simulation.
-        if voxel.span == 1 && view.show_textures {
-            if let Some(triangles) = bank.and_then(|b| b.static_obj_at(&voxel.state, pos)) {
-                for tri in triangles {
-                    let xyz = tri.xyz.map(|point| {
-                        [
-                            (voxel.x as i64 - origin[0] as i64) as f32 + point[0],
-                            (voxel.y as i64 - origin[1] as i64) as f32 + point[1],
-                            (voxel.z as i64 - origin[2] as i64) as f32 + point[2],
-                        ]
-                    });
-                    // Existing GPU painter and transparent sort use six
-                    // vertices/quad. The second triangle is degenerate.
-                    for index in [0usize, 1, 2, 0, 2, 2] {
-                        out.push(Vertex {
-                            xy: [0.0, 0.0],
-                            depth: 0.0,
-                            rgba: tri.tint,
-                            uv: tri.uv[index],
-                            mode: tri.mode,
-                            xyz: xyz[index],
-                            world_mode: 1,
-                            atlas_page: tri.page,
-                        });
-                    }
-                }
-                continue;
-            }
-        }
-        let variant = bank.map_or(0, |b| b.model_variant_key(&voxel.state, sample));
-        // Borrow the original palette strings. Cloning the whole blockstate for
-        // every face caused avoidable allocations during stream updates.
-        // Cache keys always borrow immutable source palette entries. Seam
-        // corrections may be temporary chunk-local voxel copies; retaining
-        // references to those copies would outlive their storage.
-        let key = model_cache_key(&original[voxel_index].state, variant);
-        let far = [models::fluid_part(&voxel.state, false)
-            .unwrap_or_else(|| models::Part::cube(models::Box3::FULL))];
-        let same_above = voxel
-            .y
-            .checked_add(1)
-            .and_then(|y| liquid_cells.get(&(voxel.x, y, voxel.z)))
-            .is_some_and(|state| state.name == voxel.state.name);
-        let fluid = if voxel.span == 1 {
-            models::fluid_part(&voxel.state, same_above)
-        } else {
-            None
-        };
-        let elements: &[models::Part] = if voxel.span > 1 {
-            &far
-        } else if let Some(ref fluid) = fluid {
-            std::slice::from_ref(fluid)
-        } else {
-            cache
-                .entry(key)
-                .or_insert_with(|| {
-                    bank.and_then(|b| b.geometry_at(&voxel.state, pos))
-                        .unwrap_or_else(|| {
-                            models::boxes(&voxel.state)
-                                .into_iter()
-                                .map(models::Part::cube)
-                                .collect()
-                        })
-                })
-                .as_slice()
-        };
-        for (index, element) in elements.iter().enumerate() {
-            let face_parts = FACES
-                .into_iter()
-                .filter(|f| voxel.span == 1 || *f == Face::Top)
-                .map(|f| (f, element, false))
-                .chain(wall_parts.iter().map(|(f, part)| (*f, part, true)));
-            for (face, element, _is_wall) in face_parts {
-                if voxel.kind == VoxelMaterial::Liquid
-                    && voxel.span == 1
-                    && voxel.faces & face.flag() == 0
-                {
-                    continue;
-                }
-                // Sampled LOD geometry has no exact original JSON faces;
-                // never let one source model's cullface erase a verified
-                // height-transition wall or a horizon sample.
-                if voxel.span == 1 && !should_emit(voxel, element, face, bank, index, pos) {
-                    continue;
-                }
-                // Explicit JSON faces without cullface are still subject to
-                // intra-model occlusion only when both boxes are proven solid.
-                if internally_occluded(elements, index, face) {
-                    continue;
-                }
-                let local_corners = if voxel.span == 1 && voxel.kind == VoxelMaterial::Liquid {
-                    models::fluid_face_vertices(&voxel.state, pos, face, &liquid_cells)
-                        .unwrap_or_else(|| element.face_vertices(face.corners()))
-                } else {
-                    element.face_vertices(face.corners())
-                };
-                let corners = local_corners.map(|p| {
-                    let span = voxel.span as f32;
-                    [
-                        (voxel.x as i64 - origin[0] as i64) as f32
-                            + (span - 1.0) * 0.5
-                            + p[0] * span,
-                        (voxel.y as i64 - origin[1] as i64) as f32 + p[1],
-                        (voxel.z as i64 - origin[2] as i64) as f32
-                            + (span - 1.0) * 0.5
-                            + p[2] * span,
-                    ]
-                });
-                // The far-level tile is a visual height sample, but it
-                // still carries the actual original block material. Apply
-                // the corresponding PNG atlas UV rather than flat color.
-                let style = if view.show_textures {
-                    *styles
-                        .entry((key, face as u8, index))
-                        .or_insert_with(|| {
-                            bank.and_then(|b| {
-                                b.atlas_face_style_at(&voxel.state, face, index, sample)
-                            })
-                        })
-                } else {
-                    None
-                };
-                // High-gamma resource rendering: preserve PNG RGB without
-                // direction-dependent darkening. Water remains translucent
-                // even when its vanilla source PNG stores opaque texels.
-                let (uv, shade, mut mode, page) = match style {
-                    Some((uv, alpha, page)) => {
-                        let tint = bank
-                            .map(|b| {
-                                b.face_tint_with_biome_at(
-                                    &voxel.state,
-                                    face,
-                                    index,
-                                    sample,
-                                    voxel.biome.as_deref(),
-                                )
-                            })
-                            .unwrap_or([1.0; 3]);
-                        (uv, Color::from_rgb(tint[0], tint[1], tint[2]), alpha, page)
-                    }
-                    None => {
-                        let base = rgba(voxel, face);
-                        (
-                            default_uv,
-                            Color::from_rgba(base.r, base.g, base.b, base.a),
-                            AlphaMode::Opaque,
-                            0,
-                        )
-                    }
-                };
-                let mut shade = shade;
-                let (classified, alpha) =
-                    crate::textures::classify_block_alpha(&voxel.state, voxel.kind, mode);
-                mode = classified;
-                shade.a *= alpha;
-                if shade.a < 0.999 {
-                    mode = AlphaMode::Blend;
-                }
-                // Keep every repeated UV period within its own atlas slot;
-                // using sampler Repeat would sample adjacent Mod sprites.
-                if voxel.span == 1 && view.show_textures {
-                    if let Some((raw_uv, region)) = bank.and_then(|b| {
-                        b.atlas_repeating_face_at(&voxel.state, face, index, sample)
-                    }) {
-                        if !crate::repeating_uv::tiles(corners, raw_uv, &region, |xyz, tex| {
-                            quad_vertices(&mut out, xyz, tex, shade, mode, page);
-                        }) {
-                            quad_vertices(&mut out, corners, uv, shade, mode, page);
-                        }
-                    } else {
-                        quad_vertices(&mut out, corners, uv, shade, mode, page);
-                    }
-                } else {
-                    quad_vertices(&mut out, corners, uv, shade, mode, page);
-                }
+    log::debug!(
+        "[model-occlusion] 本次建模按当前显示材质与原版邻面规则排除 {} 个邻接方向",
+        stats.model_hidden
+    );
+    Some(chunks)
+}
+#[path = "spectator_controls.rs"]
+pub(crate) mod controls;
+#[cfg(test)]
+pub(crate) fn run_test_category(category: crate::test_categories::Category) {
+    tests::run_test_category(category);
+    templates::run_test_category(category);
+    controls::run_test_category(category);
+    performance::run_test_category(category);
+}
 
-            }
-        }
-    }
-        if !out.is_empty() {
-            // Share one allocation between the source-exact cache, the
-            // completed frame and GPU residency. Previous code cloned
-            // every newly built chunk just to populate its cache.
-            let vertices = Arc::new(out);
-            if !cancelled() {
-                let mut cache = view.chunk_cache.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(id) = id {
-                    cache.insert(style, id, run, origin, Arc::clone(&vertices));
-                }
-                if let Some(context) = context {
-                    cache.insert_lod(style, (chunk_id.0, chunk_id.1, chunk_id.2),
-                        context.clone(), origin, Arc::clone(&vertices));
-                }
-            }
-            chunks.push(MeshChunk { key: chunk_id, vertices });
-        }
-      }
-    }
-    (!cancelled()).then_some(chunks)
-}
-pub(crate) struct Controls;
-#[derive(Default)]
-pub(crate) struct ControlState {
-    looking: bool,
-    last: Option<Point>,
-}
-impl canvas::Program<Message> for Controls {
-    type State = ControlState;
-    fn draw(
-        &self,
-        _: &Self::State,
-        renderer: &Renderer,
-        _: &Theme,
-        bounds: Rectangle,
-        _: mouse::Cursor,
-    ) -> Vec<canvas::Geometry> {
-        let mut frame = Frame::new(renderer, bounds.size());
-        let cx = bounds.width * 0.5;
-        let cy = bounds.height * 0.5;
-        let cross = Stroke::default()
-            .with_width(1.5)
-            .with_color(Color::from_rgb(1.0, 1.0, 1.0));
-        frame.stroke(
-            &Path::line(Point::new(cx - 8.0, cy), Point::new(cx + 8.0, cy)),
-            cross.clone(),
-        );
-        frame.stroke(
-            &Path::line(Point::new(cx, cy - 8.0), Point::new(cx, cy + 8.0)),
-            cross,
-        );
-        vec![frame.into_geometry()]
-    }
-    fn update(
-        &self,
-        state: &mut Self::State,
-        event: &canvas::Event,
-        bounds: Rectangle,
-        cursor: mouse::Cursor,
-    ) -> Option<canvas::Action<Message>> {
-        match event {
-            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
-                state.looking = true;
-                state.last = cursor.position_in(bounds);
-                Some(canvas::Action::capture())
-            }
-            canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Right)) => {
-                state.looking = false;
-                state.last = None;
-                Some(canvas::Action::capture())
-            }
-            canvas::Event::Mouse(mouse::Event::CursorMoved { .. }) if state.looking => {
-                let at = cursor.position_in(bounds)?;
-                let old = state.last.replace(at)?;
-                let dx = at.x - old.x;
-                let dy = at.y - old.y;
-                if dx.abs() + dy.abs() > 0.001 {
-                    Some(canvas::Action::publish(Message::SpectatorLook(dx, dy)).and_capture())
-                } else {
-                    None
-                }
-            }
-            canvas::Event::Mouse(mouse::Event::CursorLeft) => {
-                state.looking = false;
-                state.last = None;
-                None
-            }
-            canvas::Event::Window(iced::window::Event::Unfocused) => {
-                state.looking = false;
-                state.last = None;
-                None
-            }
-            _ => None,
-        }
-    }
-    fn mouse_interaction(
-        &self,
-        state: &Self::State,
-        _: Rectangle,
-        _: mouse::Cursor,
-    ) -> mouse::Interaction {
-        if state.looking {
-            mouse::Interaction::Grabbing
-        } else {
-            mouse::Interaction::Crosshair
-        }
-    }
-}
+#[cfg(test)]
+#[path = "spectator_perf.rs"]
+mod performance;
+pub(crate) use controls::{Controls, Crosshair};
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
+    fn cached_liquid_faces_rebuild_for_diagonal_above_and_removed_neighbors() {
+        use mcedit2_world::{sections::State, surface::ALL_FACES};
+        let prepare_source = |source: &mut SurfaceView| {
+            use mcedit2_world::fluid_surface::{inspect, Sample};
+            let original = source.voxels.clone();
+            let cells: HashMap<_, _> = original
+                .iter()
+                .map(|v| ((v.x, v.y, v.z), v.state.as_ref()))
+                .collect();
+            for voxel in &mut source.voxels {
+                voxel.fluid = inspect(
+                    Sample::vanilla(&voxel.state).unwrap(),
+                    (voxel.x, voxel.y, voxel.z),
+                    &mut |position| {
+                        cells
+                            .get(&position)
+                            .map_or(Ok(Sample::Unknown), |state| Sample::vanilla(state))
+                    },
+                )
+                .unwrap()
+                .map(Arc::new);
+            }
+        };
+        let fluid = |x, y, z, level: &str| {
+            SurfaceVoxel::new(
+                [x, y, z],
+                mcedit2_world::surface::VoxelData {
+                    span: 1,
+                    fluid: None,
+                    state: State {
+                        name: "minecraft:water".into(),
+                        properties: vec![("level".into(), level.into())],
+                    }
+                    .into(),
+                    biome: None,
+                    staged: false,
+                    original_block_entity: false,
+                    faces: ALL_FACES,
+                    kind: VoxelMaterial::Liquid,
+                    light: Default::default(),
+                },
+            )
+        };
+        let mut scene = crate::picking_integration_tests::fixture().1;
+        scene.texture_bank = None;
+        scene.show_textures = false;
+        scene.chunk_cache = Default::default();
+        scene.surface = Arc::new(SurfaceView {
+            biomes: Default::default(),
+            x: 0,
+            z: 0,
+            y_min: 64,
+            y_max: 100,
+            width: 32,
+            depth: 32,
+            voxels: vec![
+                fluid(15, 80, 15, "7"),
+                fluid(16, 80, 16, "0"),
+                fluid(16, 80, 15, "7"),
+            ],
+            source_chunks: 2,
+            missing_columns: 0,
+            source_tiles: vec![],
+        });
+        prepare_source(Arc::make_mut(&mut scene.surface));
+        let first = build_scene_cancellable(&scene, &|| false).unwrap();
+        let same = build_scene_cancellable(&scene, &|| false).unwrap();
+        for (a, b) in first.chunks.iter().zip(&same.chunks) {
+            assert!(Arc::ptr_eq(&a.quads(), &b.quads()));
+            assert!(Arc::ptr_eq(&a.picking, &b.picking));
+        }
+        let mut previous = first;
+        for phase in 0..4 {
+            let source = Arc::make_mut(&mut scene.surface);
+            match phase {
+                0 => Arc::make_mut(&mut source.voxels[1].state).properties[0].1 = "7".into(),
+                1 => source.voxels.push(fluid(16, 81, 16, "0")),
+                2 => {
+                    source.voxels.pop();
+                    Arc::make_mut(&mut source.voxels[1].state).properties[0].1 = "3".into();
+                }
+                3 => {
+                    source.voxels.pop();
+                }
+                _ => unreachable!(),
+            }
+            prepare_source(source);
+            let current = build_scene_cancellable(&scene, &|| false).unwrap();
+            assert!(!Arc::ptr_eq(
+                &previous.chunks[0].quads(),
+                &current.chunks[0].quads()
+            ));
+            let cold = build_scene_cancellable(
+                &SpectatorScene {
+                    chunk_cache: Default::default(),
+                    ..scene.clone()
+                },
+                &|| false,
+            )
+            .unwrap();
+            for (cached, fresh) in current.chunks.iter().zip(&cold.chunks) {
+                assert_eq!(
+                    bytemuck::cast_slice::<WorldQuad, u8>(&cached.quads()),
+                    bytemuck::cast_slice::<WorldQuad, u8>(&fresh.quads())
+                );
+            }
+            assert_ne!(
+                bytemuck::cast_slice::<WorldQuad, u8>(&previous.chunks[0].quads()),
+                bytemuck::cast_slice::<WorldQuad, u8>(&current.chunks[0].quads())
+            );
+            previous = current;
+        }
+    }
+
     fn chunk_slices_preserve_negative_coordinates_and_far_lod_boundaries() {
         use mcedit2_world::sections::State;
         use mcedit2_world::surface::ALL_FACES;
-        let voxel = |x, span| SurfaceVoxel {
-            x, y: 72, z: 0, span,
-            state: State { name: "minecraft:stone".into(), properties: vec![] },
-            biome: None, staged: false, original_block_entity: false,
-            faces: ALL_FACES, kind: VoxelMaterial::Solid,
+        let voxel = |x, span| {
+            SurfaceVoxel::new(
+                [x, 72, 0],
+                mcedit2_world::surface::VoxelData {
+                    span,
+                    fluid: None,
+                    state: State {
+                        name: "minecraft:stone".into(),
+                        properties: vec![],
+                    }
+                    .into(),
+                    biome: None,
+                    staged: false,
+                    original_block_entity: false,
+                    faces: ALL_FACES,
+                    kind: VoxelMaterial::Solid,
+                    light: Default::default(),
+                },
+            )
         };
-        let voxels = vec![
-            voxel(-1, 1), voxel(0, 1), voxel(15, 1), voxel(16, 1),
-            voxel(32, 4), voxel(48, 8),
+        let voxels = [
+            voxel(-1, 1),
+            voxel(0, 1),
+            voxel(15, 1),
+            voxel(16, 1),
+            voxel(32, 4),
+            voxel(48, 8),
         ];
-        let grouped: Vec<_> = voxels.chunk_by(|left, right|
-            source_chunk_group(left) == source_chunk_group(right))
-            .map(|run| (source_chunk_group(&run[0]), run.len())).collect();
-        assert_eq!(grouped, vec![
-            (Some((-1, 0)), 1),
-            (Some((0, 0)), 2),
-            (Some((1, 0)), 1),
-            (None, 2),
-        ]);
+        let grouped: Vec<_> = voxels
+            .chunk_by(|left, right| source_chunk_group(left) == source_chunk_group(right))
+            .map(|run| (source_chunk_group(&run[0]), run.len()))
+            .collect();
+        assert_eq!(
+            grouped,
+            vec![
+                (Some((-1, 0)), 1),
+                (Some((0, 0)), 2),
+                (Some((1, 0)), 1),
+                (None, 2),
+            ]
+        );
     }
-    #[test]
+
     fn spectator_mesh_uses_original_thin_connection_shapes_without_json_assets() {
         use mcedit2_world::sections::State;
         use mcedit2_world::surface::ALL_FACES;
         let build_one = |name: &str, properties: &[(&str, &str)]| {
             let source = SurfaceView {
-                x: 0, z: 0, y_min: 64, y_max: 111,
-                width: 16, depth: 16,
-                voxels: vec![SurfaceVoxel {
-                    x: 0, y: 70, z: 0, span: 1,
-                    state: State {
-                        name: name.into(),
-                        properties: properties.iter()
-                            .map(|(key, value)| ((*key).into(), (*value).into()))
-                            .collect(),
+                biomes: Default::default(),
+                x: 0,
+                z: 0,
+                y_min: 64,
+                y_max: 111,
+                width: 16,
+                depth: 16,
+                voxels: vec![SurfaceVoxel::new(
+                    [0, 70, 0],
+                    mcedit2_world::surface::VoxelData {
+                        span: 1,
+                        fluid: None,
+                        state: State {
+                            name: name.into(),
+                            properties: properties
+                                .iter()
+                                .map(|(key, value)| ((*key).into(), (*value).into()))
+                                .collect(),
+                        }
+                        .into(),
+                        biome: None,
+                        staged: false,
+                        original_block_entity: false,
+                        faces: ALL_FACES,
+                        kind: VoxelMaterial::Solid,
+                        light: Default::default(),
                     },
-                    biome: None, staged: false, original_block_entity: false,
-                    faces: ALL_FACES, kind: VoxelMaterial::Solid,
-                }],
-                source_tiles: vec![], source_chunks: 1, missing_columns: 0,
+                )],
+                source_tiles: vec![],
+                source_chunks: 1,
+                missing_columns: 0,
             };
             let scene = SpectatorScene {
+                entity_frame: None,
+                entity_enabled: false,
+                entity_cache: Default::default(),
                 surface: Arc::new(source),
                 texture_bank: None,
                 show_textures: false,
+                block_layers: Default::default(),
                 camera: Camera::default(),
                 quality: Quality::Balanced,
                 cache: Arc::new(Mutex::new(None)),
                 pending: Arc::new(Mutex::new(false)),
+                presented: Default::default(),
+                presented_view: Default::default(),
                 fallback: None,
                 snapshot: None,
                 chunk_cache: Arc::new(Mutex::new(
                     crate::chunk_mesh_cache::ChunkMeshCache::default(),
                 )),
+                lighting: crate::lighting::Table::unlit(),
             };
             build(&scene)
         };
@@ -788,7 +1335,10 @@ mod tests {
         let bridges_passage = |mesh: &[Vertex]| {
             mesh.chunks_exact(6).any(|quad| {
                 let min_x = quad.iter().map(|v| v.xyz[0]).fold(f32::INFINITY, f32::min);
-                let max_x = quad.iter().map(|v| v.xyz[0]).fold(f32::NEG_INFINITY, f32::max);
+                let max_x = quad
+                    .iter()
+                    .map(|v| v.xyz[0])
+                    .fold(f32::NEG_INFINITY, f32::max);
                 min_x < -0.3 && max_x > 0.3
             })
         };
@@ -796,54 +1346,64 @@ mod tests {
         assert!(bridges_passage(&closed_gate));
     }
 
-    #[test]
     fn spectator_stair_corner_mesh_uses_source_shape_not_generic_straight_steps() {
         use mcedit2_world::sections::State;
         use mcedit2_world::surface::ALL_FACES;
         let build_one = |shape: &str| {
             let view = SurfaceView {
+                biomes: Default::default(),
                 x: 0,
                 z: 0,
                 y_min: 64,
                 y_max: 111,
                 width: 16,
                 depth: 16,
-                voxels: vec![SurfaceVoxel {
-                    x: 0,
-                    y: 70,
-                    z: 0,
-                    span: 1,
-                    state: State {
-                        name: "minecraft:stone_brick_stairs".into(),
-                        properties: vec![
-                            ("facing".into(), "north".into()),
-                            ("half".into(), "bottom".into()),
-                            ("shape".into(), shape.into()),
-                        ],
+                voxels: vec![SurfaceVoxel::new(
+                    [0, 70, 0],
+                    mcedit2_world::surface::VoxelData {
+                        span: 1,
+                        fluid: None,
+                        state: State {
+                            name: "minecraft:stone_brick_stairs".into(),
+                            properties: vec![
+                                ("facing".into(), "north".into()),
+                                ("half".into(), "bottom".into()),
+                                ("shape".into(), shape.into()),
+                            ],
+                        }
+                        .into(),
+                        biome: None,
+                        staged: false,
+                        original_block_entity: false,
+                        faces: ALL_FACES,
+                        kind: VoxelMaterial::Solid,
+                        light: Default::default(),
                     },
-                    biome: None,
-                    staged: false,
-                    original_block_entity: false,
-                    faces: ALL_FACES,
-                    kind: VoxelMaterial::Solid,
-                }],
+                )],
                 source_tiles: vec![],
                 source_chunks: 1,
                 missing_columns: 0,
             };
             let scene = SpectatorScene {
+                entity_frame: None,
+                entity_enabled: false,
+                entity_cache: Default::default(),
                 surface: Arc::new(view),
                 texture_bank: None,
                 show_textures: false,
+                block_layers: Default::default(),
                 camera: Camera::default(),
                 quality: Quality::Balanced,
                 cache: Arc::new(Mutex::new(None)),
                 pending: Arc::new(Mutex::new(false)),
+                presented: Default::default(),
+                presented_view: Default::default(),
                 fallback: None,
                 snapshot: None,
                 chunk_cache: Arc::new(Mutex::new(
                     crate::chunk_mesh_cache::ChunkMeshCache::default(),
                 )),
+                lighting: crate::lighting::Table::unlit(),
             };
             let mesh = build(&scene);
             // Inspect only the top surface of the *upper stair step*.
@@ -873,52 +1433,81 @@ mod tests {
             vec![(false, false), (true, false), (true, true)]
         );
     }
-    #[test]
+
     fn spectator_door_halves_render_source_accurate_open_hinge_thin_planes() {
         use mcedit2_world::sections::State;
         use mcedit2_world::surface::ALL_FACES;
         let build_door = |hinge: &str, opened: bool, half: &str| {
-            let voxel = SurfaceVoxel {
-                x: 0,
-                y: if half == "upper" { 71 } else { 70 },
-                z: 0,
-                span: 1,
-                state: State {
-                    name: "minecraft:oak_door".into(),
-                    properties: vec![
-                        ("facing".into(), "north".into()),
-                        ("hinge".into(), hinge.into()),
-                        ("open".into(), opened.to_string()),
-                        ("half".into(), half.into()),
-                    ],
+            let voxel = SurfaceVoxel::new(
+                [0, if half == "upper" { 71 } else { 70 }, 0],
+                mcedit2_world::surface::VoxelData {
+                    span: 1,
+                    fluid: None,
+                    state: State {
+                        name: "minecraft:oak_door".into(),
+                        properties: vec![
+                            ("facing".into(), "north".into()),
+                            ("hinge".into(), hinge.into()),
+                            ("open".into(), opened.to_string()),
+                            ("half".into(), half.into()),
+                        ],
+                    }
+                    .into(),
+                    biome: None,
+                    staged: false,
+                    original_block_entity: false,
+                    faces: ALL_FACES,
+                    kind: VoxelMaterial::Solid,
+                    light: Default::default(),
                 },
-                biome: None, staged: false, original_block_entity: false,
-                faces: ALL_FACES, kind: VoxelMaterial::Solid,
-            };
+            );
             let scene = SpectatorScene {
+                entity_frame: None,
+                entity_enabled: false,
+                entity_cache: Default::default(),
                 surface: Arc::new(SurfaceView {
-                    x: 0, z: 0, y_min: 64, y_max: 111,
-                    width: 16, depth: 16, voxels: vec![voxel],
-                    source_tiles: vec![], source_chunks: 1, missing_columns: 0,
+                    biomes: Default::default(),
+                    x: 0,
+                    z: 0,
+                    y_min: 64,
+                    y_max: 111,
+                    width: 16,
+                    depth: 16,
+                    voxels: vec![voxel],
+                    source_tiles: vec![],
+                    source_chunks: 1,
+                    missing_columns: 0,
                 }),
                 texture_bank: None,
                 show_textures: false,
+                block_layers: Default::default(),
                 camera: Camera::default(),
                 quality: Quality::Balanced,
                 cache: Arc::new(Mutex::new(None)),
                 pending: Arc::new(Mutex::new(false)),
+                presented: Default::default(),
+                presented_view: Default::default(),
                 fallback: None,
                 snapshot: None,
                 chunk_cache: Arc::new(Mutex::new(
                     crate::chunk_mesh_cache::ChunkMeshCache::default(),
                 )),
+                lighting: crate::lighting::Table::unlit(),
             };
             let vertices = build(&scene);
             assert!(!vertices.is_empty());
-            let extrema = |axis: usize| (
-                vertices.iter().map(|v| v.xyz[axis]).fold(f32::INFINITY, f32::min),
-                vertices.iter().map(|v| v.xyz[axis]).fold(f32::NEG_INFINITY, f32::max),
-            );
+            let extrema = |axis: usize| {
+                (
+                    vertices
+                        .iter()
+                        .map(|v| v.xyz[axis])
+                        .fold(f32::INFINITY, f32::min),
+                    vertices
+                        .iter()
+                        .map(|v| v.xyz[axis])
+                        .fold(f32::NEG_INFINITY, f32::max),
+                )
+            };
             (extrema(0), extrema(1), extrema(2))
         };
         let closed = build_door("left", false, "lower");
@@ -934,10 +1523,10 @@ mod tests {
         let top = build_door("left", true, "upper");
         assert_eq!(top.0, left_open.0);
         assert_eq!(top.2, left_open.2);
-        assert_eq!(top.1.0 - left_open.1.0, 1.0);
-        assert_eq!(top.1.1 - left_open.1.1, 1.0);
+        assert_eq!(top.1 .0 - left_open.1 .0, 1.0);
+        assert_eq!(top.1 .1 - left_open.1 .1, 1.0);
     }
-    #[test]
+
     fn internal_faces_of_adjacent_model_boxes_are_hidden() {
         let left = models::Part::cube(models::Box3 {
             min: [-0.5, -0.5, -0.5],
@@ -952,26 +1541,32 @@ mod tests {
         assert!(internally_occluded(&parts, 1, Face::NegX));
         assert!(!internally_occluded(&parts, 0, Face::NegX));
     }
-    #[test]
+
     fn source_verified_lod_cliff_emits_real_side_triangles_without_guessing() {
         use mcedit2_world::sections::State;
         use mcedit2_world::surface::ALL_FACES;
-        let tile = |x: i32, y: i32| SurfaceVoxel {
-            x,
-            y,
-            z: 0,
-            span: 4,
-            state: State {
-                name: "minecraft:stone".into(),
-                properties: vec![],
-            },
-            biome: None,
-            staged: false,
-            original_block_entity: false,
-            faces: ALL_FACES,
-            kind: VoxelMaterial::Solid,
+        let tile = |x: i32, y: i32| {
+            SurfaceVoxel::new(
+                [x, y, 0],
+                mcedit2_world::surface::VoxelData {
+                    span: 4,
+                    fluid: None,
+                    state: State {
+                        name: "minecraft:stone".into(),
+                        properties: vec![],
+                    }
+                    .into(),
+                    biome: None,
+                    staged: false,
+                    original_block_entity: false,
+                    faces: ALL_FACES,
+                    kind: VoxelMaterial::Solid,
+                    light: Default::default(),
+                },
+            )
         };
         let source = SurfaceView {
+            biomes: Default::default(),
             x: 0,
             z: 0,
             y_min: 0,
@@ -984,16 +1579,25 @@ mod tests {
             missing_columns: 0,
         };
         let scene = SpectatorScene {
+            entity_frame: None,
+            entity_enabled: false,
+            entity_cache: Default::default(),
             surface: Arc::new(source.clone()),
             texture_bank: None,
             show_textures: false,
+            block_layers: Default::default(),
             camera: Camera::default(),
             quality: Quality::Balanced,
             cache: Arc::new(Mutex::new(None)),
             pending: Arc::new(Mutex::new(false)),
+            presented: Default::default(),
+            presented_view: Default::default(),
             fallback: None,
             snapshot: None,
-            chunk_cache: Arc::new(Mutex::new(crate::chunk_mesh_cache::ChunkMeshCache::default())),
+            chunk_cache: Arc::new(Mutex::new(
+                crate::chunk_mesh_cache::ChunkMeshCache::default(),
+            )),
+            lighting: crate::lighting::Table::unlit(),
         };
         let vertices = build(&scene);
         assert_eq!(vertices.len(), 18); // Two original top tiles and one verified side
@@ -1013,62 +1617,118 @@ mod tests {
         };
         assert_eq!(build(&unknown).len(), 6);
     }
-    #[test]
+
     fn verified_exact_border_generates_actual_gpu_wall() {
         use mcedit2_world::sections::State;
-        use mcedit2_world::surface::{ALL_FACES,FACE_TOP};
-        let tile=|x,z,y,span,faces|SurfaceVoxel{
-            x,y,z,span,
-            state:State{name:"minecraft:stone".into(),properties:vec![]},
-            biome:None,staged:false,original_block_entity:false,faces,
-            kind:VoxelMaterial::Solid,
+        use mcedit2_world::surface::{ALL_FACES, FACE_TOP};
+        let tile = |x, z, y, span, faces| {
+            SurfaceVoxel::new(
+                [x, y, z],
+                mcedit2_world::surface::VoxelData {
+                    span,
+                    fluid: None,
+                    state: State {
+                        name: "minecraft:stone".into(),
+                        properties: vec![],
+                    }
+                    .into(),
+                    biome: None,
+                    staged: false,
+                    original_block_entity: false,
+                    faces,
+                    kind: VoxelMaterial::Solid,
+                    light: Default::default(),
+                },
+            )
         };
-        let mut source=SurfaceView{
-            x:0,z:0,y_min:40,y_max:111,width:8,depth:4,
-            voxels:vec![tile(0,0,80,4,ALL_FACES)],
-            source_tiles:vec![],source_chunks:2,missing_columns:0,
+        let mut source = SurfaceView {
+            biomes: Default::default(),
+            x: 0,
+            z: 0,
+            y_min: 40,
+            y_max: 111,
+            width: 8,
+            depth: 4,
+            voxels: vec![tile(0, 0, 80, 4, ALL_FACES)],
+            source_tiles: vec![],
+            source_chunks: 2,
+            missing_columns: 0,
         };
-        for z in 0..4{source.voxels.push(tile(4,z,74,1,FACE_TOP));}
-        let scene=SpectatorScene{
-            surface:Arc::new(source.clone()),texture_bank:None,
-            show_textures:false,camera:Camera::default(),
-            quality:Quality::Balanced,cache:Arc::new(Mutex::new(None)),
-            pending:Arc::new(Mutex::new(false)),
+        for z in 0..4 {
+            source.voxels.push(tile(4, z, 74, 1, FACE_TOP));
+        }
+        let scene = SpectatorScene {
+            entity_frame: None,
+            entity_enabled: false,
+            entity_cache: Default::default(),
+            surface: Arc::new(source.clone()),
+            texture_bank: None,
+            show_textures: false,
+            block_layers: Default::default(),
+            camera: Camera::default(),
+            quality: Quality::Balanced,
+            cache: Arc::new(Mutex::new(None)),
+            pending: Arc::new(Mutex::new(false)),
+            presented: Default::default(),
+            presented_view: Default::default(),
             fallback: None,
             snapshot: None,
-            chunk_cache:Arc::new(Mutex::new(crate::chunk_mesh_cache::ChunkMeshCache::default())),
+            chunk_cache: Arc::new(Mutex::new(
+                crate::chunk_mesh_cache::ChunkMeshCache::default(),
+            )),
+            lighting: crate::lighting::Table::unlit(),
         };
-        let mesh=build(&scene);
-        assert_eq!(mesh.len(),36);
+        let mesh = build(&scene);
+        assert_eq!(mesh.len(), 36);
         // GPU coordinates are relative to surface.y_min.
-        assert!(mesh.iter().any(|v|(v.xyz[0]-3.5).abs()<0.001
-            &&(v.xyz[1]-40.5).abs()<0.001));
-        assert!(mesh.iter().any(|v|(v.xyz[0]-3.5).abs()<0.001
-            &&(v.xyz[1]-34.5).abs()<0.001));
+        assert!(mesh
+            .iter()
+            .any(|v| (v.xyz[0] - 3.5).abs() < 0.001 && (v.xyz[1] - 40.5).abs() < 0.001));
+        assert!(mesh
+            .iter()
+            .any(|v| (v.xyz[0] - 3.5).abs() < 0.001 && (v.xyz[1] - 34.5).abs() < 0.001));
         source.voxels.pop();
-        let incomplete=SpectatorScene{surface:Arc::new(source),..scene};
-        assert_eq!(build(&incomplete).len(),24);
+        let incomplete = SpectatorScene {
+            surface: Arc::new(source),
+            ..scene
+        };
+        let mesh = build(&incomplete);
+        assert_eq!(mesh.len(), 30);
+        let lower_edge =
+            |v: &Vertex| (v.xyz[0] - 3.5).abs() < 0.001 && (v.xyz[1] - 34.5).abs() < 0.001;
+        assert!(mesh
+            .iter()
+            .any(|v| lower_edge(v) && (v.xyz[2] - 1.5).abs() < 0.001));
+        assert!(!mesh
+            .iter()
+            .any(|v| lower_edge(v) && (v.xyz[2] - 3.5).abs() < 0.001));
     }
-    #[test]
+
     fn layered_far_tiles_show_ground_beneath_canopy_without_leaf_cliff() {
         use mcedit2_world::sections::State;
         use mcedit2_world::surface::ALL_FACES;
-        let tile = |x, y, name: &str, kind| SurfaceVoxel {
-            x,
-            y,
-            z: 0,
-            span: 4,
-            state: State {
-                name: name.into(),
-                properties: vec![],
-            },
-            biome: None,
-            staged: false,
-            original_block_entity: false,
-            faces: ALL_FACES,
-            kind,
+        let tile = |x, y, name: &str, kind| {
+            SurfaceVoxel::new(
+                [x, y, 0],
+                mcedit2_world::surface::VoxelData {
+                    span: 4,
+                    fluid: None,
+                    state: State {
+                        name: name.into(),
+                        properties: vec![],
+                    }
+                    .into(),
+                    biome: None,
+                    staged: false,
+                    original_block_entity: false,
+                    faces: ALL_FACES,
+                    kind,
+                    light: Default::default(),
+                },
+            )
         };
         let source = SurfaceView {
+            biomes: Default::default(),
             x: 0,
             z: 0,
             y_min: 0,
@@ -1085,16 +1745,25 @@ mod tests {
             missing_columns: 0,
         };
         let scene = SpectatorScene {
+            entity_frame: None,
+            entity_enabled: false,
+            entity_cache: Default::default(),
             surface: Arc::new(source),
             texture_bank: None,
             show_textures: false,
+            block_layers: Default::default(),
             camera: Camera::default(),
             quality: Quality::Balanced,
             cache: Arc::new(Mutex::new(None)),
             pending: Arc::new(Mutex::new(false)),
+            presented: Default::default(),
+            presented_view: Default::default(),
             fallback: None,
             snapshot: None,
-            chunk_cache: Arc::new(Mutex::new(crate::chunk_mesh_cache::ChunkMeshCache::default())),
+            chunk_cache: Arc::new(Mutex::new(
+                crate::chunk_mesh_cache::ChunkMeshCache::default(),
+            )),
+            lighting: crate::lighting::Table::unlit(),
         };
         let vertices = build(&scene);
         // 3 true sampled surfaces and one ground-height side, not a giant
@@ -1112,19 +1781,20 @@ mod tests {
         // vertical rise; here the single cliff is emitted after the ground.
         assert!(vertices[12..18].iter().all(|v| v.xyz[1] <= 68.5 + 0.001));
     }
-    #[test]
+
     fn minecraft_yaw_zero_faces_positive_z_and_pitch_points_down() {
         let mut c = Camera::default();
         let (right, up, front) = c.basis();
-        assert!(right[0] > 0.999 && up[1] > 0.999 && front[2] > 0.999);
+        assert!(right[0] < -0.999 && up[1] > 0.999 && front[2] > 0.999);
         c.yaw = 90.0;
         assert!(c.basis().2[0] < -0.999);
         c.pitch = 45.0;
         assert!(c.basis().2[1] < -0.7);
     }
-    #[test]
+
     fn spectator_uniform_uses_camera_relative_original_world_positions() {
         let view = SurfaceView {
+            biomes: Default::default(),
             x: 29_999_970,
             z: -29_999_970,
             width: 16,
@@ -1140,55 +1810,74 @@ mod tests {
             position: [29_999_975.25, 86.0, -29_999_962.5],
             yaw: 0.0,
             pitch: 0.0,
+            zoom: 1.0,
+            perspective: true,
         };
-        let gpu = c.uniform(&view, Size::new(1600.0, 900.0));
+        let gpu = c.uniform_at_origin([view.x, view.y_min, view.z], Size::new(1600.0, 900.0));
         assert_eq!(gpu.position[0], 5.25);
         assert_eq!(gpu.position[1], 150.0);
         assert_eq!(gpu.position[2], 7.5);
         assert!(gpu.projection[0] < gpu.projection[1]);
         assert!(gpu.projection[2] > 0.0 && gpu.projection[3] > 1000.0);
         assert_eq!(std::mem::size_of::<CameraUniform>(), 80);
+
+        let mut player = Camera { zoom: 0.25, ..c };
+        player.limit_player_fov();
+        let wide = player.uniform_at_origin([view.x, view.y_min, view.z], Size::new(1600.0, 900.0));
+        assert!((wide.projection[1] - 1.).abs() < 0.00001);
     }
-    #[test]
+
     fn source_exposed_volume_produces_true_world_space_triangles() {
         let stone = mcedit2_world::sections::State {
             name: "minecraft:stone".into(),
             properties: vec![],
         };
         let source = Arc::new(SurfaceView {
+            biomes: Default::default(),
             x: -32,
             z: 16,
             width: 32,
             depth: 32,
             y_min: -64,
             y_max: -17,
-            voxels: vec![SurfaceVoxel {
-                x: -31,
-                y: -30,
-                z: 17,
-                span: 1,
-                state: stone,
-                biome: None,
-                original_block_entity: false,
-                staged: false,
-                faces: mcedit2_world::surface::ALL_FACES,
-                kind: VoxelMaterial::Solid,
-            }],
+            voxels: vec![SurfaceVoxel::new(
+                [-31, -30, 17],
+                mcedit2_world::surface::VoxelData {
+                    span: 1,
+                    fluid: None,
+                    state: stone.into(),
+                    biome: None,
+                    original_block_entity: false,
+                    staged: false,
+                    faces: mcedit2_world::surface::ALL_FACES,
+                    kind: VoxelMaterial::Solid,
+                    light: Default::default(),
+                },
+            )],
             missing_columns: 0,
             source_chunks: 1,
             source_tiles: vec![],
         });
         let renderer = SpectatorScene {
+            entity_frame: None,
+            entity_enabled: false,
+            entity_cache: Default::default(),
             surface: source.clone(),
             texture_bank: None,
             show_textures: false,
+            block_layers: Default::default(),
             camera: Camera::default(),
             quality: Quality::Balanced,
             cache: Arc::new(Mutex::new(None)),
             pending: Arc::new(Mutex::new(false)),
+            presented: Default::default(),
+            presented_view: Default::default(),
             fallback: None,
             snapshot: None,
-            chunk_cache: Arc::new(Mutex::new(crate::chunk_mesh_cache::ChunkMeshCache::default())),
+            chunk_cache: Arc::new(Mutex::new(
+                crate::chunk_mesh_cache::ChunkMeshCache::default(),
+            )),
+            lighting: crate::lighting::Table::unlit(),
         };
         assert!(build_cancellable(&renderer, &|| true).is_none());
         let vertices = build(&renderer);
@@ -1204,41 +1893,149 @@ mod tests {
         };
         assert!(build(&renderer).is_empty());
     }
-    #[test]
-    fn exact_chunk_mesh_survives_recenter_and_rejects_changed_source() {
-        use mcedit2_world::{sections::State, surface::FACE_TOP};
-        let voxel = SurfaceVoxel {
-            x: 1,
-            y: 80,
-            z: 2,
-            span: 1,
-            state: State {
-                name: "minecraft:stone".into(),
-                properties: vec![],
-            },
-            biome: None,
-            staged: false,
-            original_block_entity: false,
-            faces: FACE_TOP,
-            kind: VoxelMaterial::Solid,
+
+    fn streaming_publishes_completed_chunks_before_the_next_chunk_is_cancelled() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let voxel = |x| {
+            SurfaceVoxel::new(
+                [x, 0, 0],
+                mcedit2_world::surface::VoxelData {
+                    span: 1,
+                    fluid: None,
+                    state: mcedit2_world::editing::parse_state("minecraft:stone")
+                        .unwrap()
+                        .into(),
+                    biome: None,
+                    original_block_entity: false,
+                    staged: false,
+                    faces: mcedit2_world::surface::ALL_FACES,
+                    kind: VoxelMaterial::Solid,
+                    light: Default::default(),
+                },
+            )
         };
         let scene = SpectatorScene {
+            entity_frame: None,
+            entity_enabled: false,
+            entity_cache: Default::default(),
             surface: Arc::new(SurfaceView {
-                x: 0, z: 0, y_min: 64, y_max: 100,
-                width: 16, depth: 16,
-                voxels: vec![voxel],
-                missing_columns: 0, source_chunks: 1, source_tiles: vec![],
+                biomes: Default::default(),
+                x: 0,
+                z: 0,
+                y_min: 0,
+                y_max: 15,
+                width: 32,
+                depth: 16,
+                voxels: vec![voxel(0), voxel(16)],
+                missing_columns: 0,
+                source_chunks: 2,
+                source_tiles: vec![],
             }),
             texture_bank: None,
             show_textures: false,
+            block_layers: Default::default(),
+            camera: Camera::default(),
+            quality: Quality::Fast,
+            cache: Default::default(),
+            pending: Default::default(),
+            presented: Default::default(),
+            presented_view: Default::default(),
+            fallback: None,
+            snapshot: None,
+            chunk_cache: Default::default(),
+            lighting: crate::lighting::Table::unlit(),
+        };
+        let cancelled = AtomicBool::new(false);
+        let mut published = Vec::new();
+        let result = build_sources(
+            &scene,
+            &[&scene.surface.voxels],
+            SourceFrame {
+                biomes: &scene.surface.biomes,
+                origin: [0; 3],
+                y_max: 15,
+                reference: false,
+            },
+            None,
+            None,
+            &|| cancelled.load(Ordering::Acquire),
+            &mut |chunks| {
+                published = chunks.to_vec();
+                cancelled.store(true, Ordering::Release);
+            },
+        );
+        assert!(result.is_none());
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].quads().len(), 6);
+        assert!(published[0]
+            .quads()
+            .iter()
+            .all(|q| q.xyz.iter().all(|p| (-0.5..=0.5).contains(&p[0]))));
+        assert_eq!(scene.chunk_cache.lock().unwrap().entry_count(), 1);
+        assert_eq!(
+            build(&SpectatorScene {
+                chunk_cache: Default::default(),
+                ..scene
+            })
+            .len(),
+            72
+        );
+    }
+
+    fn exact_chunk_mesh_survives_recenter_and_rejects_changed_source() {
+        use mcedit2_world::{sections::State, surface::FACE_TOP};
+        let voxel = SurfaceVoxel::new(
+            [1, 80, 2],
+            mcedit2_world::surface::VoxelData {
+                span: 1,
+                fluid: None,
+                state: State {
+                    name: "minecraft:stone".into(),
+                    properties: vec![],
+                }
+                .into(),
+                biome: None,
+                staged: false,
+                original_block_entity: false,
+                faces: FACE_TOP,
+                kind: VoxelMaterial::Solid,
+                light: Default::default(),
+            },
+        );
+        let scene = SpectatorScene {
+            entity_frame: None,
+            entity_enabled: false,
+            entity_cache: Default::default(),
+            surface: Arc::new(SurfaceView {
+                biomes: Default::default(),
+                x: 0,
+                z: 0,
+                y_min: 64,
+                y_max: 100,
+                width: 16,
+                depth: 16,
+                voxels: vec![voxel],
+                missing_columns: 0,
+                source_chunks: 1,
+                source_tiles: vec![],
+            }),
+            texture_bank: None,
+            show_textures: false,
+            block_layers: Default::default(),
             camera: Camera::default(),
             quality: Quality::Balanced,
             cache: Arc::new(Mutex::new(None)),
             pending: Arc::new(Mutex::new(false)),
+            presented: Default::default(),
+            presented_view: Default::default(),
             fallback: None,
             snapshot: None,
-            chunk_cache: Arc::new(Mutex::new(crate::chunk_mesh_cache::ChunkMeshCache::default())),
+            chunk_cache: Arc::new(Mutex::new(
+                crate::chunk_mesh_cache::ChunkMeshCache::default(),
+            )),
+            lighting: crate::lighting::Table::unlit(),
         };
+        let original_mesh = build_scene_cancellable(&scene, &|| false).unwrap();
         let first = build(&scene);
         assert_eq!(first.len(), 6);
         assert_eq!(scene.chunk_cache.lock().unwrap().entry_count(), 1);
@@ -1250,6 +2047,20 @@ mod tests {
             surface: Arc::new(moved),
             ..scene.clone()
         };
+        let shifted_mesh = build_scene_cancellable(&shifted, &|| false).unwrap();
+        assert_ne!(original_mesh.origin, shifted_mesh.origin);
+        assert_eq!(
+            original_mesh.chunks[0].origin,
+            shifted_mesh.chunks[0].origin
+        );
+        assert!(Arc::ptr_eq(
+            &original_mesh.chunks[0].quads(),
+            &shifted_mesh.chunks[0].quads()
+        ));
+        assert!(Arc::ptr_eq(
+            &original_mesh.chunks[0].picking,
+            &shifted_mesh.chunks[0].picking
+        ));
         let second = build(&shifted);
         assert_eq!(second.len(), 6);
         assert_eq!(shifted.chunk_cache.lock().unwrap().entry_count(), 1);
@@ -1268,7 +2079,100 @@ mod tests {
         };
         assert!(build(&changed_scene).is_empty());
     }
-    #[test]
+
+    fn compiled_face_cache_preserves_per_voxel_biome_and_visibility() {
+        use std::io::Write;
+        let path =
+            std::env::temp_dir().join(format!("mcedit2-compiled-faces-{}.zip", std::process::id()));
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        for (name,data) in [
+            ("assets/minecraft/blockstates/oak_leaves.json",br#"{"variants":{"":{"model":"minecraft:block/leaf"}}}"#.as_slice()),
+            ("assets/minecraft/models/block/leaf.json",br##"{"textures":{"all":"minecraft:block/leaf"},"elements":[{"from":[0,0,0],"to":[16,16,16],"faces":{"up":{"texture":"#all","tintindex":0,"cullface":"up"}}}]}"##.as_slice())] {
+            zip.start_file(name,zip::write::SimpleFileOptions::default()).unwrap();zip.write_all(data).unwrap();
+        }
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([255u8; 4]))
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        zip.start_file(
+            "assets/minecraft/textures/block/leaf.png",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(png.get_ref()).unwrap();
+        zip.finish().unwrap();
+        let bank = Arc::new(TextureBank::open_stack_java(std::slice::from_ref(&path)).unwrap());
+        let voxel = |x, biome: &str, faces| {
+            SurfaceVoxel::new(
+                [x, 0, 0],
+                mcedit2_world::surface::VoxelData {
+                    state: mcedit2_world::editing::parse_state("minecraft:oak_leaves")
+                        .unwrap()
+                        .into(),
+                    biome: Some(biome.into()),
+                    original_block_entity: false,
+                    faces,
+                    kind: VoxelMaterial::Foliage,
+                    staged: false,
+                    span: 1,
+                    fluid: None,
+                    light: Default::default(),
+                },
+            )
+        };
+        let voxels = vec![
+            voxel(0, "minecraft:forest", 1),
+            voxel(2, "minecraft:swamp", 1),
+            voxel(4, "minecraft:swamp", 0),
+        ];
+        let scene = SpectatorScene {
+            entity_frame: None,
+            entity_enabled: false,
+            entity_cache: Default::default(),
+            surface: Arc::new(SurfaceView {
+                biomes: Default::default(),
+                x: 0,
+                z: 0,
+                y_min: 0,
+                y_max: 15,
+                width: 16,
+                depth: 16,
+                voxels: voxels.clone(),
+                missing_columns: 0,
+                source_chunks: 1,
+                source_tiles: vec![],
+            }),
+            texture_bank: Some(bank),
+            show_textures: true,
+            block_layers: Default::default(),
+            camera: Camera::default(),
+            quality: Quality::Fast,
+            cache: Default::default(),
+            pending: Default::default(),
+            presented: Default::default(),
+            presented_view: Default::default(),
+            fallback: None,
+            snapshot: None,
+            chunk_cache: Default::default(),
+            lighting: crate::lighting::Table::unlit(),
+        };
+        let combined = build(&scene);
+        assert_eq!(combined.len(), 12);
+        assert_ne!(combined[0].rgba, combined[6].rgba);
+        let mut individual = Vec::new();
+        for voxel in voxels {
+            let mut source = (*scene.surface).clone();
+            source.voxels = vec![voxel];
+            individual.extend(build(&SpectatorScene {
+                surface: Arc::new(source),
+                chunk_cache: Default::default(),
+                ..scene.clone()
+            }));
+        }
+        assert_eq!(combined, individual);
+        std::fs::remove_file(path).unwrap();
+    }
+
     fn speed_is_normalized_and_flight_never_mutates_source() {
         let mut c = Camera::default();
         let original = c.position;
@@ -1279,5 +2183,27 @@ mod tests {
         let d =
             ((c.position[0] - original[0]).powi(2) + (c.position[2] - original[2]).powi(2)).sqrt();
         assert!((d - 1.2).abs() < 0.0001);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
+        if category == crate::test_categories::Category::WorldGeometry {
+            cached_liquid_faces_rebuild_for_diagonal_above_and_removed_neighbors();
+            chunk_slices_preserve_negative_coordinates_and_far_lod_boundaries();
+            spectator_mesh_uses_original_thin_connection_shapes_without_json_assets();
+            spectator_stair_corner_mesh_uses_source_shape_not_generic_straight_steps();
+            spectator_door_halves_render_source_accurate_open_hinge_thin_planes();
+            internal_faces_of_adjacent_model_boxes_are_hidden();
+            source_verified_lod_cliff_emits_real_side_triangles_without_guessing();
+            verified_exact_border_generates_actual_gpu_wall();
+            layered_far_tiles_show_ground_beneath_canopy_without_leaf_cliff();
+            minecraft_yaw_zero_faces_positive_z_and_pitch_points_down();
+            spectator_uniform_uses_camera_relative_original_world_positions();
+            source_exposed_volume_produces_true_world_space_triangles();
+            streaming_publishes_completed_chunks_before_the_next_chunk_is_cancelled();
+            exact_chunk_mesh_survives_recenter_and_rejects_changed_source();
+            compiled_face_cache_preserves_per_voxel_biome_and_visibility();
+            speed_is_normalized_and_flight_never_mutates_source();
+        }
     }
 }

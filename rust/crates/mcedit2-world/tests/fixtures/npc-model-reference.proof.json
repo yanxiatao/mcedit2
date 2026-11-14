@@ -1,0 +1,15 @@
+{
+  "client_sha256": "499f6897d1837516680f3114072d8106e11c9adcd933fe5cf051b551089b0c99",
+  "omitted_signature_entries_in_analysis_copy": [
+    "META-INF/MOJANGCS.SF",
+    "META-INF/MOJANGCS.RSA"
+  ],
+  "all_other_members_identical": true,
+  "output_sha256": "fcfca61fd6dd05403c73501d956e27fb66f230fdf676d6822c8552fe0098a029",
+  "client_sha1": "30c73b1c5da787909b2f73340419fdf13b9def88",
+  "java_source_sha256": "9708884ec9d094a2dbbf08aa055e8d04ec5d8cd9545167d4bcc9272e64c2244d",
+  "case_count": 13,
+  "executed": "官方客户端公开模型构造、模型层烘焙、ModelPart 字段、PoseStack 和模型 renderToBuffer",
+  "manually_applied": "静态字节码确认的 living 外层变换顺序、年龄标志、部件姿态与可见性；未调用实体 setupAnim 或完整 renderer",
+  "limitations": "无世界、实体、实际游戏客户端窗口、纹理像素、装备、动态动画、观察者与完整 renderer。"
+}

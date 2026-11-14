@@ -1,0 +1,16 @@
+[package]
+name = "mcedit2-python"
+version = "0.1.0"
+edition.workspace = true
+rust-version = "1.93"
+license.workspace = true
+description = "独立进程中的 RustPython 插件兼容运行时"
+
+[dependencies]
+mcedit2-plugins = { path = "../mcedit2-plugins" }
+mcedit2-world = { path = "../mcedit2-world" }
+rustpython-vm = { version = "=0.5.0", default-features = false, features = ["compiler", "serde", "importlib", "freeze-stdlib"] }
+rustpython-stdlib = { version = "=0.5.0", default-features = false, features = ["compiler", "host_env", "threading"] }
+rustpython-pylib = { version = "=0.5.0", features = ["freeze-stdlib"] }
+serde_json = "1"
+

@@ -1,5 +1,11 @@
 # Minecraft Java compatibility contract — Rust + iced rewrite
 
+2026-11-02 启动脚本源码补充：`-eval` 使用 RustPython 及实际原生世界会话，支持后台执行、整组编辑发布、每维度一次历史、取消、源修订核对、实时日志及成功后排队的显式保存。`-view` 禁止修改和保存，`--inspect` 不与 `-eval` 同时使用。独立结构启动上下文、旧 Qt / NumPy 及完整旧对象接口仍未闭合；新增路径待完整迁移后的最终统一验证，不宣称原版脚本完全兼容。
+
+2026-11-02 源码补充：已接入运行日志文件与共享底栏，`-log` 选择原生 wgpu 图形诊断，`-v/-vv/-debug` 控制对应级别；支持级别 / 来源筛选、重复计数、暂停 / 跟随、完整复制和保留记录快照导出。新增路径尚未编译、测试或开窗，留待完整迁移后的统一验证；后文此前的验证记录保留其原时间与范围。
+
+当前状态说明（2026-10-27）：工作区已收束为 25 个类别测试入口，默认 22 类通过、3 类本机环境验收忽略，GPU 与本机实例类别另已显式通过。测试口径与运行见[按类别测试说明](TESTING.md)。已提供独立 RustPython 命令插件、四视图、原始 NBT 文档编辑内核及受保护的单 Region / 多 Region 保存组。资源加载使用可调整内存预算，Mod、启用资源包和来源层数不会按固定数量截断；自由视角与普通世界等轴共享流式区块几何、材质及源拾取，近景读取完整高度；方块信息可读取资源语言表中的中英文名称并保留原始 ID / 状态；手动限定窗口可在三种视图间保持，并支持源网格点选和拖动框选；GPU 控件等待后台网格时自行安排重绘，中断后的部分流式结果可继续完成；等轴 Canvas 已改为带深度的逐像素材质绘制；主三维已提供原始实体 / 方块实体 / 计划更新的位置图层及只读点选，定位框与实际实体模型分开；实体静态身体已扩展至准确 1.12.2 / 1.20.1 / 1.21.1 的源版本绑定、普通幼年变换及部分 NPC / 玩家 / 专用生物，结构预览复用相同版本目录；其他实体、姿态和装备仍有缺口；支持声明式组合模型、根变换、现代箱子、16 色床及原色 / 16 色潜影盒的静态实体外形，其他专用渲染器仍有缺口。请以[中文重写进度记录](PROGRESS.md)区分当前实现、历史里程碑和未完成的兼容性验收。测试通过不代表表中各版本均已通过游戏内读写验证。
+
 ## Scope
 
 Do **not** regress any version which the original MCEdit2 actually opened.
@@ -23,10 +29,8 @@ Minimum version families that must be handled before release:
 | Future snapshots | May contain unknown layouts/compression | Inspect only if known structure; otherwise error | BLOCKED |
 
 **A parser or unit fixture is NOT end-to-end validated game-version support.**
-No save capability exists yet in the Rust workspace. Future writes must
-explicitly pass whole-world validation, original opaque NBT preservation,
-Block Entity identity/coordinates, entities, biomes, subchunks, region
-compression/sidecars, and atomic backup/save transactions.
+原生写入仅对已实现并验证的布局和操作开放，保留原始不透明 NBT 并使用备份与恢复日志。
+Alpha 和外部 `.mcc` 写入、光照/高度更新及逐版本游戏重载仍未完成验收；未知布局必须拒绝写入。
 
 Unknown modded numeric block IDs are preserved as identity pairs
 (e.g. numeric:301 + data:7); mapping them to a made-up modern registry ID
@@ -48,36 +52,28 @@ Original scripts: src/mcedit2/main.py and src/mcedit2/editorapp.py.
 - -debug, -log, -v, -vv: recognized, with adapted Rust/wgpu diagnostics.
 - -h / --help: recognized.
 - -resetPrefs: resets **separate Rust preferences**, never overwrites legacy Qt config.
-- -view: recognized as read-only launch; Rust writer is not implemented.
+- -view：严格只读，禁止暂存及写盘；不影响读取和导航。
 - One or multiple positional files/directories: recognized. Original
   world paths, level.dat and level.dat_old are accepted by the reader.
-- -eval CODE: recognized but must FAIL WITH A VISIBLE ERROR. Original
-  executes arbitrary Python inside a Qt session; equivalent semantics
-  cannot be provided by an all-Rust process. A future interpreter/script
-  compatibility bridge needs a separate explicit design/permission.
+- -eval CODE：成功打开世界后执行一次；`session / self` 使用原生数据上下文，
+  修改整组暂存，`session.save()` 请求在脚本成功后保存。接口与差异见
+  `plugins/README.md`，不能据参数解析声称完整 CPython / Qt 兼容。
 - Original .schematic and other files can be positional arguments:
   command parsing does not mean those formats have an importer yet.
 
 Therefore "fully compatible CLI" is currently a contract and a
 regression target, NOT a completed claim. No silent arg ignoring.
 
-## Rust development verification
+## Rust 开发验证
 
-The local ChatGPT execution container does not currently include
-rustc/cargo, or have usable Internet package registries, so local
-Rust builds have **NOT** succeeded. Treat new Rust source as
-not-compiler-verified until an appropriate runner completes:
+本机已具备 Rust 和有效依赖缓存。开发、测试和本机运行固定复用 `rust/target/debug`、`CARGO_INCREMENTAL=0` 与同一套 Cargo 目标 / 依赖特性图，一整批实际实现结束后统一编译：
 
-    cd rust
-    cargo fmt --all -- --check
-    cargo test --workspace
-    cargo clippy --workspace --all-targets -- -D warnings
-    cargo build --release -p mcedit2-iced
+```powershell
+$env:CARGO_INCREMENTAL='0'
+cargo test --offline -j 1 -p mcedit2-world -p mcedit2-iced --bin mcedit2 --test nbt_document --test runtime --no-run
+```
 
-The GitHub Actions Rust workflow is intended to verify the five-major-
-feature batch. Prior MCEdit2 Python tests and user-owned worlds should
-be used for differential native read/write validation once integrated.
-Never commit private worlds.
+只在已有类别程序中过滤本批受影响的类别，失败后只复验修复范围；不例行全量测试、全工作区格式化或重建 release。仅用户明确要求发布时构建 release。当前通过情况及实际窗口 / 游戏重载边界分别见 `PROGRESS.md`、`TESTING.md`。产品只有一个 `mcedit2` 入口，GUI、命令行和插件宿主通过参数选择。真实用户世界不提交到仓库。
 
 ## Original Alpha / Beta chunk-file safety
 
@@ -130,8 +126,7 @@ region writer with backups and rollback passes full differential
 testing on historical worlds and recent release/snapshot worlds,
 the iced editor must label all these operations UNSAVED.
 
-`-view` remains a strict read-only option. `-eval` still cannot execute
-legacy Python scripts in a pure-Rust application.
+`-view` 保持严格只读。`-eval` 已接入 RustPython 原生数据上下文；完整旧接口兼容仍未完成，新增路径待最终统一验证。
 
 ## Experimental original-byte replacement preparation
 

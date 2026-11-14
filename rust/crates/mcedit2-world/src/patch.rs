@@ -15,8 +15,6 @@ type ChunkPos = (i32, i32);
 const MAGIC: &str = "MCEDIT2_RUST_ORIGINAL_BLOCK_PATCH";
 const VERSION: u32 = 1;
 const MAX_BYTES: usize = 32 * 1024 * 1024;
-const MAX_CELLS: usize = 65_536;
-const MAX_CHUNKS: usize = 8_192;
 fn err(s: impl Into<String>) -> WorldError {
     WorldError::Invalid(s.into())
 }
@@ -132,17 +130,14 @@ pub(crate) fn encode(
     dimension: &str,
     overlay: &BTreeMap<Pos, State>,
 ) -> Result<Vec<u8>, WorldError> {
-    if overlay.is_empty() || overlay.len() > MAX_CELLS {
-        return Err(err("Journal requires 1..65536 staged cells"));
+    if overlay.is_empty() {
+        return Err(err("Journal requires staged cells"));
     }
     let mut source: BTreeMap<ChunkPos, Snapshot> = BTreeMap::new();
     let mut edits = Vec::with_capacity(overlay.len());
     for (&pos, replacement) in overlay {
         let key = (pos.0.div_euclid(16), pos.2.div_euclid(16));
         if !source.contains_key(&key) {
-            if source.len() >= MAX_CHUNKS {
-                return Err(err("Too many touched chunks"));
-            }
             source.insert(key, source_chunk(world, dimension, key.0, key.1)?);
         }
         let chunk = &source.get(&key).expect("loaded chunk").chunk;
@@ -208,11 +203,7 @@ pub(crate) fn decode(
             "Journal belongs to a different world/dimension/DataVersion",
         ));
     }
-    if journal.edits.is_empty()
-        || journal.edits.len() > MAX_CELLS
-        || journal.chunks.is_empty()
-        || journal.chunks.len() > MAX_CHUNKS
-    {
+    if journal.edits.is_empty() || journal.chunks.is_empty() {
         return Err(err("Invalid journal edit/chunk count"));
     }
     let mut expected = BTreeMap::new();

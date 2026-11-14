@@ -3,17 +3,85 @@
 //! weighted variants, multipart, JSON elements, UV and parent inheritance.
 //! Unsupported mod loaders and unresolved foreign parents fail closed; no
 //! mod-specific geometry or name-derived fallback is constructed here.
-use crate::{isometric::Face, resource_ids};
 use crate::models::{Box3, ElementRotation, Part};
-use crate::{special_obj, special_gltf, special_mtl};
+use crate::{isometric::Face, resource_ids};
+use crate::{special_gltf, special_mtl, special_obj};
 use mcedit2_world::sections::State;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 use std::sync::OnceLock;
+#[path = "block_layer_definition.rs"]
+mod block_layers;
+#[path = "builtin_models.rs"]
+mod builtin;
+#[path = "model_graph.rs"]
+mod graph;
+#[path = "resource_items.rs"]
+pub(crate) mod items;
+#[path = "resource_layer_catalog.rs"]
+mod layer_catalogs;
+#[path = "native_block_models.rs"]
+mod native_blocks;
+#[path = "resource_obj.rs"]
+mod obj;
+pub(crate) use obj::obj_source_suffix;
+#[path = "uv_lock.rs"]
+mod uv_lock;
+#[cfg(test)]
+pub(crate) fn run_test_category(category: crate::test_categories::Category) {
+    tests::run_test_category(category);
+    graph::run_test_category(category);
+    obj::run_test_category(category);
+    uv_lock_tests::run_test_category(category);
+    variants::run_test_category(category);
+}
+
+#[path = "configured_models.rs"]
+mod configured;
+pub(crate) use configured::TextureSlot;
+#[path = "model_random.rs"]
+mod random;
+#[cfg(test)]
+#[path = "uv_lock_tests.rs"]
+pub(crate) mod uv_lock_tests;
+#[path = "model_variants.rs"]
+mod variants;
+pub(crate) use variants::VariantPlan;
+type CompiledModels = BTreeMap<String, OnceLock<Result<graph::Model, String>>>;
+
+/// 世界模型按源坐标取种子；独立方块明确传入原生固定种子，不伪造世界坐标。
+#[derive(Clone, Copy)]
+pub(crate) enum ModelSample {
+    Position((i32, i32, i32)),
+    Seed(i64),
+}
+impl From<(i32, i32, i32)> for ModelSample {
+    fn from(position: (i32, i32, i32)) -> Self {
+        Self::Position(position)
+    }
+}
+impl ModelSample {
+    fn legacy_seed(self) -> i64 {
+        match self {
+            Self::Position((x, y, z)) => random::position_seed_legacy([x, y, z]),
+            Self::Seed(seed) => seed,
+        }
+    }
+    fn seed(self, state: &State, multipart: bool) -> i64 {
+        match self {
+            Self::Position(position) => random::SeedPosition::new(state).at(position, multipart),
+            Self::Seed(seed) if multipart => {
+                crate::java_random::LegacyRandom::new(seed).next_long()
+            }
+            Self::Seed(seed) => seed,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct FaceSpec {
+    pub render_type: Option<crate::textures::AlphaMode>,
     pub texture: String,
     /// Minecraft model-element UV rectangle, in 0..16 texture units.
     pub uv: [f32; 4],
@@ -25,6 +93,7 @@ pub(crate) struct FaceSpec {
 }
 #[derive(Clone, Debug)]
 pub(crate) struct ObjSelection {
+    pub material_flags: u32,
     pub xyz: [[f32; 3]; 3],
     pub uv: [[f32; 2]; 3],
     pub texture: String,
@@ -32,20 +101,40 @@ pub(crate) struct ObjSelection {
     pub alpha_mode: Option<String>,
     pub alpha_cutoff: f32,
     pub double_sided: bool,
+    pub colors: [[f32; 4]; 3],
+    pub cull: Option<Face>,
+    pub render_type: Option<crate::textures::AlphaMode>,
+    pub tint_index: Option<u32>,
 }
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ModelBank {
+    configured: configured::Configured,
+    available_models: Vec<String>,
+    layer_catalogs: OnceLock<layer_catalogs::Catalogs>,
+    block_layer_policies: OnceLock<block_layers::Policies>,
+    has_layer_models: bool,
+    native_blocks: std::sync::Arc<native_blocks::Models>,
+    compiled: OnceLock<CompiledModels>,
+    referenced_models: BTreeSet<String>,
+    pub(crate) legacy: Option<std::sync::Arc<crate::legacy_render::Registry>>,
+    pub(crate) legacy_chests: BTreeSet<String>,
+    /// 静态方块实体绑定及其实际生成的 blockstate，用于核对渲染来源。
+    static_block_entities: BTreeMap<String, Value>,
     files: BTreeMap<String, Value>,
-    obj_meshes: BTreeMap<String, Vec<special_obj::Triangle>>,
+    obj_meshes: BTreeMap<String, std::sync::Arc<Vec<special_obj::Triangle>>>,
+    obj_sources: BTreeMap<String, special_obj::Document>,
+    obj_libraries: BTreeMap<String, std::sync::Arc<BTreeMap<String, special_mtl::Material>>>,
     gltf_meshes: BTreeMap<String, Vec<special_obj::Triangle>>,
     gltf_materials: BTreeMap<String, BTreeMap<String, special_gltf::StaticPbrMaterial>>,
+    #[cfg(test)]
     gltf_sources: BTreeMap<String, (String, Vec<u8>)>,
+    #[cfg(test)]
     gltf_buffers: BTreeMap<String, Vec<u8>>,
-    gltf_buffer_bytes: usize,
-    obj_materials: BTreeMap<String, BTreeMap<String, special_mtl::Material>>,
+    obj_materials: BTreeMap<String, std::sync::Arc<BTreeMap<String, special_mtl::Material>>>,
     obj_mask_overlays: BTreeMap<(String, String), String>,
     json_sizes: BTreeMap<String, usize>,
     total_json_bytes: usize,
+    pub(crate) budget: Option<crate::resource_budget::ResourceBudget>,
 }
 fn asset_id(path: &str) -> Option<String> {
     let parts: Vec<&str> = path.split('/').collect();
@@ -70,13 +159,13 @@ fn asset_id(path: &str) -> Option<String> {
     } else {
         id
     };
-    resource_ids::path(id, 160).then(|| format!("{kind}:{namespace}:{id}"))
+    resource_ids::path(id).then(|| format!("{kind}:{namespace}:{id}"))
 }
-fn normalize_model(value: &str, default_ns: &str) -> Option<String> {
-    let id = resource_ids::qualified(value, default_ns)?;
+pub(crate) fn normalize_model(value: &str) -> Option<String> {
+    let id = resource_ids::qualified(value, "minecraft")?;
     let (namespace, path) = id.split_once(':')?;
     let path = path.strip_prefix("block/").unwrap_or(path);
-    resource_ids::path(path, 160).then(|| format!("model:{namespace}:{path}"))
+    resource_ids::path(path).then(|| format!("model:{namespace}:{path}"))
 }
 /// Vanilla's common block parent templates are not bundled in most
 /// resource packs. Resolve only known minecraft: parent IDs to trusted,
@@ -207,11 +296,14 @@ fn vanilla_parent_elements(id: &str) -> Option<&'static Vec<Value>> {
     let id = id.strip_prefix("model:minecraft:")?;
     templates.get(id)
 }
-fn normalize_texture(value: &str, default_ns: &str) -> Option<String> {
-    let id = resource_ids::qualified(value, default_ns)?;
+pub(crate) fn normalize_texture(value: &str) -> Option<String> {
+    let id = resource_ids::qualified(value, "minecraft")?;
     let (namespace, path) = id.split_once(':')?;
-    let path = path.strip_prefix("block/").unwrap_or(path);
-    resource_ids::path(path, 160).then(|| format!("{namespace}:{path}"))
+    let path = path
+        .strip_prefix("block/")
+        .or_else(|| path.strip_prefix("blocks/"))
+        .unwrap_or(path);
+    resource_ids::path(path).then(|| format!("{namespace}:{path}"))
 }
 fn variant_matches(name: &str, state: &State) -> bool {
     name.split(',').all(|entry| {
@@ -251,37 +343,60 @@ struct ChosenModel {
     y: i32,
     uvlock: bool,
 }
-fn deterministic_model_seed(state: &State, pos: (i32, i32, i32), salt: u64) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    state.name.hash(&mut hasher);
-    state.properties.hash(&mut hasher);
-    pos.hash(&mut hasher);
-    salt.hash(&mut hasher);
-    hasher.finish()
+impl ChosenModel {
+    fn parse(value: &Value) -> Option<Self> {
+        let (x, y) = variant_angles(value)?;
+        Some(Self {
+            key: normalize_model(value.get("model")?.as_str()?)?,
+            x,
+            y,
+            uvlock: value
+                .get("uvlock")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        })
+    }
+}
+fn deterministic_model_seed(
+    state: &State,
+    pos: impl Into<ModelSample> + Copy,
+    multipart: bool,
+) -> i64 {
+    pos.into().seed(state, multipart)
 }
 /// Choose a weighted Java model entry without a global RNG: reloading a
 /// chunk/camera yields the same source XYZ appearance and matched UVs.
-fn choose_weighted<'a>(value: &'a Value, seed: u64) -> Option<&'a Value> {
-    let Some(array) = value.as_array() else {
+fn choose_weighted(value: &Value, seed: i64) -> Option<&Value> {
+    choose_weighted_version(value, seed, false)
+}
+fn choose_weighted_version(value: &Value, seed: i64, legacy: bool) -> Option<&Value> {
+    let Some(_) = value.as_array() else {
+        random::weight(value)?;
         return Some(value);
     };
-    if array.is_empty() || array.len() > 64 {
+    let array = random::ordered_options(value, legacy)?;
+    if array.is_empty() {
         return None;
     }
     let mut weights = Vec::with_capacity(array.len());
-    let mut total = 0u64;
-    for item in array {
-        let weight = item.get("weight").map(Value::as_u64).unwrap_or(Some(1))?;
-        if weight == 0 || weight > 10_000 {
-            return None;
-        }
+    let mut total = 0u32;
+    for item in array.iter() {
+        let weight = random::weight(item)?;
         total = total.checked_add(weight)?;
-        if total > 640_000 {
+        if total > i32::MAX as u32 {
             return None;
         }
         weights.push(weight);
     }
-    let mut target = seed % total;
+    let mut target = if array.len() == 1 {
+        0
+    } else {
+        if legacy {
+            random::legacy_weighted_ticket(seed, total)
+        } else {
+            random::weighted_ticket(seed, total)
+        }
+    };
     for (item, weight) in array.iter().zip(weights) {
         if target < weight {
             return Some(item);
@@ -290,66 +405,22 @@ fn choose_weighted<'a>(value: &'a Value, seed: u64) -> Option<&'a Value> {
     }
     None
 }
-fn uvlock_permutation(local: Face, x: i32, y: i32) -> Option<[u8; 4]> {
-    const FACES: [Face; 6] = [
-        Face::Top,
-        Face::Bottom,
-        Face::PosX,
-        Face::NegX,
-        Face::PosZ,
-        Face::NegZ,
-    ];
-    let part = Part {
-        bounds: Box3::FULL,
-        rotation: None,
-        variant_x: x,
-        variant_y: y,
-    };
-    let normal = part.normal(local.normal());
-    let target = FACES.iter().copied().find(|face| {
-        let n = face.normal();
-        let expected = [n.0 as f32, n.1 as f32, n.2 as f32];
-        normal
-            .iter()
-            .zip(expected)
-            .all(|(a, b)| (*a - b).abs() < 1e-5)
-    })?;
-    let rotated = part.face_vertices(local.corners());
-    let canonical = target.corners();
-    let mut permutation = [0u8; 4];
-    for (i, point) in rotated.iter().enumerate() {
-        let index = canonical
-            .iter()
-            .position(|target| point.iter().zip(target).all(|(a, b)| (*a - b).abs() < 1e-5))?;
-        permutation[i] = index as u8;
-    }
-    let mut sorted = permutation;
-    sorted.sort_unstable();
-    (sorted == [0, 1, 2, 3]).then_some(permutation)
-}
-
 /// Minecraft multipart: property AND, pipe-separated alternatives,
 /// nested OR/AND, and omitted when (always). Reject unknown syntax.
-fn condition_matches(condition: &Value, state: &State, depth: usize) -> Option<bool> {
-    if depth > 8 {
-        return None;
-    }
+fn condition_matches(condition: &Value, state: &State) -> Option<bool> {
     let terms = condition.as_object()?;
-    if terms.len() > 64 {
-        return None;
-    }
     let mut all = true;
     for (key, value) in terms {
         let matches = match key.as_str() {
             "OR" | "AND" => {
                 let expressions = value.as_array()?;
-                if expressions.is_empty() || expressions.len() > 64 {
+                if expressions.is_empty() {
                     return None;
                 }
                 let mut any = false;
                 let mut every = true;
                 for expr in expressions {
-                    let yes = condition_matches(expr, state, depth + 1)?;
+                    let yes = condition_matches(expr, state)?;
                     any |= yes;
                     every &= yes;
                 }
@@ -360,13 +431,22 @@ fn condition_matches(condition: &Value, state: &State, depth: usize) -> Option<b
                 }
             }
             _ => {
-                if key.is_empty()
-                    || key.len() > 80
-                    || !key.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
-                {
+                if key.is_empty() || !key.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_') {
                     return None;
                 }
-                let allowed = value.as_str()?;
+                // 原生 JSON 条件允许字符串、布尔值和数字；资源包常直接写 loaded:true。
+                // 数组、对象和 null 仍拒绝，不能使整个合法 multipart 丢失。
+                let allowed: std::borrow::Cow<'_, str> = match value {
+                    Value::String(value) => std::borrow::Cow::Borrowed(value),
+                    Value::Bool(value) => {
+                        std::borrow::Cow::Borrowed(if *value { "true" } else { "false" })
+                    }
+                    Value::Number(value) => std::borrow::Cow::Owned(value.to_string()),
+                    _ => return None,
+                };
+                let (inverted, allowed) = allowed
+                    .strip_prefix('!')
+                    .map_or((false, allowed.as_ref()), |allowed| (true, allowed));
                 let actual = state
                     .properties
                     .iter()
@@ -379,7 +459,7 @@ fn condition_matches(condition: &Value, state: &State, depth: usize) -> Option<b
                     }
                     any |= actual == Some(alt);
                 }
-                any
+                actual.is_some() && if inverted { !any } else { any }
             }
         };
         all &= matches;
@@ -400,6 +480,14 @@ fn read_rotation_origin(doc: &Value) -> Option<[f32; 3]> {
         o[i] = value / 16.0 - 0.5;
     }
     Some(o)
+}
+/// Java 面上的裸名称是纹理槽；声明式扩展的限定资源路径保持原含义。
+fn face_texture_reference(raw: &str) -> String {
+    if raw.starts_with('#') || raw.contains(':') || raw.contains('/') {
+        raw.to_owned()
+    } else {
+        format!("#{raw}")
+    }
 }
 /// Implicit Java model element UVs depend on which face of a partial
 /// cuboid is rendered. A full [0,0,16,16] texture stretches partial models.
@@ -461,74 +549,349 @@ fn face_keys(face: Face, parent: &str) -> &'static [&'static str] {
     }
 }
 impl ModelBank {
-    #[cfg(test)]
-    fn selections(&self, state: &State) -> Option<Vec<ChosenModel>> {
-        self.selections_at(state, (0, 0, 0))
+    pub(crate) fn has_declarative_entity(&self, id: &str) -> bool {
+        id.split_once(':')
+            .and_then(|(namespace, path)| normalize_model(&format!("{namespace}:entity/{path}")))
+            .is_some_and(|key| self.files.contains_key(&key))
     }
-    fn selections_at(&self, state: &State, pos: (i32, i32, i32)) -> Option<Vec<ChosenModel>> {
+    /// 插件资源按注册 ID 选择声明式实体模型；未声明时才交给原版能力或缺失材质。
+    pub(crate) fn declarative_entity_layers(
+        &self,
+        id: &str,
+        visual: &mcedit2_world::entity_catalog::EntityVisual,
+    ) -> Option<Result<Vec<ObjSelection>, String>> {
+        let (namespace, path) = id.split_once(':')?;
+        let key = normalize_model(&format!("{namespace}:entity/{path}"))?;
+        if !self.files.contains_key(&key) {
+            return None;
+        }
+        Some((|| {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Versions {
+                data_versions: BTreeSet<i32>,
+                #[serde(default)]
+                source_fields: crate::visual_schema::Fields,
+            }
+            let versions: Versions = serde_json::from_value(
+                self.files[&key]
+                    .get("entity")
+                    .cloned()
+                    .ok_or("声明式实体定义缺少 entity 版本合同")?,
+            )
+            .map_err(|e| format!("实体定义版本合同无效：{e}"))?;
+            let version = visual
+                .source_version
+                .ok_or("声明式实体的源 DataVersion 未知")?;
+            if versions.data_versions.is_empty()
+                || versions.data_versions.iter().any(|v| *v < 0)
+                || !versions.data_versions.contains(&version)
+            {
+                return Err(format!("实体定义 {key} 不支持源 DataVersion {version}"));
+            }
+            crate::visual_schema::check(&versions.source_fields)?;
+            crate::visual_schema::validate(&versions.source_fields, visual)?;
+            let model = self
+                .compiled_model(&key)
+                .ok_or_else(|| format!("实体模型定义 {key} 无法编译"))?;
+            if !model.elements.is_empty() || !model.triangles.is_empty() {
+                return Err(format!(
+                    "实体外观 {key} 应声明模型层，不能混入方块元素或外部三角形"
+                ));
+            }
+            if model.layers.is_empty() {
+                return Err(format!("实体外观 {key} 缺少模型层声明"));
+            }
+            let context = crate::layer_renderer::Context {
+                state: None,
+                visual: Some(visual),
+                params: None,
+                catalog: None,
+            };
+            let mut out = Vec::new();
+            for layer in &model.layers {
+                out.extend(layer.instantiate(&context)?);
+            }
+            Ok(out)
+        })())
+    }
+    fn contains_layer_model(value: &Value) -> bool {
+        match value {
+            Value::Object(fields) => {
+                fields.get("loader").and_then(Value::as_str) == Some("mcedit2:entity_layer")
+                    || fields.values().any(Self::contains_layer_model)
+            }
+            Value::Array(items) => items.iter().any(Self::contains_layer_model),
+            _ => false,
+        }
+    }
+    /// 只保留由方块状态可达的模型，并收集其真实纹理引用（包括非 block/ 目录）。
+    pub(crate) fn retain_block_dependencies(&mut self) -> BTreeSet<String> {
+        fn model_refs(value: &Value, out: &mut Vec<String>) {
+            match value {
+                Value::Object(fields) => {
+                    for (key, value) in fields {
+                        if key == "model" || key == "parent" || key == "catalog" {
+                            if let Some(name) = value.as_str().and_then(normalize_model) {
+                                out.push(name);
+                            }
+                        } else {
+                            model_refs(value, out);
+                        }
+                    }
+                }
+                Value::Array(items) => {
+                    for item in items {
+                        model_refs(item, out);
+                    }
+                }
+                _ => (),
+            }
+        }
+        fn texture_refs(value: &Value, out: &mut BTreeSet<String>) {
+            fn choice(value: &Value, out: &mut BTreeSet<String>) {
+                if let Some(raw) = value.as_str().filter(|raw| !raw.starts_with('#')) {
+                    if let Some(id) = normalize_texture(raw) {
+                        out.insert(id);
+                    }
+                } else if let Some(map) = value.get("map").and_then(Value::as_object) {
+                    for value in map.values() {
+                        choice(value, out);
+                    }
+                } else if let Some(sprite) = value.get("sprite") {
+                    choice(sprite, out);
+                }
+            }
+            match value {
+                Value::Object(fields) => {
+                    for (key, value) in fields {
+                        if key == "textures" {
+                            if let Some(map) = value.as_object() {
+                                for value in map.values() {
+                                    choice(value, out);
+                                    if let Some(raw) = value
+                                        .as_str()
+                                        .or_else(|| value.get("sprite").and_then(Value::as_str))
+                                        .filter(|s| !s.starts_with('#'))
+                                    {
+                                        if let Some(id) = normalize_texture(raw) {
+                                            out.insert(id);
+                                        }
+                                    }
+                                }
+                            }
+                        } else if key == "texture" {
+                            choice(value, out);
+                            if let Some(raw) = value.as_str().filter(|s| !s.starts_with('#')) {
+                                if let Some(id) = normalize_texture(raw) {
+                                    out.insert(id);
+                                }
+                            }
+                        } else {
+                            texture_refs(value, out);
+                        }
+                    }
+                }
+                Value::Array(items) => {
+                    for item in items {
+                        texture_refs(item, out);
+                    }
+                }
+                _ => (),
+            }
+        }
+        let mut queue = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut textures = BTreeSet::new();
+        for choice in self.configured.choices() {
+            model_refs(choice, &mut queue);
+        }
+        for (key, value) in &self.files {
+            if key.starts_with("state:")
+                || matches!(
+                    key.as_str(),
+                    "model:minecraft:item_frame"
+                        | "model:minecraft:item_frame_map"
+                        | "model:minecraft:glow_item_frame"
+                        | "model:minecraft:glow_item_frame_map"
+                )
+                || key
+                    .strip_prefix("model:")
+                    .and_then(|id| id.split_once(':'))
+                    .is_some_and(|(_, path)| {
+                        path.starts_with("entity/")
+                            || path.starts_with("block_entity/")
+                            || path.starts_with("item/")
+                    })
+            {
+                if key.starts_with("model:") {
+                    queue.push(key.clone());
+                }
+                model_refs(value, &mut queue);
+            }
+        }
+        while let Some(key) = queue.pop() {
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            let Some(value) = self.files.get(&key) else {
+                continue;
+            };
+            if let Some(parent) = value
+                .get("parent")
+                .and_then(Value::as_str)
+                .and_then(normalize_model)
+            {
+                queue.push(parent);
+            }
+            model_refs(value, &mut queue);
+            texture_refs(value, &mut textures);
+        }
+        self.files
+            .retain(|key, _| key.starts_with("state:") || seen.contains(key));
+        self.referenced_models = seen;
+        self.compiled.take();
+        self.block_layer_policies.take();
+        self.layer_catalogs.take();
+        self.json_sizes.retain(|key, _| {
+            self.files.contains_key(key)
+                || key
+                    .strip_prefix("obj:")
+                    .is_some_and(|key| self.obj_sources.contains_key(key))
+                || key
+                    .strip_prefix("mtl:")
+                    .is_some_and(|key| self.obj_libraries.contains_key(key))
+        });
+        self.total_json_bytes = self.json_sizes.values().sum();
+        self.has_layer_models = self.files.values().any(Self::contains_layer_model);
+        textures
+    }
+    pub(crate) fn unsupported_loaders(&self) -> BTreeMap<String, usize> {
+        let mut counts = BTreeMap::new();
+        for (key, model) in &self.files {
+            if key.starts_with("model:") {
+                if let Some(loader) = model.get("loader") {
+                    let name = loader
+                        .as_str()
+                        .unwrap_or("无效的 loader 声明")
+                        .chars()
+                        .take(160)
+                        .collect::<String>();
+                    if !graph::supported(&name) {
+                        *counts.entry(name).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+        counts
+    }
+    /// 数字 ID 仅在已识别的原版资源版本下具有可证明的渲染绑定。
+    pub(crate) fn render_state<'a>(&'a self, state: &'a State) -> &'a State {
+        self.legacy
+            .as_ref()
+            .and_then(|r| r.resolve(state))
+            .map(|b| &b.state)
+            .unwrap_or(state)
+    }
+    pub(crate) fn declares_state(&self, state: &State) -> bool {
+        if self.configured_choice(state).is_some() {
+            return true;
+        }
+        let state = self.render_state(state);
+        state
+            .name
+            .split_once(':')
+            .is_some_and(|(ns, name)| self.files.contains_key(&format!("state:{ns}:{name}")))
+    }
+    /// 先解析状态条件，再做按坐标加权抽取；缓存资格与实际抽取共用这份输入。
+    fn selection_inputs(&self, state: &State) -> Option<Vec<(&Value, bool)>> {
+        if let Some(choice) = self.configured_choice(state) {
+            return Some(vec![(choice, false)]);
+        }
+        let explicit_variant = self
+            .legacy
+            .as_ref()
+            .and_then(|r| r.resolve(state))
+            .and_then(|b| b.variant.as_deref());
+        let state = self.render_state(state);
         let (ns, name) = state.name.split_once(':')?;
         let doc = self.files.get(&format!("state:{ns}:{name}"))?;
         if let Some(parts) = doc.get("multipart") {
             let parts = parts.as_array()?;
-            if parts.is_empty() || parts.len() > 64 {
+            if parts.is_empty() {
                 return None;
             }
-            let mut chosen = Vec::new();
-            for (index, part) in parts.iter().enumerate() {
-                let active = part
+            let mut inputs = Vec::new();
+            for part in parts {
+                if part
                     .get("when")
-                    .map(|v| condition_matches(v, state, 0))
-                    .unwrap_or(Some(true))?;
-                if !active {
-                    continue;
+                    .map(|v| condition_matches(v, state))
+                    .unwrap_or(Some(true))?
+                {
+                    inputs.push((part.get("apply")?, true));
                 }
-                let apply = choose_weighted(
-                    part.get("apply")?,
-                    deterministic_model_seed(state, pos, index as u64 + 1),
-                )?;
-                let (x, y) = variant_angles(apply)?;
-                chosen.push(ChosenModel {
-                    key: normalize_model(apply.get("model")?.as_str()?, ns)?,
-                    x,
-                    y,
-                    uvlock: apply
-                        .get("uvlock")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
-                });
             }
-            if chosen.is_empty() {
-                return None;
-            }
-            return Some(chosen);
+            return Some(inputs);
         }
-        let value = choose_weighted(
-            best_variant(doc.get("variants")?.as_object()?, state)?,
-            deterministic_model_seed(state, pos, 0),
-        )?;
-        let (x, y) = variant_angles(value)?;
-        Some(vec![ChosenModel {
-            key: normalize_model(value.get("model")?.as_str()?, ns)?,
-            x,
-            y,
-            uvlock: value
-                .get("uvlock")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-        }])
+        let variants = doc.get("variants")?.as_object()?;
+        let value = if let Some(variant) = explicit_variant {
+            variants.get(variant)?
+        } else {
+            best_variant(variants, state)?
+        };
+        Some(vec![(value, false)])
+    }
+    pub(crate) fn variant_plan(&self, state: &State) -> Option<VariantPlan> {
+        VariantPlan::new(
+            self.selection_inputs(state)?,
+            self.render_state(state),
+            self.legacy
+                .as_ref()
+                .is_some_and(|registry| registry.version() == crate::legacy_render::Version::V112),
+        )
+    }
+    fn selections_at(
+        &self,
+        state: &State,
+        pos: impl Into<ModelSample> + Copy,
+    ) -> Option<Vec<ChosenModel>> {
+        let inputs = self.selection_inputs(state)?;
+        let state = self.render_state(state);
+        let sample = pos.into();
+        let legacy = self
+            .legacy
+            .as_ref()
+            .is_some_and(|registry| registry.version() == crate::legacy_render::Version::V112);
+        let mut multipart_index = 0_i64;
+        inputs
+            .into_iter()
+            .map(|(value, multipart)| {
+                let seed = if legacy {
+                    let seed = sample.legacy_seed();
+                    if multipart {
+                        let seed = seed.wrapping_add(multipart_index);
+                        multipart_index += 1;
+                        seed
+                    } else {
+                        seed
+                    }
+                } else {
+                    sample.seed(state, multipart)
+                };
+                let apply = choose_weighted_version(value, seed, legacy)?;
+                ChosenModel::parse(apply)
+            })
+            .collect()
     }
     fn chosen_element_at(
         &self,
         state: &State,
         index: usize,
-        pos: (i32, i32, i32),
-    ) -> Option<(ChosenModel, &Value)> {
-        if index >= 512 {
-            return None;
-        }
+        pos: impl Into<ModelSample> + Copy,
+    ) -> Option<(ChosenModel, &graph::Element)> {
         let mut remaining = index;
         for model in self.selections_at(state, pos)? {
-            let elements = self.model_elements(&model.key)?;
+            let elements = &self.compiled_elements(&model)?.elements;
             if remaining < elements.len() {
                 return Some((model, elements.get(remaining)?));
             }
@@ -538,32 +901,13 @@ impl ModelBank {
     }
     /// Signed block position changes weighted variants; the cache key
     /// hashes only the chosen model set, not each individual coordinate.
-    pub fn weighted_selection_key(&self, state: &State, pos: (i32, i32, i32)) -> u64 {
+    pub fn weighted_selection_key(&self, state: &State, pos: impl Into<ModelSample> + Copy) -> u64 {
         let Some(chosen) = self.selections_at(state, pos) else {
             return 0;
         };
         let mut hash = std::collections::hash_map::DefaultHasher::new();
         chosen.hash(&mut hash);
         hash.finish()
-    }
-    /// Elements may deliberately disable directional shading, notably the
-    /// zero-thickness crossed planes used by flowers and saplings.
-    #[cfg(test)]
-    pub fn element_unshaded(&self, state: &State, index: usize) -> Option<bool> {
-        self.element_unshaded_at(state, index, (0, 0, 0))
-    }
-    pub fn element_unshaded_at(
-        &self,
-        state: &State,
-        index: usize,
-        pos: (i32, i32, i32),
-    ) -> Option<bool> {
-        let (_, element) = self.chosen_element_at(state, index, pos)?;
-        let shade = element
-            .get("shade")
-            .map(Value::as_bool)
-            .unwrap_or(Some(true))?;
-        Some(!shade)
     }
     /// Some(false) means an explicit Java model face is absent and must NOT
     /// be rendered as a synthetic palette-textured side. None means that
@@ -577,10 +921,10 @@ impl ModelBank {
         state: &State,
         face: Face,
         index: usize,
-        pos: (i32, i32, i32),
+        pos: impl Into<ModelSample> + Copy,
     ) -> Option<bool> {
         let (_model, element) = self.chosen_element_at(state, index, pos)?;
-        let faces = element.get("faces")?.as_object()?;
+        let faces = element.document.get("faces")?.as_object()?;
         let name = match face {
             Face::Top => "up",
             Face::Bottom => "down",
@@ -609,7 +953,7 @@ impl ModelBank {
         state: &State,
         face: Face,
         index: usize,
-        pos: (i32, i32, i32),
+        pos: impl Into<ModelSample> + Copy,
     ) -> Option<Option<Face>> {
         let (chosen, element) = self.chosen_element_at(state, index, pos)?;
         let name = match face {
@@ -620,7 +964,7 @@ impl ModelBank {
             Face::PosZ => "south",
             Face::NegZ => "north",
         };
-        let face_doc = element.get("faces")?.get(name)?;
+        let face_doc = element.document.get("faces")?.get(name)?;
         let Some(raw) = face_doc.get("cullface") else {
             return Some(None);
         };
@@ -634,81 +978,213 @@ impl ModelBank {
             _ => return None,
         };
         let mut part = Part::cube(Box3::FULL);
+        part.root =
+            (element.root != crate::root_transform::Affine::IDENTITY).then_some(element.root);
         part.variant_x = chosen.x;
         part.variant_y = chosen.y;
         let n = part.normal(local.normal());
-        let rotated = match n {
-            [1.0, 0.0, 0.0] => Face::PosX,
-            [-1.0, 0.0, 0.0] => Face::NegX,
-            [0.0, 1.0, 0.0] => Face::Top,
-            [0.0, -1.0, 0.0] => Face::Bottom,
-            [0.0, 0.0, 1.0] => Face::PosZ,
-            [0.0, 0.0, -1.0] => Face::NegZ,
-            _ => return None,
-        };
-        Some(Some(rotated))
+        Some(
+            [
+                Face::Top,
+                Face::Bottom,
+                Face::PosX,
+                Face::NegX,
+                Face::PosZ,
+                Face::NegZ,
+            ]
+            .into_iter()
+            .find(|face| {
+                let (x, y, z) = face.normal();
+                n.into_iter()
+                    .zip([x as f32, y as f32, z as f32])
+                    .all(|(a, b)| (a - b).abs() < 1e-5)
+            }),
+        )
     }
-    fn model_elements(&self, key: &str) -> Option<&Vec<Value>> {
-        let mut current = Some(key.to_string());
-        let mut seen = BTreeSet::new();
-        while let Some(id) = current {
-            if seen.len() >= 16 || !seen.insert(id.clone()) {
-                return None;
-            }
-            let Some(model) = self.files.get(&id) else {
-                return vanilla_parent_elements(&id);
-            };
-            // "loader" and editor-specific static format adapters are not
-            // vanilla Java model declarations. Geometry for those remains
-            // unavailable until an explicit rendering plugin handles it.
-            if model.get("loader").is_some()
-                || model.get("mcedit2:static_renderer").is_some() {
-                return None;
-            }
-            if let Some(elements) = model.get("elements") {
-                return elements.as_array();
-            }
-            let source_ns = id.strip_prefix("model:")?.split_once(':')?.0;
-            current = model
-                .get("parent")
-                .and_then(Value::as_str)
-                .and_then(|v| normalize_model(v, source_ns));
+    fn compiled_model(&self, key: &str) -> Option<&graph::Model> {
+        let compiled = self.compiled.get_or_init(|| {
+            self.files
+                .keys()
+                .filter(|k| k.starts_with("model:"))
+                .chain(self.referenced_models.iter())
+                .map(|key| (key.clone(), OnceLock::new()))
+                .collect()
+        });
+        compiled
+            .get(key)?
+            .get_or_init(|| {
+                let model = graph::compile(&self.files, key, &|spec| self.bake_obj(spec), &|key| {
+                    self.layer_catalog(key)
+                });
+                if let Err(error) = &model {
+                    log::error!("[models] {key} 无法编译：{error}");
+                }
+                model
+            })
+            .as_ref()
+            .ok()
+    }
+    fn compiled_elements(&self, choice: &ChosenModel) -> Option<&graph::Model> {
+        let model = self.compiled_model(&choice.key)?;
+        if choice.uvlock {
+            model
+                .uv_lock
+                .get_or_init(|| {
+                    let result = model
+                        .elements
+                        .iter()
+                        .try_for_each(|e| e.root.inverse().map(|_| ()));
+                    if let Err(error) = &result {
+                        log::error!("[models] {} 无法使用 UV 锁定：{error}", choice.key);
+                    }
+                    result
+                })
+                .as_ref()
+                .ok()?;
         }
-        None
+        Some(model)
+    }
+    pub(crate) fn validate_builtin_loaders(&self) -> Vec<String> {
+        let mut errors: Vec<_> = self
+            .files
+            .iter()
+            .filter(|(key, value)| {
+                key.starts_with("model:")
+                    && value
+                        .get("loader")
+                        .and_then(Value::as_str)
+                        .is_some_and(graph::supported)
+            })
+            .filter_map(|(key, _)| {
+                self.compiled_model(key);
+                self.compiled
+                    .get()?
+                    .get(key)?
+                    .get()?
+                    .as_ref()
+                    .err()
+                    .map(|e| format!("模型 {key} 无效：{e}"))
+            })
+            .collect();
+        fn locked_refs(doc: &Value, keys: &mut BTreeSet<String>) {
+            match doc {
+                Value::Object(fields) => {
+                    if doc.get("uvlock").and_then(Value::as_bool) == Some(true) {
+                        if let Some(key) = doc
+                            .get("model")
+                            .and_then(Value::as_str)
+                            .and_then(normalize_model)
+                        {
+                            keys.insert(key);
+                        }
+                    }
+                    for child in fields.values() {
+                        locked_refs(child, keys);
+                    }
+                }
+                Value::Array(items) => {
+                    for child in items {
+                        locked_refs(child, keys);
+                    }
+                }
+                _ => (),
+            }
+        }
+        let mut keys = BTreeSet::new();
+        for (key, doc) in &self.files {
+            if key.starts_with("state:") {
+                locked_refs(doc, &mut keys);
+            }
+        }
+        for key in keys {
+            self.compiled_elements(&ChosenModel {
+                key: key.clone(),
+                x: 0,
+                y: 0,
+                uvlock: true,
+            });
+            if let Some(error) = self
+                .compiled_model(&key)
+                .and_then(|m| m.uv_lock.get())
+                .and_then(|r| r.as_ref().err())
+            {
+                errors.push(format!("模型 {key} 的 UV 锁定无效：{error}"));
+            }
+        }
+        errors
     }
     pub fn insert(&mut self, path: &str, bytes: &[u8]) -> Result<bool, String> {
+        let (inserted, diagnostics) = self.insert_with_diagnostics(path, bytes)?;
+        for diagnostic in diagnostics {
+            log::error!("[models] {path}：{diagnostic}");
+        }
+        Ok(inserted)
+    }
+    pub(crate) fn insert_with_diagnostics(
+        &mut self,
+        path: &str,
+        bytes: &[u8],
+    ) -> Result<(bool, Vec<String>), String> {
         let Some(key) = asset_id(path) else {
-            return Ok(false);
+            return Ok((false, Vec::new()));
         };
-        if bytes.len() > 2 * 1024 * 1024 {
-            return Err("Individual model JSON exceeds 2MiB".into());
+        // 选中上层资源后旧定义失去所有权，解析失败也不能显示旧模型。
+        self.files.remove(&key);
+        if let Some(old) = self.json_sizes.remove(&key) {
+            self.total_json_bytes = self
+                .total_json_bytes
+                .checked_sub(old)
+                .ok_or("模型来源常驻计量失配")?;
         }
-        // No fixed model *count*: enormous modpacks are valid. A single
-        // source JSON stays <=256KiB, and aggregate parsed source is
-        // guarded against decompression/memory denial of service.
-        const JSON_BUDGET: usize = 256 * 1024 * 1024;
-        let old = self.json_sizes.get(&key).copied().unwrap_or(0);
-        let new_total = self
-            .total_json_bytes
-            .saturating_sub(old)
-            .checked_add(bytes.len())
-            .ok_or("Model JSON aggregate size overflow")?;
-        if new_total > JSON_BUDGET {
-            return Err("Model JSON source exceeds 256MiB safety budget".into());
-        }
-        let json: Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
-        if !json.is_object() {
-            return Err("Model JSON root must be an object".into());
-        }
+        self.compiled.take();
+        self.block_layer_policies.take();
+        self.layer_catalogs.take();
+        let new_total = self.checked_json_size(&key, bytes.len())?;
+        let document = mcedit2_world::client_json::resource_object(bytes)?;
+        let diagnostics = document.diagnostic().into_iter().collect::<Vec<_>>();
+        let json = document.value;
+        self.has_layer_models |= Self::contains_layer_model(&json);
         self.json_sizes.insert(key.clone(), bytes.len());
         self.total_json_bytes = new_total;
         self.files.insert(key, json);
-        Ok(true)
+        self.compiled.take();
+        self.block_layer_policies.take();
+        self.layer_catalogs.take();
+        Ok((true, diagnostics))
+    }
+    pub(crate) fn source_bytes(&self) -> usize {
+        self.total_json_bytes
+            .saturating_add(self.native_blocks.bytes())
+            .saturating_add(self.configured.bytes())
+            .saturating_add(
+                self.available_models
+                    .iter()
+                    .map(|id| std::mem::size_of::<String>() + id.len())
+                    .sum::<usize>(),
+            )
+    }
+    fn checked_json_size(&self, key: &str, bytes: usize) -> Result<usize, String> {
+        let old = self.json_sizes.get(key).copied().unwrap_or(0);
+        let new_total = self
+            .total_json_bytes
+            .saturating_sub(old)
+            .checked_add(bytes)
+            .ok_or("Model JSON aggregate size overflow")?;
+        if let Some(budget) = self.budget {
+            budget.check(new_total, 0, 0)?;
+        }
+        Ok(new_total)
+    }
+    pub(crate) fn check_source_budget(&self, path: &str, bytes: usize) -> Result<(), String> {
+        if let Some(key) = asset_id(path) {
+            self.checked_json_size(&key, bytes)?;
+        }
+        Ok(())
     }
     /// Guarded static Wavefront OBJ; model key uses original Java resource ID.
     pub fn insert_obj(&mut self, path: &str, bytes: &[u8]) -> Result<bool, String> {
         let parts: Vec<_> = path.split('/').collect();
-        if parts.len() < 5
+        if parts.len() < 4
             || parts[0] != "assets"
             || parts[2] != "models"
             || !resource_ids::namespace(parts[1])
@@ -716,10 +1192,11 @@ impl ModelBank {
             return Ok(false);
         }
         let name = parts[3..].join("/");
-        let Some(name) = name.strip_suffix(".obj") else {
+        let Some(suffix) = obj_source_suffix(&name) else {
             return Ok(false);
         };
-        if !resource_ids::path(name, 160) {
+        let name = name.strip_suffix(suffix).unwrap();
+        if !resource_ids::path(name) {
             return Ok(false);
         }
         let key = format!(
@@ -727,15 +1204,33 @@ impl ModelBank {
             parts[1],
             name.strip_prefix("block/").unwrap_or(name)
         );
-        let mesh = special_obj::parse(bytes)?;
-        self.obj_meshes.insert(key, mesh);
+        let source = obj::asset(path, suffix).ok_or("OBJ 资源路径无效")?;
+        let budget_key = format!("obj:{source}");
+        let total = self.checked_json_size(&budget_key, bytes.len())?;
+        let document = special_obj::parse(bytes)?;
+        // 显式 OBJ 声明按完整 ID 查询；复合后缀不能覆盖同名旧式适配器网格。
+        if suffix == ".obj" {
+            self.obj_meshes
+                .insert(key, std::sync::Arc::clone(&document.triangles));
+        }
+        self.obj_sources.insert(source, document);
+        self.json_sizes.insert(budget_key, bytes.len());
+        self.total_json_bytes = total;
+        self.compiled.take();
         Ok(true)
     }
     /// Each OBJ may use an optional same-stem MTL from the same pack.
     /// No external mtllib reference is followed.
+    #[cfg(test)]
     pub fn insert_mtl(&mut self, path: &str, bytes: &[u8]) -> Result<bool, String> {
+        self.insert_mtl_profile(path, bytes, false)
+    }
+    pub fn insert_java_mtl(&mut self, path: &str, bytes: &[u8]) -> Result<bool, String> {
+        self.insert_mtl_profile(path, bytes, true)
+    }
+    fn insert_mtl_profile(&mut self, path: &str, bytes: &[u8], java: bool) -> Result<bool, String> {
         let parts: Vec<_> = path.split('/').collect();
-        if parts.len() < 5
+        if parts.len() < 4
             || parts[0] != "assets"
             || parts[2] != "models"
             || !resource_ids::namespace(parts[1])
@@ -746,7 +1241,7 @@ impl ModelBank {
         let Some(name) = name.strip_suffix(".mtl") else {
             return Ok(false);
         };
-        if !resource_ids::path(name, 160) {
+        if !resource_ids::path(name) {
             return Ok(false);
         }
         let key = format!(
@@ -754,11 +1249,25 @@ impl ModelBank {
             parts[1],
             name.strip_prefix("block/").unwrap_or(name)
         );
-        self.obj_materials.insert(key, special_mtl::parse(bytes)?);
+        let source = obj::asset(path, ".mtl").ok_or("MTL 资源路径无效")?;
+        let budget_key = format!("mtl:{source}");
+        let total = self.checked_json_size(&budget_key, bytes.len())?;
+        let material = std::sync::Arc::new(if java {
+            special_mtl::parse_java(bytes)?
+        } else {
+            special_mtl::parse(bytes)?
+        });
+        self.obj_materials
+            .insert(key, std::sync::Arc::clone(&material));
+        self.obj_libraries.insert(source, material);
+        self.json_sizes.insert(budget_key, bytes.len());
+        self.total_json_bytes = total;
+        self.compiled.take();
         Ok(true)
     }
     /// Static glTF / GLB source meshes share the same vertex material pipeline
     /// as OBJ. All buffers must be embedded; there is no network/file resolver.
+    #[cfg(test)]
     pub fn insert_gltf(&mut self, path: &str, bytes: &[u8]) -> Result<bool, String> {
         let parts: Vec<_> = path.split('/').collect();
         if parts.len() < 5
@@ -775,7 +1284,7 @@ impl ModelBank {
         let Some(name) = name else {
             return Ok(false);
         };
-        if !resource_ids::path(name, 160) {
+        if !resource_ids::path(name) {
             return Ok(false);
         }
         let key = format!(
@@ -785,80 +1294,181 @@ impl ModelBank {
         );
         // Defer glTF decoding until the complete pack stack is ingested.
         // A .bin member may precede or follow the referring model in ZIPs.
-        self.gltf_sources.insert(key, (path.to_owned(), bytes.to_vec()));
+        let budget_key = format!("gltf:{key}");
+        let total = self.checked_json_size(&budget_key, bytes.len())?;
+        self.gltf_sources
+            .insert(key, (path.to_owned(), bytes.to_vec()));
+        self.json_sizes.insert(budget_key, bytes.len());
+        self.total_json_bytes = total;
         Ok(true)
     }
     /// External .bin blobs are only resolved as exact, same-pack resource
     /// members after loading all layers. They are never opened by URI.
-    pub fn insert_gltf_buffer(&mut self, path:&str, bytes:&[u8])->Result<bool,String>{
-        let parts:Vec<_>=path.split('/').collect();
-        if parts.len()<5 || parts[0]!="assets" || parts[2]!="models"
-            || !resource_ids::namespace(parts[1]) {return Ok(false);}
-        let relative=parts[3..].join("/");
-        if !relative.ends_with(".bin") || !resource_ids::path(&relative,160){
+    #[cfg(test)]
+    pub fn insert_gltf_buffer(&mut self, path: &str, bytes: &[u8]) -> Result<bool, String> {
+        let parts: Vec<_> = path.split('/').collect();
+        if parts.len() < 5
+            || parts[0] != "assets"
+            || parts[2] != "models"
+            || !resource_ids::namespace(parts[1])
+        {
             return Ok(false);
         }
-        if bytes.len()>8*1024*1024{return Err("glTF buffer exceeds 8 MiB".into());}
-        let old=self.gltf_buffers.get(path).map_or(0,Vec::len);
-        let total=self.gltf_buffer_bytes.saturating_sub(old)
-            .checked_add(bytes.len()).ok_or("glTF buffer total overflow")?;
-        if total>128*1024*1024{return Err("glTF buffer total exceeds 128 MiB".into());}
-        self.gltf_buffer_bytes=total;
-        self.gltf_buffers.insert(path.to_owned(),bytes.to_vec());
+        let relative = parts[3..].join("/");
+        if !relative.ends_with(".bin") || !resource_ids::path(&relative) {
+            return Ok(false);
+        }
+        let budget_key = format!("gltf-buffer:{path}");
+        let total = self.checked_json_size(&budget_key, bytes.len())?;
+        self.json_sizes.insert(budget_key, bytes.len());
+        self.total_json_bytes = total;
+        self.gltf_buffers.insert(path.to_owned(), bytes.to_vec());
         Ok(true)
     }
     /// Compile loaded models only when all resource pack layers are present.
     /// Missing/unsupported models are skipped with an explicit diagnostic.
-    pub fn finish_gltf(&mut self)->Vec<String>{
-        let mut errors=Vec::new();
+    #[cfg(test)]
+    pub fn finish_gltf(&mut self) -> Vec<String> {
+        let mut errors = Vec::new();
         self.gltf_meshes.clear();
         self.gltf_materials.clear();
-        for (id,(source,bytes)) in &self.gltf_sources{
-            let folder=source.rsplit_once('/').map(|(dir,_)|dir).unwrap_or("");
-            let resolved=special_gltf::parse_with_resolver(bytes,&|uri|{
+        for (id, (source, bytes)) in &self.gltf_sources {
+            let folder = source.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+            let resolved = special_gltf::parse_with_resolver(bytes, &|uri| {
                 // The decoder has already validated relative URI components.
                 self.gltf_buffers.get(&format!("{folder}/{uri}")).cloned()
             });
-            match resolved{
-                Ok(mesh)=>{
-                    match special_gltf::material_factors(bytes){
-                        Ok(mut mat)=>{
+            match resolved {
+                Ok(mesh) => {
+                    match special_gltf::material_factors(bytes) {
+                        Ok(mut mat) => {
                             for value in mat.values_mut() {
                                 if let Some(uri) = value.base_color_uri.as_deref() {
                                     value.base_color_texture =
                                         special_gltf::pack_image_id(source, uri);
                                 }
                             }
-                            self.gltf_materials.insert(id.clone(),mat);
+                            self.gltf_materials.insert(id.clone(), mat);
                         }
-                        Err(e)=>{errors.push(format!("{source}: {e}"));continue;}
+                        Err(e) => {
+                            errors.push(format!("{source}: {e}"));
+                            continue;
+                        }
                     }
-                    self.gltf_meshes.insert(id.clone(),mesh);
+                    self.gltf_meshes.insert(id.clone(), mesh);
                 }
-                Err(e)=>errors.push(format!("{source}: {e}")),
+                Err(e) => errors.push(format!("{source}: {e}")),
             }
         }
         errors
     }
     /// List exact original MTL opacity-map pairs. Resource decoding and
     /// overlay allocation belong to the atlas, never to model geometry.
-    pub fn opacity_maps(&self)->Vec<(String,String,String,String)>{
-        let mut entries=Vec::new();
-        for (model,materials) in &self.obj_materials{
-            for (name,mat) in materials{
-                if let (Some(diffuse),Some(mask))=(&mat.map_kd,&mat.map_d){
-                    entries.push((model.clone(),name.clone(),diffuse.clone(),mask.clone()));
+    #[cfg(test)]
+    pub fn opacity_maps(&self) -> Vec<(String, String, String, String)> {
+        let mut entries = Vec::new();
+        for (model, materials) in &self.obj_materials {
+            for (name, mat) in materials.iter() {
+                if let (Some(diffuse), Some(mask)) = (&mat.map_kd, &mat.map_d) {
+                    entries.push((model.clone(), name.clone(), diffuse.clone(), mask.clone()));
                 }
             }
         }
         entries
     }
-    pub fn set_opacity_overlay(&mut self,model:String,name:String,sprite:String){
-        self.obj_mask_overlays.insert((model,name),sprite);
+    #[cfg(test)]
+    pub fn set_opacity_overlay(&mut self, model: String, name: String, sprite: String) {
+        self.obj_mask_overlays.insert((model, name), sprite);
     }
     /// Select special models through the original blockstate JSON. Loader
     /// declarations are a data contract, not an arbitrary executable hook.
-    pub fn obj_at(&self, state: &State, pos: (i32, i32, i32)) -> Option<Vec<ObjSelection>> {
+    pub fn obj_at(
+        &self,
+        state: &State,
+        pos: impl Into<ModelSample> + Copy,
+    ) -> Option<Vec<ObjSelection>> {
+        let native = match if self.configured_choice(state).is_some() {
+            Ok(None)
+        } else {
+            self.native_blocks.at(self.render_state(state))
+        } {
+            Ok(native) => native,
+            Err(error) => {
+                log::error!("[models] {} 原版模型绑定失败：{error}", state.name);
+                return None;
+            }
+        };
+        if self.obj_sources.is_empty()
+            && self.gltf_meshes.is_empty()
+            && native.is_none()
+            && !self.has_layer_models
+        {
+            return None;
+        }
+        let selected = self.selections_at(state, pos)?;
+        if selected.iter().any(|m| {
+            self.files.get(&m.key).is_some_and(|d| {
+                d.get("mcedit2:static_renderer").is_some()
+                    || d.get("loader").and_then(Value::as_str).is_some_and(|l| {
+                        matches!(
+                            l,
+                            "mcedit2:gltf"
+                                | "forge:gltf"
+                                | "neoforge:gltf"
+                                | "mcedit2:glb"
+                                | "forge:glb"
+                                | "neoforge:glb"
+                        )
+                    })
+            })
+        }) {
+            return self.experimental_obj_at(state, pos);
+        }
+        let mut out = Vec::new();
+        for chosen in selected {
+            let model = self.compiled_model(&chosen.key)?;
+            let mut layer_triangles = Vec::new();
+            for layer in &model.layers {
+                match layer.instantiate(&crate::layer_renderer::Context::block(
+                    self.render_state(state),
+                )) {
+                    Ok(triangles) => layer_triangles.extend(triangles),
+                    Err(error) => {
+                        log::error!("[models] {} 模型层绑定失败：{error}", chosen.key);
+                        return None;
+                    }
+                }
+            }
+            let rotation = Part {
+                root: None,
+                bounds: Box3::FULL,
+                rotation: None,
+                variant_x: chosen.x,
+                variant_y: chosen.y,
+            };
+            for source in model.triangles.iter().chain(&layer_triangles) {
+                let mut triangle = source.clone();
+                triangle.xyz = triangle.xyz.map(|p| rotation.point(p));
+                triangle.cull = source.cull.and_then(|face| {
+                    let normal = rotation.normal(face.normal());
+                    obj::cull(triangle.xyz, normal)
+                });
+                out.push(triangle);
+            }
+        }
+        if let Some(native) = native {
+            out.extend(native);
+        }
+        (!out.is_empty()).then_some(out)
+    }
+    fn experimental_obj_at(
+        &self,
+        state: &State,
+        pos: impl Into<ModelSample> + Copy,
+    ) -> Option<Vec<ObjSelection>> {
+        if self.obj_meshes.is_empty() && self.gltf_meshes.is_empty() {
+            return None;
+        }
         let mut out = Vec::new();
         let selected = self.selections_at(state, pos)?;
         for chosen in selected {
@@ -896,11 +1506,12 @@ impl ModelBank {
             let path = path.strip_prefix("block/").unwrap_or(path);
             let id = format!("model:{ns}:{path}");
             let mesh = if suffix == ".obj" {
-                self.obj_meshes.get(&id)?
+                self.obj_meshes.get(&id)?.as_slice()
             } else {
-                self.gltf_meshes.get(&id)?
+                self.gltf_meshes.get(&id)?.as_slice()
             };
             let rotation = Part {
+                root: None,
                 bounds: Box3::FULL,
                 rotation: None,
                 variant_x: chosen.x,
@@ -915,11 +1526,11 @@ impl ModelBank {
             } else {
                 None
             };
-            let id_key=id.clone();
-            let gltf_materials=self.gltf_materials.get(&id);
+            let id_key = id.clone();
+            let gltf_materials = self.gltf_materials.get(&id);
             for tri in mesh {
                 let mtl = materials.and_then(|m| m.get(&tri.material));
-                let pbr=gltf_materials.and_then(|m|m.get(&tri.material));
+                let pbr = gltf_materials.and_then(|m| m.get(&tri.material));
                 let raw = mappings
                     .and_then(|m| m.get(&tri.material))
                     .and_then(Value::as_str)
@@ -937,21 +1548,26 @@ impl ModelBank {
                     .or_else(|| path.strip_prefix("blocks/"))
                     .unwrap_or(path);
                 out.push(ObjSelection {
+                    material_flags: 0,
                     xyz: tri.xyz.map(|p| rotation.point(p)),
                     uv: tri.uv,
-                    texture: self.obj_mask_overlays
-                        .get(&(id_key.clone(),tri.material.clone()))
+                    texture: self
+                        .obj_mask_overlays
+                        .get(&(id_key.clone(), tri.material.clone()))
                         .cloned()
-                        .unwrap_or_else(||format!("{ns}:{id}")),
-                    tint: mtl.map(|m| m.diffuse).or_else(|| pbr.map(|m| m.base_color))
+                        .unwrap_or_else(|| format!("{ns}:{id}")),
+                    tint: mtl
+                        .map(|m| m.diffuse)
+                        .or_else(|| pbr.map(|m| m.base_color))
                         .unwrap_or([1.; 4]),
                     alpha_mode: pbr.map(|m| m.alpha_mode.clone()),
                     alpha_cutoff: pbr.map_or(0.5, |m| m.alpha_cutoff),
                     double_sided: pbr.is_none_or(|m| m.double_sided),
+                    colors: [[1.0; 4]; 3],
+                    cull: None,
+                    render_type: None,
+                    tint_index: None,
                 });
-                if out.len() > 4096 {
-                    return None;
-                }
             }
         }
         (!out.is_empty()).then_some(out)
@@ -967,15 +1583,40 @@ impl ModelBank {
     pub fn parts(&self, state: &State) -> Option<Vec<Part>> {
         self.parts_at(state, (0, 0, 0))
     }
-    pub fn parts_at(&self, state: &State, pos: (i32, i32, i32)) -> Option<Vec<Part>> {
+    pub fn parts_at(&self, state: &State, pos: impl Into<ModelSample> + Copy) -> Option<Vec<Part>> {
         let chosen = self.selections_at(state, pos)?;
         let mut out = Vec::new();
         for model in chosen {
-            let elements = self.model_elements(&model.key)?;
-            if elements.is_empty() || elements.len() > 256 || out.len() + elements.len() > 512 {
-                return None;
+            // 已解析的显式实验静态后端没有 JSON 元素，不能再补一个方块盒。
+            let experimental = self.files.get(&model.key).is_some_and(|d| {
+                d.get("mcedit2:static_renderer").is_some()
+                    || d.get("loader").and_then(Value::as_str).is_some_and(|l| {
+                        matches!(
+                            l,
+                            "mcedit2:gltf"
+                                | "forge:gltf"
+                                | "neoforge:gltf"
+                                | "mcedit2:glb"
+                                | "forge:glb"
+                                | "neoforge:glb"
+                        )
+                    })
+            });
+            if experimental && self.experimental_obj_at(state, pos).is_some() {
+                continue;
             }
-            for entry in elements {
+            let compiled = self.compiled_elements(&model)?;
+            for layer in &compiled.layers {
+                if let Err(error) = layer.validate(&crate::layer_renderer::Context::block(
+                    self.render_state(state),
+                )) {
+                    log::error!("[models] {} 模型层参数无效：{error}", model.key);
+                    return None;
+                }
+            }
+            let elements = &compiled.elements;
+            for resolved in elements {
+                let entry = &resolved.document;
                 let read = |name: &str| -> Option<[f32; 3]> {
                     let a = entry.get(name)?.as_array()?;
                     if a.len() != 3 {
@@ -989,7 +1630,7 @@ impl ModelBank {
                 };
                 let from = read("from")?;
                 let to = read("to")?;
-                let bounds = Box3::from_model_units(from, to).or_else(|| {
+                let bounds = Box3::from_model_units_directed(from, to).or_else(|| {
                     let flat = Box3::from_model_units_plane(from, to)?;
                     let axis = (0..3).find(|&i| from[i] == to[i])?;
                     let sides = match axis {
@@ -1027,6 +1668,8 @@ impl ModelBank {
                     None
                 };
                 out.push(Part {
+                    root: (resolved.root != crate::root_transform::Affine::IDENTITY)
+                        .then_some(resolved.root),
                     bounds,
                     rotation,
                     variant_x: model.x,
@@ -1034,46 +1677,20 @@ impl ModelBank {
                 });
             }
         }
-        if out.is_empty() {
-            None
-        } else {
-            Some(out)
-        }
+        Some(out)
     }
     #[cfg(test)]
     pub fn elements(&self, state: &State) -> Option<Vec<Box3>> {
-        let chosen = self.selections(state)?;
-        let mut out = Vec::new();
-        for model in chosen {
-            let elements = self.model_elements(&model.key)?;
-            if elements.is_empty() || elements.len() > 256 || out.len() + elements.len() > 512 {
-                return None;
-            }
-            for entry in elements {
-                if entry.get("rotation").is_some() {
-                    return None;
+        self.parts_at(state, (0, 0, 0))?
+            .into_iter()
+            .map(|part| {
+                if part.rotation.is_some() || part.root.is_some() {
+                    None
+                } else {
+                    part.bounds.rotate(part.variant_x, part.variant_y)
                 }
-                let read = |name: &str| -> Option<[f32; 3]> {
-                    let a = entry.get(name)?.as_array()?;
-                    if a.len() != 3 {
-                        return None;
-                    }
-                    Some([
-                        a[0].as_f64()? as f32,
-                        a[1].as_f64()? as f32,
-                        a[2].as_f64()? as f32,
-                    ])
-                };
-                out.push(
-                    Box3::from_model_units(read("from")?, read("to")?)?.rotate(model.x, model.y)?,
-                );
-            }
-        }
-        if out.is_empty() {
-            None
-        } else {
-            Some(out)
-        }
+            })
+            .collect()
     }
     /// A specific Java model element face's texture and declared UV.
     /// This is more precise than the older block-global texture map.
@@ -1086,43 +1703,17 @@ impl ModelBank {
         state: &State,
         face: Face,
         index: usize,
-        pos: (i32, i32, i32),
+        pos: impl Into<ModelSample> + Copy,
     ) -> Option<FaceSpec> {
         let (model, element) = self.chosen_element_at(state, index, pos)?;
         // A RenderFace stores the *local model face*; its vertices and
         // normals were rotated later by Part::point(). Inverse rotation
         // here would apply the same transform twice.
         let model_face = face;
-        let uvlock = if model.uvlock {
-            uvlock_permutation(face, model.x, model.y)?
-        } else {
-            [0, 1, 2, 3]
-        };
-        let model_key = model.key;
-        let mut current = Some(model_key.clone());
-        let mut visited = BTreeSet::new();
-        let mut textures: Vec<&serde_json::Map<String, Value>> = Vec::new();
-        let mut model_elements = None;
-        while let Some(key) = current {
-            if visited.len() >= 16 || !visited.insert(key.clone()) {
-                return None;
-            }
-            let Some(doc) = self.files.get(&key) else {
-                break;
-            };
-            if let Some(map) = doc.get("textures").and_then(Value::as_object) {
-                textures.push(map);
-            }
-            if model_elements.is_none() {
-                model_elements = doc.get("elements").and_then(Value::as_array);
-            }
-            let source_ns = key.strip_prefix("model:")?.split_once(':')?.0;
-            current = doc
-                .get("parent")
-                .and_then(Value::as_str)
-                .and_then(|s| normalize_model(s, source_ns));
+        let mut uvlock = face.java_uv_indices();
+        if element.root.determinant() < 0. {
+            uvlock.swap(1, 3);
         }
-        let _ = model_elements; // validated inheritance, chosen element is exact
         let name = match model_face {
             Face::Top => "up",
             Face::Bottom => "down",
@@ -1131,28 +1722,24 @@ impl ModelBank {
             Face::PosZ => "south",
             Face::NegZ => "north",
         };
-        let face_doc = element.get("faces")?.get(name)?;
-        let mut raw = face_doc.get("texture")?.as_str()?.to_string();
+        let face_doc = element.document.get("faces")?.get(name)?;
+        let mut raw = face_texture_reference(face_doc.get("texture")?.as_str()?);
         let mut visited_aliases = BTreeSet::new();
         while let Some(alias) = raw.strip_prefix('#') {
-            if visited_aliases.len() >= 16 || !visited_aliases.insert(alias.to_string()) {
+            if !visited_aliases.insert(alias.to_string()) {
                 return None;
             }
-            raw = textures
-                .iter()
-                .find_map(|m| m.get(alias).and_then(Value::as_str))?
-                .into();
+            raw = element.textures.get(alias).and_then(Value::as_str)?.into();
         }
-        let default_ns = model_key.strip_prefix("model:")?.split_once(':')?.0;
-        let texture = normalize_texture(&raw, default_ns)?;
-        let rotation = match face_doc.get("rotation") {
+        let texture = normalize_texture(&raw)?;
+        let mut rotation = match face_doc.get("rotation") {
             None => 0,
             Some(v) => u16::try_from(v.as_u64()?).ok()?,
         };
         if rotation % 90 != 0 || rotation >= 360 {
             return None;
         }
-        let uv = if let Some(v) = face_doc.get("uv") {
+        let mut uv = if let Some(v) = face_doc.get("uv") {
             let a = v.as_array()?;
             if a.len() != 4 {
                 return None;
@@ -1167,13 +1754,23 @@ impl ModelBank {
             }
             out
         } else {
-            implicit_face_uv(element, model_face)?
+            implicit_face_uv(&element.document, model_face)?
         };
+        if model.uvlock {
+            match uv_lock::recompute(element.root, model.x, model.y, face, uv, rotation) {
+                Ok(result) => (uv, rotation) = result,
+                Err(error) => {
+                    log::error!("[models] {} 的 {face:?} 面 UV 锁定失败：{error}", model.key);
+                    return None;
+                }
+            }
+        }
         let tint_index = face_doc
             .get("tintindex")
             .and_then(Value::as_u64)
             .and_then(|n| u32::try_from(n).ok());
         Some(FaceSpec {
+            render_type: element.render_type,
             texture,
             uv,
             rotation,
@@ -1185,31 +1782,30 @@ impl ModelBank {
     pub fn texture(&self, state: &State, face: Face) -> Option<String> {
         self.texture_at(state, face, (0, 0, 0))
     }
-    pub fn texture_at(&self, state: &State, face: Face, pos: (i32, i32, i32)) -> Option<String> {
+    pub fn texture_at(
+        &self,
+        state: &State,
+        face: Face,
+        pos: impl Into<ModelSample> + Copy,
+    ) -> Option<String> {
         let chosen = self.selections_at(state, pos)?.into_iter().next()?;
         let lookup_face = face.undo_variant_rotation(chosen.x, chosen.y);
         let model_key = chosen.key;
-        let fallback_ns = model_key
-            .strip_prefix("model:")?
-            .split_once(':')?
-            .0
-            .to_string();
         let mut maps = Vec::new();
         let mut visited = BTreeSet::new();
         let mut current = Some(model_key.clone());
         while let Some(key) = current {
-            if visited.len() >= 16 || !visited.insert(key.clone()) {
+            if !visited.insert(key.clone()) {
                 return None;
             }
             let Some(model) = self.files.get(&key) else {
                 break;
             };
             maps.push(model.get("textures").and_then(Value::as_object));
-            let source_ns = key.strip_prefix("model:")?.split_once(':')?.0;
             current = model
                 .get("parent")
                 .and_then(Value::as_str)
-                .and_then(|v| normalize_model(v, source_ns));
+                .and_then(normalize_model);
         }
         // Newer models override inherited parent texture keys.
         let get = |key: &str| -> Option<String> {
@@ -1225,19 +1821,13 @@ impl ModelBank {
                 continue;
             };
             let mut seen = BTreeSet::new();
-            for _ in 0..16 {
-                if !texture.starts_with('#') {
-                    break;
-                }
+            while texture.starts_with('#') {
                 if !seen.insert(texture.clone()) {
                     return None;
                 }
                 texture = get(texture.trim_start_matches('#'))?;
             }
-            if texture.starts_with('#') {
-                return None;
-            }
-            if let Some(id) = normalize_texture(&texture, &fallback_ns) {
+            if let Some(id) = normalize_texture(&texture) {
                 return Some(id);
             }
         }
@@ -1247,6 +1837,120 @@ impl ModelBank {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn reversed_java_element_endpoints_keep_inner_faces_and_uv() {
+        let mut bank = ModelBank::default();
+        bank.insert(
+            "assets/test/blockstates/inner.json",
+            br#"{"variants":{"":{"model":"test:block/inner"}}}"#,
+        )
+        .unwrap();
+        bank.insert("assets/test/models/block/inner.json", br##"{"textures":{"all":"test:block/grid"},"elements":[{"from":[15.998,0.002,0.002],"to":[0.002,15.998,15.998],"faces":{"north":{"uv":[16,0,0,16],"texture":"#all","cullface":"south"},"up":{"texture":"#all"}}}]}"##).unwrap();
+        let state = s("test:inner", &[]);
+        let parts = bank.parts(&state).expect("Java 允许反向端点的内侧模型面");
+        assert_eq!(parts.len(), 1);
+        let part = &parts[0];
+        let corners = part.face_vertices(Face::NegZ.corners());
+        assert!(corners
+            .iter()
+            .all(|p| (p[2] - (0.002 / 16. - 0.5)).abs() < 1e-5));
+        assert_eq!(part.normal(Face::NegZ.normal()), [0., 0., 1.]);
+        assert_eq!(part.normal(Face::Top.normal()), [0., -1., 0.]);
+        let spec = bank.element_face(&state, Face::NegZ, 0).unwrap();
+        assert_eq!(spec.uv, [16., 0., 0., 16.]);
+        assert_eq!(spec.uvlock, Face::NegZ.java_uv_indices());
+        assert_eq!(
+            bank.face_cull_direction_at(&state, Face::NegZ, 0, (0, 0, 0)),
+            Some(Some(Face::PosZ))
+        );
+    }
+
+    fn java_unqualified_parent_model_and_texture_use_minecraft_namespace() {
+        let mut bank = ModelBank::default();
+        for (path, json) in [
+            (
+                "assets/demo/blockstates/custom.json",
+                r#"{"variants":{"":{"model":"demo:block/custom"}}}"#,
+            ),
+            (
+                "assets/demo/models/block/custom.json",
+                r#"{"parent":"block/cube_all","textures":{"all":"block/stone"}}"#,
+            ),
+            (
+                "assets/demo/blockstates/vanilla.json",
+                r#"{"variants":{"":{"model":"block/stone"}}}"#,
+            ),
+            (
+                "assets/minecraft/models/block/stone.json",
+                r#"{"parent":"block/cube_all","textures":{"all":"block/stone"}}"#,
+            ),
+            (
+                "assets/demo/models/block/stone.json",
+                r#"{"parent":"minecraft:block/cube_all","textures":{"all":"demo:block/decoy"}}"#,
+            ),
+        ] {
+            bank.insert(path, json.as_bytes()).unwrap();
+        }
+        for name in ["demo:custom", "demo:vanilla"] {
+            let state = s(name, &[]);
+            assert_eq!(bank.parts_at(&state, (0, 0, 0)).unwrap().len(), 1, "{name}");
+            assert_eq!(
+                bank.element_face(&state, Face::Top, 0).unwrap().texture,
+                "minecraft:stone",
+                "{name}"
+            );
+        }
+        let wanted = bank.retain_block_dependencies();
+        assert!(wanted.contains("minecraft:stone"));
+        assert!(!wanted.contains("demo:stone"));
+    }
+
+    fn composite_dependencies_root_reflections_and_cullfaces_stay_consistent() {
+        let mut bank = ModelBank::default();
+        for (path, doc) in [
+            (
+                "assets/test/blockstates/composite.json",
+                r#"{"variants":{"":{"model":"test:block/composite","y":90}}}"#,
+            ),
+            (
+                "assets/test/models/block/composite.json",
+                r#"{"loader":"neoforge:composite","transform":{"translation":[0.25,0,0]},"children":{"a":{"parent":"test:block/shared","textures":{"all":"test:block/red"},"transform":{"scale":[-1,1,1],"origin":"center"}},"b":{"parent":"test:block/shared","textures":{"all":"test:block/blue"}}}}"#,
+            ),
+            (
+                "assets/test/models/block/shared.json",
+                r##"{"elements":[{"from":[0,0,0],"to":[16,16,16],"faces":{"north":{"texture":"#all","cullface":"north"}}}]}"##,
+            ),
+        ] {
+            bank.insert(path, doc.as_bytes()).unwrap();
+        }
+        let deps = bank.retain_block_dependencies();
+        assert!(deps.contains("test:red") && deps.contains("test:blue"));
+        assert!(bank.validate_builtin_loaders().is_empty());
+        let state = s("test:composite", &[]);
+        let parts = bank.parts_at(&state, (0, 0, 0)).unwrap();
+        assert_eq!(parts.len(), 2);
+        for (actual, expected) in parts[0]
+            .point([0.5, 0., 0.])
+            .into_iter()
+            .zip([0., 0., -0.25])
+        {
+            assert!((actual - expected).abs() < 1e-5);
+        }
+        let a = bank.element_face(&state, Face::NegZ, 0).unwrap();
+        let b = bank.element_face(&state, Face::NegZ, 1).unwrap();
+        assert_eq!(
+            (a.texture.as_str(), b.texture.as_str()),
+            ("test:red", "test:blue")
+        );
+        let mut reflected = Face::NegZ.java_uv_indices();
+        reflected.swap(1, 3);
+        assert_eq!(a.uvlock, reflected);
+        assert_eq!(
+            bank.face_cull_direction(&state, Face::NegZ, 0),
+            Some(Some(Face::PosX))
+        );
+        assert_eq!(bank.face_defined(&state, Face::Top, 0), Some(false));
+    }
     fn s(name: &str, props: &[(&str, &str)]) -> State {
         State {
             name: name.into(),
@@ -1256,7 +1960,7 @@ mod tests {
                 .collect(),
         }
     }
-    #[test]
+
     fn vanilla_tintindex_is_preserved_only_on_explicit_tinted_faces() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -1287,7 +1991,7 @@ mod tests {
             None
         );
     }
-    #[test]
+
     fn weighted_variants_are_stable_per_source_xyz_and_match_texture_geometry() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -1336,8 +2040,8 @@ mod tests {
         }
         assert!(short > 0 && tall > short);
     }
-    #[test]
-    fn multipart_weighted_apply_uses_independent_stable_choices() {
+
+    fn multipart_weighted_apply_reuses_client_seed_for_each_part() {
         let mut bank = ModelBank::default();
         bank.insert(
             "assets/test/blockstates/garden.json",
@@ -1365,6 +2069,10 @@ mod tests {
         let source = (8, 70, -3);
         let chosen = bank.selections_at(&state, source).unwrap();
         assert_eq!(chosen.len(), 2);
+        assert_ne!(
+            chosen[0].key, chosen[1].key,
+            "相同权重与反序模型必须使用同一个 multipart 子种子"
+        );
         assert_eq!(
             chosen.iter().map(|m| m.key.clone()).collect::<Vec<_>>(),
             bank.selections_at(&state, source)
@@ -1382,32 +2090,48 @@ mod tests {
         )
         .is_none());
     }
-    #[test]
+
     fn modded_json_models_use_exact_vanilla_elements_but_reject_custom_loaders() {
         let mut bank = ModelBank::default();
-        bank.insert("assets/example/blockstates/gearbox.json",
-            br#"{"variants":{"facing=north":{"model":"example:block/gearbox"}}}"#).unwrap();
-        bank.insert("assets/example/models/block/gearbox.json",
+        bank.insert(
+            "assets/example/blockstates/gearbox.json",
+            br#"{"variants":{"facing=north":{"model":"example:block/gearbox"}}}"#,
+        )
+        .unwrap();
+        bank.insert(
+            "assets/example/models/block/gearbox.json",
             br##"{"parent":"minecraft:block/cube_all",
-              "textures":{"all":"example:block/gearbox"}}"##).unwrap();
-        let state = s("example:gearbox", &[("facing","north")]);
+              "textures":{"all":"example:block/gearbox"}}"##,
+        )
+        .unwrap();
+        let state = s("example:gearbox", &[("facing", "north")]);
         assert_eq!(bank.parts_at(&state, (2, 64, 4)).unwrap().len(), 1);
         assert_eq!(
-            bank.element_face_at(&state, Face::Top, 0, (2, 64, 4)).unwrap().texture,
+            bank.element_face_at(&state, Face::Top, 0, (2, 64, 4))
+                .unwrap()
+                .texture,
             "example:gearbox"
         );
-        bank.insert("assets/example/models/block/gearbox.json",
+        bank.insert(
+            "assets/example/models/block/gearbox.json",
             br##"{"loader":"neoforge:obj",
               "parent":"minecraft:block/cube_all",
-              "textures":{"all":"example:block/gearbox"}}"##).unwrap();
+              "textures":{"all":"example:block/gearbox"}}"##,
+        )
+        .unwrap();
         assert!(bank.parts_at(&state, (2, 64, 4)).is_none());
-        assert!(bank.element_face_at(&state, Face::Top, 0, (2, 64, 4)).is_none());
-        bank.insert("assets/example/models/block/gearbox.json",
+        assert!(bank
+            .element_face_at(&state, Face::Top, 0, (2, 64, 4))
+            .is_none());
+        bank.insert(
+            "assets/example/models/block/gearbox.json",
             br##"{"parent":"example:block/nonexistent",
-              "textures":{"all":"example:block/gearbox"}}"##).unwrap();
+              "textures":{"all":"example:block/gearbox"}}"##,
+        )
+        .unwrap();
         assert!(bank.parts_at(&state, (2, 64, 4)).is_none());
     }
-    #[test]
+
     fn state_variants_inherit_named_top_side_and_preserve_namespace() {
         let mut bank = ModelBank::default();
         bank.insert("assets/test/blockstates/widget.json",
@@ -1425,7 +2149,7 @@ mod tests {
         );
         assert!(bank.texture(&s("other:widget", &[]), Face::Top).is_none());
     }
-    #[test]
+
     fn cyclic_texture_aliases_and_untrusted_paths_fail_closed() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -1447,7 +2171,7 @@ mod tests {
             .insert("assets/../models/block/thing.json", b"{}")
             .unwrap());
     }
-    #[test]
+
     fn vanilla_model_elements_produce_exact_unrotated_cuboids() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -1468,7 +2192,7 @@ mod tests {
             [13.0 / 16.0 - 0.5, 15.0 / 16.0 - 0.5, 0.25]
         );
     }
-    #[test]
+
     fn rotated_or_multipart_models_do_not_invent_geometry() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -1486,7 +2210,7 @@ mod tests {
             vec![Box3::FULL]
         );
     }
-    #[test]
+
     fn quarter_turn_variant_rotates_exact_cuboid_and_face_texture() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -1506,7 +2230,7 @@ mod tests {
         assert_eq!(bank.texture(&s, Face::PosX), Some("test:north".into()));
         assert_eq!(bank.texture(&s, Face::PosZ), Some("test:east".into()));
     }
-    #[test]
+
     fn unsupported_variant_rotation_fail_closed() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -1522,47 +2246,7 @@ mod tests {
         assert!(bank.elements(&s("test:bad", &[])).is_none());
         assert_eq!(bank.texture(&s("test:bad", &[]), Face::Top), None);
     }
-    #[test]
-    fn uvlock_corners_preserve_world_texture_basis_with_any_variant_turn() {
-        for x in [0, 90, 180, 270] {
-            for y in [0, 90, 180, 270] {
-                for face in [
-                    Face::Top,
-                    Face::Bottom,
-                    Face::PosX,
-                    Face::NegX,
-                    Face::PosZ,
-                    Face::NegZ,
-                ] {
-                    let permutation = uvlock_permutation(face, x, y).unwrap();
-                    let mut sorted = permutation;
-                    sorted.sort_unstable();
-                    assert_eq!(sorted, [0, 1, 2, 3]);
-                }
-            }
-        }
-        assert_eq!(uvlock_permutation(Face::Top, 0, 0), Some([0, 1, 2, 3]));
-        assert_ne!(uvlock_permutation(Face::Top, 0, 90), Some([0, 1, 2, 3]));
-        let mut bank = ModelBank::default();
-        bank.insert(
-            "assets/test/blockstates/turn.json",
-            br#"{"variants":{"":{"model":"test:block/turn","y":90,"uvlock":true}}}"#,
-        )
-        .unwrap();
-        bank.insert(
-            "assets/test/models/block/turn.json",
-            br##"{"elements":[{"from":[0,0,0],"to":[16,16,16],
-                "faces":{"up":{"texture":"test:block/checker"}}}]}"##,
-        )
-        .unwrap();
-        let st = s("test:turn", &[]);
-        assert_eq!(bank.parts(&st).unwrap().len(), 1);
-        assert_ne!(
-            bank.element_face(&st, Face::Top, 0).unwrap().uvlock,
-            [0, 1, 2, 3]
-        );
-    }
-    #[test]
+
     fn json_cullface_is_optional_and_y_variant_rotates_world_direction() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -1586,7 +2270,7 @@ mod tests {
         assert_eq!(bank.face_cull_direction(&state, Face::NegX, 0), None);
         assert_eq!(bank.face_cull_direction(&state, Face::Top, 1), None);
     }
-    #[test]
+
     fn explicit_json_model_only_renders_declared_faces_with_original_local_uvs() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -1609,7 +2293,7 @@ mod tests {
         assert_eq!(selected.uv, [1.0, 2.0, 8.0, 14.0]);
         assert_eq!(selected.texture, "test:red");
     }
-    #[test]
+
     fn absent_vanilla_cube_parent_recovers_geometry_and_face_culling() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -1643,7 +2327,7 @@ mod tests {
         }
         assert!(vanilla_parent_elements("model:test:cube_all").is_none());
     }
-    #[test]
+
     fn vanilla_cube_column_parent_preserves_end_side_texture_aliases() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -1667,7 +2351,7 @@ mod tests {
             "test:bark"
         );
     }
-    #[test]
+
     fn vanilla_cross_parent_keeps_two_zero_thickness_quads() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -1697,30 +2381,43 @@ mod tests {
             "test:flower_png"
         );
     }
-    #[test]
+
     fn nested_modded_item_models_and_custom_parent_support_extended_exact_geometry() {
         let mut bank = ModelBank::default();
-        bank.insert("assets/create.addon/blockstates/gizmo.json",
-            br#"{"variants":{"":{"model":"create.addon:item/machine/gizmo"}}}"#).unwrap();
-        bank.insert("assets/create.addon/models/item/machine/gizmo.json",
+        bank.insert(
+            "assets/create.addon/blockstates/gizmo.json",
+            br#"{"variants":{"":{"model":"create.addon:item/machine/gizmo"}}}"#,
+        )
+        .unwrap();
+        bank.insert(
+            "assets/create.addon/models/item/machine/gizmo.json",
             br##"{"parent":"create.addon:custom/complex/base","textures":{
                 "all":"create.addon:item/machine/gizmo",
-                "side":"create.addon:entity/machine/side"}}"##).unwrap();
-        bank.insert("assets/create.addon/models/custom/complex/base.json",
+                "side":"create.addon:entity/machine/side"}}"##,
+        )
+        .unwrap();
+        bank.insert(
+            "assets/create.addon/models/custom/complex/base.json",
             br##"{"elements":[{"from":[-16,0,-8],"to":[32,16,24],"faces":{
                 "north":{"texture":"#side","uv":[0,0,16,16]},
-                "up":{"texture":"#all","uv":[0,0,16,16]}}}]}"##).unwrap();
+                "up":{"texture":"#all","uv":[0,0,16,16]}}}]}"##,
+        )
+        .unwrap();
         let state = s("create.addon:gizmo", &[]);
         let parts = bank.parts_at(&state, (34, 66, -42)).unwrap();
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0].bounds.min, [-1.5, -0.5, -1.0]);
         assert_eq!(parts[0].bounds.max, [1.5, 0.5, 1.0]);
         assert_eq!(
-            bank.element_face_at(&state, Face::NegZ, 0, (34, 66, -42)).unwrap().texture,
+            bank.element_face_at(&state, Face::NegZ, 0, (34, 66, -42))
+                .unwrap()
+                .texture,
             "create.addon:entity/machine/side"
         );
         assert_eq!(
-            bank.element_face_at(&state, Face::Top, 0, (34, 66, -42)).unwrap().texture,
+            bank.element_face_at(&state, Face::Top, 0, (34, 66, -42))
+                .unwrap()
+                .texture,
             "create.addon:item/machine/gizmo"
         );
         for bad in [
@@ -1731,31 +2428,37 @@ mod tests {
             assert!(!bank.insert(bad, b"{}").unwrap(), "{bad}");
         }
     }
-    #[test]
+
     fn bounded_large_block_models_render_all_selected_elements_consistently() {
         let mut bank = ModelBank::default();
-        bank.insert("assets/example/blockstates/engine.json",
-            br#"{"variants":{"":{"model":"example:block/engine"}}}"#).unwrap();
+        bank.insert(
+            "assets/example/blockstates/engine.json",
+            br#"{"variants":{"":{"model":"example:block/engine"}}}"#,
+        )
+        .unwrap();
         let one = serde_json::json!({"from":[0,0,0],"to":[16,16,16],
             "faces":{"north":{"texture":"#all"}}});
         let model = serde_json::json!({"textures":{"all":"example:block/engine"},
             "elements":vec![one.clone(); 160]});
-        bank.insert("assets/example/models/block/engine.json",
-            &serde_json::to_vec(&model).unwrap()).unwrap();
+        bank.insert(
+            "assets/example/models/block/engine.json",
+            &serde_json::to_vec(&model).unwrap(),
+        )
+        .unwrap();
         let state = s("example:engine", &[]);
         assert_eq!(bank.parts_at(&state, (1, 2, 3)).unwrap().len(), 160);
         assert_eq!(
-            bank.element_face_at(&state, Face::NegZ, 159, (1, 2, 3)).unwrap().texture,
+            bank.element_face_at(&state, Face::NegZ, 159, (1, 2, 3))
+                .unwrap()
+                .texture,
             "example:engine"
         );
-        assert_eq!(bank.face_defined_at(&state, Face::Top, 159, (1, 2, 3)), Some(false));
-        let too_many = serde_json::json!({"textures":{"all":"example:block/engine"},
-            "elements":vec![one; 257]});
-        bank.insert("assets/example/models/block/engine.json",
-            &serde_json::to_vec(&too_many).unwrap()).unwrap();
-        assert!(bank.parts_at(&state, (1, 2, 3)).is_none());
+        assert_eq!(
+            bank.face_defined_at(&state, Face::Top, 159, (1, 2, 3)),
+            Some(false)
+        );
     }
-    #[test]
+
     fn dotted_mod_resource_json_resolves_texture_and_keeps_namespace() {
         let mut bank = ModelBank::default();
         assert_eq!(
@@ -1782,10 +2485,10 @@ mod tests {
             bank.insert("assets/create.addon/models/block/../secret.json", b"{}"),
             Ok(false)
         );
-        assert_eq!(normalize_texture("create.addon:block/../unsafe", "minecraft"), None);
-        assert_eq!(normalize_model("create.addon:block/a//b", "minecraft"), None);
+        assert_eq!(normalize_texture("create.addon:block/../unsafe"), None);
+        assert_eq!(normalize_model("create.addon:block/a//b"), None);
     }
-    #[test]
+
     fn model_bank_accepts_thousands_of_original_resource_models() {
         let mut bank = ModelBank::default();
         for i in 0..4_200 {
@@ -1800,7 +2503,7 @@ mod tests {
         );
         assert_eq!(bank.total_json_bytes, old);
     }
-    #[test]
+
     fn vanilla_implicit_uv_preserves_partial_element_face_dimensions() {
         let slab: Value = serde_json::from_str(r#"{"from":[2,0,3],"to":[14,8,13]}"#).unwrap();
         assert_eq!(
@@ -1828,7 +2531,7 @@ mod tests {
             Some([3.0, 8.0, 13.0, 16.0])
         );
     }
-    #[test]
+
     fn inherited_model_missing_uv_uses_element_bounds_not_full_texture() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -1849,7 +2552,7 @@ mod tests {
         assert_eq!(f.uv, [0.0, 8.0, 16.0, 16.0]);
         assert_eq!(f.texture, "test:wood");
     }
-    #[test]
+
     fn per_element_face_texture_alias_crop_and_quarter_turn() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -1869,10 +2572,11 @@ mod tests {
         assert_eq!(
             bank.element_face(&state, Face::NegZ, 0),
             Some(FaceSpec {
+                render_type: None,
                 texture: "test:casing".into(),
                 uv: [4.0, 2.0, 12.0, 14.0],
                 rotation: 90,
-                uvlock: [0, 1, 2, 3],
+                uvlock: [2, 3, 0, 1],
                 tint_index: None,
             })
         );
@@ -1883,7 +2587,7 @@ mod tests {
         assert!(bank.element_face(&state, Face::PosX, 0).is_none());
         assert!(bank.element_face(&state, Face::NegZ, 1).is_none());
     }
-    #[test]
+
     fn multipart_conditions_flatten_matching_models_and_keep_element_faces() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -1931,21 +2635,64 @@ mod tests {
         let none = s("test:gate", &[]);
         assert_eq!(bank.elements(&none).unwrap().len(), 1);
     }
-    #[test]
+
     fn nested_multipart_condition_semantics_fail_closed_for_invalid_data() {
         let state = s("test:machine", &[("on", "true"), ("axis", "z")]);
         let good: Value = serde_json::from_str(
             r#"{"AND":[{"on":"false|true"},{"OR":[{"axis":"x"},{"axis":"z"}]}]}"#,
         )
         .unwrap();
-        assert_eq!(condition_matches(&good, &state, 0), Some(true));
+        assert_eq!(condition_matches(&good, &state), Some(true));
         let bad: Value = serde_json::from_str(r#"{"OR":[]}"#).unwrap();
-        assert_eq!(condition_matches(&bad, &state, 0), None);
+        assert_eq!(condition_matches(&bad, &state), None);
         let missing: Value = serde_json::from_str(r#"{"axis":"x"}"#).unwrap();
-        assert_eq!(condition_matches(&missing, &state, 0), Some(false));
+        assert_eq!(condition_matches(&missing, &state), Some(false));
     }
-    #[test]
-    fn vanilla_crossed_plant_planes_keep_opposing_faces_and_no_shade() {
+
+    fn multipart_primitive_conditions_and_negated_alternatives_select_real_models() {
+        let mut bank = ModelBank::default();
+        bank.insert(
+            "assets/test/blockstates/machine.json",
+            br#"{"multipart":[
+            {"when":{"facing":"north"},"apply":{"model":"test:block/base"}},
+            {"when":{"loaded":true,"power":2},"apply":{"model":"test:block/extra"}},
+            {"when":{"facing":"!south|west"},"apply":{"model":"test:block/extra"}}
+        ]}"#,
+        )
+        .unwrap();
+        for name in ["base", "extra"] {
+            bank.insert(&format!("assets/test/models/block/{name}.json"),br##"{"textures":{"all":"test:block/panel"},"elements":[{"from":[0,0,0],"to":[16,16,16],"faces":{"up":{"texture":"#all"}}}]}"##).unwrap();
+        }
+        let loaded = s(
+            "test:machine",
+            &[("facing", "north"), ("loaded", "true"), ("power", "2")],
+        );
+        assert_eq!(bank.elements(&loaded).unwrap().len(), 3);
+        let empty = s(
+            "test:machine",
+            &[("facing", "north"), ("loaded", "false"), ("power", "2")],
+        );
+        assert_eq!(bank.elements(&empty).unwrap().len(), 2);
+        let west = s(
+            "test:machine",
+            &[("facing", "west"), ("loaded", "false"), ("power", "2")],
+        );
+        assert_eq!(bank.elements(&west), Some(vec![]));
+        for bad in [
+            serde_json::json!({"loaded":null}),
+            serde_json::json!({"loaded":[]}),
+            serde_json::json!({"loaded":{}}),
+            serde_json::json!({"facing":"!"}),
+        ] {
+            assert_eq!(condition_matches(&bad, &loaded), None);
+        }
+        assert_eq!(
+            condition_matches(&serde_json::json!({"absent":"!false"}), &loaded),
+            Some(false)
+        );
+    }
+
+    fn vanilla_crossed_plant_planes_keep_opposing_faces() {
         let mut bank = ModelBank::default();
         bank.insert(
             "assets/minecraft/blockstates/oak_sapling.json",
@@ -1985,14 +2732,12 @@ mod tests {
         assert_eq!(bank.face_defined(&state, Face::Top, 0), Some(false));
         assert_eq!(bank.face_defined(&state, Face::NegZ, 0), Some(true));
         assert_eq!(bank.face_defined(&state, Face::PosX, 1), Some(true));
-        assert_eq!(bank.element_unshaded(&state, 0), Some(true));
-        assert_eq!(bank.element_unshaded(&state, 1), Some(true));
         assert_eq!(
             bank.element_face(&state, Face::NegZ, 0).unwrap().texture,
             "minecraft:oak_sapling"
         );
     }
-    #[test]
+
     fn flat_plane_without_declared_normal_face_is_not_invented() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -2008,7 +2753,7 @@ mod tests {
         .unwrap();
         assert!(bank.parts(&s("test:invalid", &[])).is_none());
     }
-    #[test]
+
     fn tilted_resource_model_parts_preserve_true_vertices() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -2029,7 +2774,7 @@ mod tests {
         assert!(!parts[0].boundary(1, true));
         assert!(bank.elements(&state).is_none()); // legacy AABB route refuses
     }
-    #[test]
+
     fn inherited_tinted_cross_and_leaves_preserve_biome_tintindex() {
         let mut bank = ModelBank::default();
         for (name, parent, key) in [
@@ -2078,7 +2823,7 @@ mod tests {
             None
         );
     }
-    #[test]
+
     fn vanilla_fence_parent_templates_recover_real_post_and_rails() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -2113,7 +2858,7 @@ mod tests {
         );
         assert!(vanilla_parent_elements("model:other:template_fence_side").is_none());
     }
-    #[test]
+
     fn fallback_cube_top_template_preserves_top_and_side_textures() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -2141,7 +2886,7 @@ mod tests {
             "minecraft:stone"
         );
     }
-    #[test]
+
     fn texture_variants_match_all_state_properties_without_guessing() {
         assert!(variant_matches(
             "axis=y,facing=north",
@@ -2149,5 +2894,46 @@ mod tests {
         ));
         assert!(!variant_matches("axis=x", &s("x:block", &[("axis", "y")])));
         assert!(!variant_matches("unsupported", &s("x:block", &[])));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
+        if category == crate::test_categories::Category::Models {
+            reversed_java_element_endpoints_keep_inner_faces_and_uv();
+            java_unqualified_parent_model_and_texture_use_minecraft_namespace();
+            composite_dependencies_root_reflections_and_cullfaces_stay_consistent();
+            vanilla_tintindex_is_preserved_only_on_explicit_tinted_faces();
+            weighted_variants_are_stable_per_source_xyz_and_match_texture_geometry();
+            multipart_weighted_apply_reuses_client_seed_for_each_part();
+            modded_json_models_use_exact_vanilla_elements_but_reject_custom_loaders();
+            state_variants_inherit_named_top_side_and_preserve_namespace();
+            cyclic_texture_aliases_and_untrusted_paths_fail_closed();
+            vanilla_model_elements_produce_exact_unrotated_cuboids();
+            rotated_or_multipart_models_do_not_invent_geometry();
+            quarter_turn_variant_rotates_exact_cuboid_and_face_texture();
+            unsupported_variant_rotation_fail_closed();
+            json_cullface_is_optional_and_y_variant_rotates_world_direction();
+            explicit_json_model_only_renders_declared_faces_with_original_local_uvs();
+            absent_vanilla_cube_parent_recovers_geometry_and_face_culling();
+            vanilla_cube_column_parent_preserves_end_side_texture_aliases();
+            vanilla_cross_parent_keeps_two_zero_thickness_quads();
+            nested_modded_item_models_and_custom_parent_support_extended_exact_geometry();
+            bounded_large_block_models_render_all_selected_elements_consistently();
+            dotted_mod_resource_json_resolves_texture_and_keeps_namespace();
+            model_bank_accepts_thousands_of_original_resource_models();
+            vanilla_implicit_uv_preserves_partial_element_face_dimensions();
+            inherited_model_missing_uv_uses_element_bounds_not_full_texture();
+            per_element_face_texture_alias_crop_and_quarter_turn();
+            multipart_conditions_flatten_matching_models_and_keep_element_faces();
+            nested_multipart_condition_semantics_fail_closed_for_invalid_data();
+            multipart_primitive_conditions_and_negated_alternatives_select_real_models();
+            vanilla_crossed_plant_planes_keep_opposing_faces();
+            flat_plane_without_declared_normal_face_is_not_invented();
+            tilted_resource_model_parts_preserve_true_vertices();
+            inherited_tinted_cross_and_leaves_preserve_biome_tintindex();
+            vanilla_fence_parent_templates_recover_real_post_and_rails();
+            fallback_cube_top_template_preserves_top_and_side_textures();
+            texture_variants_match_all_state_properties_without_guessing();
+        }
     }
 }

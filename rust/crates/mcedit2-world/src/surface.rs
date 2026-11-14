@@ -6,7 +6,339 @@ use crate::block_lookup::ReadOnlyRegionCache;
 use crate::editing::Session;
 use crate::sections::{Chunk, State};
 use crate::WorldError;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
+
+pub(crate) fn staged_metadata(
+    session: &Session,
+    cx: i32,
+    cz: i32,
+) -> Result<(Option<Chunk>, Option<Chunk>), WorldError> {
+    let decode = |bytes: Option<&[u8]>| -> Result<Option<Chunk>, WorldError> {
+        bytes
+            .map(|raw| {
+                crate::sections::decode_sections(raw)
+                    .map_err(|e| WorldError::Invalid(format!("暂存区块元数据无效：{e}")))
+            })
+            .transpose()
+    };
+    Ok((
+        decode(session.staged_biome_chunk(cx, cz)?)?,
+        decode(session.staged_be_chunk(cx, cz)?)?,
+    ))
+}
+
+pub(crate) fn staged_metadata_cached(
+    session: &Session,
+    reader: &mut ReadOnlyRegionCache<'_>,
+    cx: i32,
+    cz: i32,
+) -> Result<(Option<Chunk>, Option<Chunk>), WorldError> {
+    let decode = |bytes: Option<&[u8]>| -> Result<Option<Chunk>, WorldError> {
+        bytes
+            .map(|raw| {
+                crate::sections::decode_sections(raw)
+                    .map_err(|e| WorldError::Invalid(format!("暂存区块元数据无效：{e}")))
+            })
+            .transpose()
+    };
+    let biome = decode(session.staged_biome_chunk_cached(reader, cx, cz)?)?;
+    let be = decode(session.staged_be_chunk_cached(reader, cx, cz)?)?;
+    Ok((biome, be))
+}
+
+/// 一圈颜色邻域仅复制 biome 调色板，暂存 biome 优先；隐藏格不进入显示或拾取数组。
+fn inspect_biomes(
+    session: &Session,
+    reader: &mut ReadOnlyRegionCache<'_>,
+    chunks: &mut BTreeMap<(i32, i32), Option<Arc<Chunk>>>,
+    metadata: &BTreeMap<(i32, i32), (Option<Chunk>, Option<Chunk>)>,
+    coordinates: impl Iterator<Item = (i32, i32)>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Arc<crate::biome_source::Region>, WorldError> {
+    let mut region = crate::biome_source::Region::new(session.original_world().seed);
+    match session
+        .original_world()
+        .world_data
+        .geometry(session.dimension())
+    {
+        Ok(geometry) => region.set_geometry(geometry),
+        Err(error) => log::error!(
+            "[biome] {}：{error}；不钳制未知的维度高度",
+            session.dimension()
+        ),
+    }
+    let mut halo = std::collections::BTreeSet::new();
+    for (cx, cz) in coordinates {
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                halo.insert((cx + dx, cz + dz));
+            }
+        }
+    }
+    for (cx, cz) in halo {
+        if cancelled() {
+            return Err(refuse("biome 颜色邻域读取已取消"));
+        }
+        if let std::collections::btree_map::Entry::Vacant(entry) = chunks.entry((cx, cz)) {
+            entry.insert(session.visible_chunk_base_shared_cached(reader, cx, cz)?.0);
+        }
+        let Some(chunk) = chunks.get(&(cx, cz)).and_then(Option::as_ref) else {
+            continue;
+        };
+        let staged;
+        let biome = if let Some((biome, _)) = metadata.get(&(cx, cz)) {
+            biome.as_ref().unwrap_or(chunk)
+        } else {
+            staged = session
+                .staged_biome_chunk_cached(reader, cx, cz)?
+                .map(crate::sections::decode_sections)
+                .transpose()
+                .map_err(|error| refuse(format!("暂存 biome 邻域无效：{error}")))?;
+            staged.as_ref().unwrap_or(chunk)
+        };
+        region.insert(cx, cz, crate::biome_source::Column::from_chunk(biome)?);
+    }
+    Ok(Arc::new(region))
+}
+
+/// 工具的材质预览读取真实颜色邻域，沿用地形的暂存优先与维度高度解释。
+pub fn inspect_biome_region(
+    session: &Session,
+    bounds: crate::editing::Bounds,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Arc<crate::biome_source::Region>, WorldError> {
+    let coordinates = (bounds.minimum[0].div_euclid(16)..=bounds.maximum[0].div_euclid(16))
+        .flat_map(|cx| {
+            (bounds.minimum[2].div_euclid(16)..=bounds.maximum[2].div_euclid(16))
+                .map(move |cz| (cx, cz))
+        });
+    inspect_biome_chunks(session, coordinates, cancelled)
+}
+
+/// 稀疏动态模型只读取实际源区块及其颜色邻域，避免用包围盒扩展为整片世界。
+pub fn inspect_biome_chunks(
+    session: &Session,
+    coordinates: impl Iterator<Item = (i32, i32)>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Arc<crate::biome_source::Region>, WorldError> {
+    let mut reader = session.source_reader()?;
+    inspect_biomes(
+        session,
+        &mut reader,
+        &mut BTreeMap::new(),
+        &BTreeMap::new(),
+        coordinates,
+        cancelled,
+    )
+}
+
+/// 仅流体窗口读取一圈原始邻块；隐藏格只参与高度查询，不进入显示 / 拾取数组。
+pub(crate) fn inspect_fluid_geometry(
+    session: &Session,
+    reader: &mut ReadOnlyRegionCache<'_>,
+    chunks: &mut BTreeMap<(i32, i32), Option<Arc<Chunk>>>,
+    voxels: &mut [SurfaceVoxel],
+    visibility: &mut dyn crate::surface_visibility::Visibility,
+    clip: Option<crate::editing::Bounds>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(), WorldError> {
+    use crate::surface_visibility::Cell;
+    let mut has_fluid = false;
+    for (index, voxel) in voxels.iter().enumerate() {
+        if index.is_multiple_of(256) && cancelled() {
+            return Err(refuse("流体源分类已取消"));
+        }
+        let cell = Cell {
+            state: &voxel.state,
+            kind: voxel.kind,
+            position: (voxel.x, voxel.y, voxel.z),
+        };
+        if matches!(
+            visibility.fluid_sample(cell)?,
+            crate::fluid_surface::Sample::Fluid(..)
+        ) {
+            has_fluid = true;
+            break;
+        }
+    }
+    if !has_fluid {
+        return Ok(());
+    }
+    let mut halo = std::collections::BTreeSet::new();
+    for &(cx, cz) in chunks.keys() {
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                halo.insert((cx + dx, cz + dz));
+            }
+        }
+    }
+    for key in halo {
+        if cancelled() {
+            return Err(refuse("流体源邻域读取已取消"));
+        }
+        if let std::collections::btree_map::Entry::Vacant(entry) = chunks.entry(key) {
+            let (chunk, _) = session.visible_chunk_base_shared_cached(reader, key.0, key.1)?;
+            entry.insert(chunk);
+        }
+    }
+    let mut fluid_palette = VoxelPalette::default();
+    for (index, voxel) in voxels.iter_mut().enumerate() {
+        if index.is_multiple_of(256) && cancelled() {
+            return Err(refuse("流体角点查询已取消"));
+        }
+        let cell = Cell {
+            state: &voxel.state,
+            kind: voxel.kind,
+            position: (voxel.x, voxel.y, voxel.z),
+        };
+        if !matches!(
+            visibility.fluid_sample(cell)?,
+            crate::fluid_surface::Sample::Fluid(..)
+        ) {
+            fluid_palette.replace_fluid(voxel, None);
+            continue;
+        }
+        let available =
+            crate::surface_visibility::available_fluid_faces(cell.position, clip, |cx, cz| {
+                chunks.get(&(cx, cz)).and_then(Option::as_ref).is_some()
+            });
+        let fluid = crate::surface_visibility::fluid_surface(
+            visibility,
+            cell,
+            available,
+            clip,
+            &mut |(x, y, z)| {
+                chunks
+                    .get(&(x.div_euclid(16), z.div_euclid(16)))
+                    .and_then(Option::as_ref)
+                    .and_then(|chunk| {
+                        crate::surface_visibility::fluid_state(
+                            chunk,
+                            x.rem_euclid(16) as u8,
+                            y,
+                            z.rem_euclid(16) as u8,
+                        )
+                    })
+                    .map(|state| {
+                        let state = session.effective_state_ref((x, y, z), state);
+                        Cell {
+                            state,
+                            kind: material(state),
+                            position: (x, y, z),
+                        }
+                    })
+            },
+        )?;
+        fluid_palette.replace_fluid(voxel, fluid);
+    }
+    Ok(())
+}
+
+/// 每份只读源或结构预览共享状态、群系与流体形状；复制体素只增加引用计数。
+#[derive(Default)]
+pub struct VoxelPalette {
+    states: HashSet<Arc<State>>,
+    biomes: HashSet<crate::shared_text::SharedText>,
+    fluids: HashSet<Arc<crate::fluid_surface::FluidSurface>>,
+    descriptors: HashMap<DescriptorKey, Arc<VoxelData>>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct DescriptorKey {
+    state: usize,
+    biome: usize,
+    fluid: usize,
+    flags: u32,
+    light: crate::saved_light::Samples,
+}
+impl DescriptorKey {
+    fn of(data: &VoxelData) -> Self {
+        Self {
+            state: Arc::as_ptr(&data.state) as usize,
+            biome: data.biome.as_ref().map_or(0, |name| name.allocation_id()),
+            fluid: data
+                .fluid
+                .as_ref()
+                .map_or(0, |fluid| Arc::as_ptr(fluid) as usize),
+            light: data.light,
+            flags: u32::from(data.faces)
+                | (data.kind as u32) << 8
+                | u32::from(data.staged) << 16
+                | u32::from(data.original_block_entity) << 17
+                | u32::from(data.span) << 24,
+        }
+    }
+}
+impl VoxelPalette {
+    /// 只有新描述才分配对象；位置不参与描述身份，原始格与源归属仍逐格保存。
+    pub fn voxel(&mut self, position: [i32; 3], data: VoxelData) -> SurfaceVoxel {
+        let descriptor = self
+            .descriptors
+            .entry(DescriptorKey::of(&data))
+            .or_insert_with(|| Arc::new(data));
+        SurfaceVoxel {
+            x: position[0],
+            y: position[1],
+            z: position[2],
+            descriptor: Arc::clone(descriptor),
+        }
+    }
+    /// 修正临时显示属性时按完整结果复用，保留输入快照及其源状态。
+    pub fn updated(
+        &mut self,
+        voxel: &SurfaceVoxel,
+        edit: impl FnOnce(&mut VoxelData),
+    ) -> SurfaceVoxel {
+        let mut data = voxel.data().clone();
+        edit(&mut data);
+        self.voxel([voxel.x, voxel.y, voxel.z], data)
+    }
+    pub fn replace_fluid(
+        &mut self,
+        voxel: &mut SurfaceVoxel,
+        fluid: Option<crate::fluid_surface::FluidSurface>,
+    ) {
+        if voxel.fluid_surface() == fluid {
+            return;
+        }
+        let fluid = self.fluid(fluid);
+        *voxel = self.updated(voxel, |data| data.fluid = fluid);
+    }
+    /// 位级相同的显示形状共享一份数据；所有角点、流向、面掩码及 overlay 均参与身份。
+    pub fn fluid(
+        &mut self,
+        surface: Option<crate::fluid_surface::FluidSurface>,
+    ) -> Option<Arc<crate::fluid_surface::FluidSurface>> {
+        surface.map(|surface| {
+            if let Some(shared) = self.fluids.get(&surface) {
+                return Arc::clone(shared);
+            }
+            let shared = Arc::new(surface);
+            self.fluids.insert(Arc::clone(&shared));
+            shared
+        })
+    }
+    /// 按真实状态值共享，调用方的可编辑状态始终独立。
+    pub fn state(&mut self, state: &State) -> Arc<State> {
+        if let Some(shared) = self.states.get(state) {
+            return Arc::clone(shared);
+        }
+        let shared = Arc::new(state.clone());
+        self.states.insert(Arc::clone(&shared));
+        shared
+    }
+    /// 保留缺失群系语义，只共享实际存在的名称。
+    pub fn biome(&mut self, biome: Option<&str>) -> Option<crate::shared_text::SharedText> {
+        biome.map(|name| {
+            if let Some(shared) = self.biomes.get(name) {
+                return shared.clone();
+            }
+            let shared: crate::shared_text::SharedText = name.into();
+            self.biomes.insert(shared.clone());
+            shared
+        })
+    }
+}
 
 fn refuse(s: impl Into<String>) -> WorldError {
     WorldError::Invalid(s.into())
@@ -29,8 +361,7 @@ fn validate_view(width: u8, depth: u8, y_min: i32, y_max: i32) -> Result<(), Wor
         || width > MAX_VIEW_XZ
         || depth == 0
         || depth > MAX_VIEW_XZ
-        || height < 1
-        || height > MAX_VIEW_Y
+        || !(1..=MAX_VIEW_Y).contains(&height)
         || width as u64 * depth as u64 * height as u64 > MAX_VIEW_CELLS
     {
         return Err(refuse(
@@ -48,7 +379,9 @@ pub enum VoxelMaterial {
 }
 pub fn material(state: &State) -> VoxelMaterial {
     let n = state.name.as_str();
-    if n == "minecraft:water" || n == "minecraft:lava" {
+    if matches!(n, "minecraft:packed_ice" | "minecraft:blue_ice") {
+        VoxelMaterial::Solid
+    } else if crate::fluid_surface::is_named_fluid(state) {
         VoxelMaterial::Liquid
     } else if n.contains("glass") || n.ends_with(":ice") || n.ends_with("_ice") {
         VoxelMaterial::Transparent
@@ -117,6 +450,8 @@ pub fn known_full_occluder(state: &State) -> bool {
     matches!(
         n,
         "stone"
+            | "packed_ice"
+            | "blue_ice"
             | "deepslate"
             | "cobblestone"
             | "mossy_cobblestone"
@@ -173,6 +508,18 @@ pub fn exact_face_exposed_against(
     match neighbor {
         None => true,
         Some((n, _)) if is_air(n) => true,
+        Some((n, _)) if crate::native_material::skip_same(state, n) => false,
+        Some((n, _))
+            if kind == VoxelMaterial::Liquid
+                && crate::fluid_surface::kind(state)
+                    .is_some_and(|kind| Some(kind) == crate::fluid_surface::kind(n)) =>
+        {
+            false
+        }
+        // 液面高度和半格形状稍后由真实流体邻域决定，不能先按整格固体删除。
+        Some(_) if kind == VoxelMaterial::Liquid && crate::fluid_surface::kind(state).is_some() => {
+            true
+        }
         Some((n, _)) if known_partial_occluder(n) => true,
         Some((n, nkind)) if nkind != VoxelMaterial::Solid => {
             kind == VoxelMaterial::Solid || nkind != kind || n.name != state.name
@@ -182,6 +529,7 @@ pub fn exact_face_exposed_against(
 }
 // Preserve the original owned-palette lookup path while sharing the
 // exact same visibility semantics with spectator streaming.
+#[cfg(test)]
 fn exposed_against(
     state: &State,
     kind: VoxelMaterial,
@@ -194,9 +542,17 @@ pub struct SurfaceVoxel {
     pub x: i32,
     pub y: i32,
     pub z: i32,
-    pub state: State,
-    /// Original biome name, if decoded. Not an editable block property.
-    pub biome: Option<String>,
+    descriptor: Arc<VoxelData>,
+}
+/// 位置无关的不可变显示描述；写时复制仅用于独立暂存或辅助构造。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoxelData {
+    /// 不可变的原始 / 暂存显示状态；读取快照与拾取共享，编辑仍通过 Session。
+    pub state: Arc<State>,
+    /// 原格心与六邻格的保存光照；缺失和区块边界保持实际来源语义。
+    pub light: crate::saved_light::Samples,
+    /// 共享的原始生物群系名称；不是可编辑的方块属性。
+    pub biome: Option<crate::shared_text::SharedText>,
     pub original_block_entity: bool,
     /// Original exposed voxel faces; missing source cells are unknown.
     pub faces: u8,
@@ -206,6 +562,41 @@ pub struct SurfaceVoxel {
     /// Original X/Z cells represented by this sample (1 is exact).
     /// Spans >1 are approximate and must never be treated as editable blocks.
     pub span: u8,
+    /// 基于未裁减原始邻域计算的流体角点；采样远景不提供该几何。
+    pub fluid: Option<Arc<crate::fluid_surface::FluidSurface>>,
+}
+impl SurfaceVoxel {
+    /// 未提供源调色板的显式构造；生产读取使用 VoxelPalette::voxel 共享相同描述。
+    pub fn new(position: [i32; 3], data: VoxelData) -> Self {
+        Self {
+            x: position[0],
+            y: position[1],
+            z: position[2],
+            descriptor: Arc::new(data),
+        }
+    }
+    pub fn data(&self) -> &VoxelData {
+        &self.descriptor
+    }
+    pub(crate) fn descriptor_id(&self) -> usize {
+        Arc::as_ptr(&self.descriptor) as usize
+    }
+    /// 消费者读取原始精度的值，不增加共享引用计数，也不把无流体单元扩成内嵌形状。
+    #[inline]
+    pub fn fluid_surface(&self) -> Option<crate::fluid_surface::FluidSurface> {
+        self.fluid.as_deref().copied()
+    }
+}
+impl std::ops::Deref for SurfaceVoxel {
+    type Target = VoxelData;
+    fn deref(&self) -> &VoxelData {
+        &self.descriptor
+    }
+}
+impl std::ops::DerefMut for SurfaceVoxel {
+    fn deref_mut(&mut self) -> &mut VoxelData {
+        Arc::make_mut(&mut self.descriptor)
+    }
 }
 /// One actual X/Z source chunk touched during the read-only scene pass.
 /// Missing chunks are never synthesized. Unknown Sections/columns remain
@@ -221,6 +612,8 @@ pub struct SourceChunkTile {
 }
 #[derive(Debug, Clone)]
 pub struct SurfaceView {
+    /// 原始 biome 邻域，与几何来源同一暂存快照；不改变 voxel.biome 的原始含义。
+    pub biomes: Arc<crate::biome_source::Region>,
     pub x: i32,
     pub z: i32,
     pub y_min: i32,
@@ -279,12 +672,14 @@ impl SurfaceView {
         }
     }
 }
-fn is_air(state: &State) -> bool {
+pub(crate) fn is_air(state: &State) -> bool {
     matches!(
         state.name.as_str(),
         "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air" | "numeric:0"
     )
 }
+/// 每个已读取 X/Z 列的最高源方块；None 表示该列没有可见表面。
+type SurfaceColumns = BTreeMap<(i32, i32), Option<(i32, Arc<State>, VoxelMaterial)>>;
 /// Use only verified original neighboring surface columns for near-field
 /// occlusion. Unknown source cells are never treated as known air.
 fn top_faces(
@@ -293,7 +688,7 @@ fn top_faces(
     z0: i32,
     x1: i32,
     z1: i32,
-    columns: &BTreeMap<(i32, i32), Option<(i32, State, VoxelMaterial)>>,
+    columns: &SurfaceColumns,
 ) -> u8 {
     let mut faces = FACE_TOP;
     for (dx, dz, flag) in [
@@ -313,7 +708,11 @@ fn top_faces(
             Some(Some((height, state, kind))) => {
                 if *height < voxel.y
                     || (*height == voxel.y
-                        && exposed_against(&voxel.state, voxel.kind, Some(&(state.clone(), *kind))))
+                        && exact_face_exposed_against(
+                            &voxel.state,
+                            voxel.kind,
+                            Some((state.as_ref(), *kind)),
+                        ))
                 {
                     faces |= flag;
                 }
@@ -339,6 +738,38 @@ pub fn inspect_surface(
     width: u8,
     depth: u8,
 ) -> Result<SurfaceView, WorldError> {
+    inspect_surface_with_visibility(
+        session,
+        VolumeRequest {
+            x,
+            z,
+            vertical: y_min..=y_max,
+            width,
+            depth,
+            top_cut: None,
+        },
+        &mut crate::surface_visibility::Native,
+        &|| false,
+    )
+}
+pub fn inspect_surface_with_visibility(
+    session: &Session,
+    request: VolumeRequest,
+    visibility: &mut dyn crate::surface_visibility::Visibility,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<SurfaceView, WorldError> {
+    let VolumeRequest {
+        x,
+        z,
+        vertical,
+        width,
+        depth,
+        top_cut,
+    } = request;
+    if top_cut.is_some() {
+        return Err(refuse("最高列预览不接受体积剖切参数"));
+    }
+    let (y_min, y_max) = (*vertical.start(), *vertical.end());
     // A top-down overview retains one highest source block per column.
     // It may scan the complete original dimension height; unlike a 3D
     // volume it does not retain up to 384 voxels per column in memory.
@@ -347,11 +778,12 @@ pub fn inspect_surface(
         || width > MAX_VIEW_XZ
         || depth == 0
         || depth > MAX_VIEW_XZ
-        || height < 1
-        || height > 384
+        || !(1..=4096).contains(&height)
+        || y_min < -2048
+        || y_max > 2047
     {
         return Err(refuse(
-            "Read-only top surface exceeds 64x64x384 source cells",
+            "俯视源范围必须在 64×64 列及 Section Y 的 -2048..2047 内",
         ));
     }
     let far_x = x
@@ -364,24 +796,39 @@ pub fn inspect_surface(
     // inspection can scan 196608 cells, so validate extrema individually.
     let _ = crate::editing::Bounds::new((x, y_min, z), (x, y_min, z))?;
     let _ = crate::editing::Bounds::new((far_x, y_max, far_z), (far_x, y_max, far_z))?;
-    let mut cache: BTreeMap<(i32, i32), Option<Chunk>> = BTreeMap::new();
-    let mut region_reader =
-        ReadOnlyRegionCache::new(session.original_world(), session.dimension())?;
+    let mut cache: BTreeMap<(i32, i32), Option<Arc<Chunk>>> = BTreeMap::new();
+    let mut metadata: BTreeMap<(i32, i32), (Option<Chunk>, Option<Chunk>)> = BTreeMap::new();
+    let mut presence: BTreeMap<(i32, i32), bool> = BTreeMap::new();
+    let mut region_reader = session.source_reader()?;
     let mut voxels = Vec::new();
-    let mut columns: BTreeMap<(i32, i32), Option<(i32, State, VoxelMaterial)>> = BTreeMap::new();
+    let mut palette = VoxelPalette::default();
+    let mut columns = SurfaceColumns::new();
     let mut missing_columns = 0;
     let mut tiles: BTreeMap<(i32, i32), SourceChunkTile> = BTreeMap::new();
     for dz in 0..depth as i32 {
         for dx in 0..width as i32 {
+            if cancelled() {
+                return Err(refuse("最高列预览读取已取消"));
+            }
             let (wx, wz) = (x + dx, z + dz);
             let key = (wx.div_euclid(16), wz.div_euclid(16));
-            if !cache.contains_key(&key) {
-                cache.insert(key, region_reader.read_chunk(key.0, key.1)?);
+            if let std::collections::btree_map::Entry::Vacant(e) = cache.entry(key) {
+                let (chunk, on_disk) =
+                    session.visible_chunk_base_shared_cached(&mut region_reader, key.0, key.1)?;
+                e.insert(chunk);
+                presence.insert(key, on_disk);
+                metadata.insert(
+                    key,
+                    staged_metadata_cached(session, &mut region_reader, key.0, key.1)?,
+                );
             }
+            let on_disk = *presence
+                .get(&key)
+                .ok_or_else(|| WorldError::Invalid("区块来源状态缺失".into()))?;
             let tile = tiles.entry(key).or_insert_with(|| SourceChunkTile {
                 chunk_x: key.0,
                 chunk_z: key.1,
-                source_present: cache.get(&key).and_then(Option::as_ref).is_some(),
+                source_present: on_disk,
                 known_columns: 0,
                 unknown_columns: 0,
                 exposed_voxels: 0,
@@ -391,31 +838,44 @@ pub fn inspect_surface(
                 tile.unknown_columns += 1;
                 continue;
             };
+            let (biome, be) = metadata
+                .get(&key)
+                .ok_or_else(|| WorldError::Invalid("暂存元数据缓存缺失".into()))?;
+            let biome = biome.as_ref().unwrap_or(chunk.as_ref());
+            let be = be.as_ref().unwrap_or(chunk.as_ref());
             let mut chosen = None;
             let mut known = false;
-            for y in (y_min..=y_max).rev() {
+            for y in chunk.sections.iter().rev().flat_map(|section| {
+                let base = i32::from(section.y) * 16;
+                (base.max(y_min)..=(base + 15).min(y_max)).rev()
+            }) {
                 let Some(original) =
                     chunk.block(wx.rem_euclid(16) as u8, y, wz.rem_euclid(16) as u8)
                 else {
                     continue;
                 };
                 known = true;
-                let state = session.effective_state((wx, y, wz), original);
-                if !is_air(&state) {
-                    let kind = material(&state);
-                    chosen = Some(SurfaceVoxel {
-                        x: wx,
-                        y,
-                        z: wz,
-                        state,
-                        biome: chunk
-                            .biome(wx.rem_euclid(16) as u8, y, wz.rem_euclid(16) as u8)
-                            .map(str::to_owned),
-                        original_block_entity: chunk.has_block_entity(wx, y, wz),
-                        faces: FACE_TOP,
-                        kind,
-                        staged: session.is_staged_block((wx, y, wz)),
-                        span: 1,
+                let state = session.effective_state_ref((wx, y, wz), original);
+                if !is_air(state) {
+                    let kind = material(state);
+                    chosen = Some({
+                        let data = crate::surface::VoxelData {
+                            state: palette.state(state),
+                            biome: palette.biome(biome.biome(
+                                wx.rem_euclid(16) as u8,
+                                y,
+                                wz.rem_euclid(16) as u8,
+                            )),
+                            original_block_entity: be.has_block_entity(wx, y, wz),
+                            faces: FACE_TOP,
+                            kind,
+                            staged: session.is_staged_block((wx, y, wz))
+                                || session.creation_origin(key.0, key.1, y),
+                            span: 1,
+                            fluid: None,
+                            light: Default::default(),
+                        };
+                        palette.voxel([wx, y, wz], data)
                     });
                     break;
                 }
@@ -436,12 +896,37 @@ pub fn inspect_surface(
         }
     }
     for voxel in &mut voxels {
-        voxel.faces = top_faces(voxel, x, z, far_x, far_z, &columns);
+        let faces = if visibility.resource_aware() {
+            ALL_FACES
+        } else {
+            top_faces(voxel, x, z, far_x, far_z, &columns)
+        };
+        if faces != voxel.faces {
+            *voxel = palette.updated(voxel, |data| data.faces = faces);
+        }
         if let Some(tile) = tiles.get_mut(&(voxel.x.div_euclid(16), voxel.z.div_euclid(16))) {
             tile.exposed_voxels += 1;
         }
     }
+    inspect_fluid_geometry(
+        session,
+        &mut region_reader,
+        &mut cache,
+        &mut voxels,
+        visibility,
+        None,
+        cancelled,
+    )?;
+    let biomes = inspect_biomes(
+        session,
+        &mut region_reader,
+        &mut cache,
+        &metadata,
+        tiles.keys().copied(),
+        cancelled,
+    )?;
     Ok(SurfaceView {
+        biomes,
         x,
         z,
         y_min,
@@ -450,7 +935,7 @@ pub fn inspect_surface(
         depth: depth as u16,
         voxels,
         missing_columns,
-        source_chunks: cache.len(),
+        source_chunks: tiles.len(),
         source_tiles: tiles.into_values().collect(),
     })
 }
@@ -466,7 +951,7 @@ pub fn inspect_exposed_volume(
     width: u8,
     depth: u8,
 ) -> Result<SurfaceView, WorldError> {
-    inspect_exposed_volume_cutaway(session, x, z, y_min, y_max, width, depth, None)
+    inspect_exposed_volume_cutaway(session, x, z, y_min..=y_max, width, depth, None)
 }
 /// A read-only cutaway exposes new top faces at the chosen Y plane, instead
 /// of merely hiding previously meshed outer faces. Missing source cells stay
@@ -475,12 +960,49 @@ pub fn inspect_exposed_volume_cutaway(
     session: &Session,
     x: i32,
     z: i32,
-    y_min: i32,
-    y_max: i32,
+    vertical: std::ops::RangeInclusive<i32>,
     width: u8,
     depth: u8,
     top_cut: Option<i32>,
 ) -> Result<SurfaceView, WorldError> {
+    inspect_volume_with_visibility(
+        session,
+        VolumeRequest {
+            x,
+            z,
+            vertical,
+            width,
+            depth,
+            top_cut,
+        },
+        &mut crate::surface_visibility::Native,
+        &|| false,
+    )
+}
+/// 限定精确体积及剖切请求；可见性查询独立于世界格式解析。
+pub struct VolumeRequest {
+    pub x: i32,
+    pub z: i32,
+    pub vertical: std::ops::RangeInclusive<i32>,
+    pub width: u8,
+    pub depth: u8,
+    pub top_cut: Option<i32>,
+}
+pub fn inspect_volume_with_visibility(
+    session: &Session,
+    request: VolumeRequest,
+    visibility: &mut dyn crate::surface_visibility::Visibility,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<SurfaceView, WorldError> {
+    let VolumeRequest {
+        x,
+        z,
+        vertical,
+        width,
+        depth,
+        top_cut,
+    } = request;
+    let (y_min, y_max) = (*vertical.start(), *vertical.end());
     if top_cut.is_some_and(|top| top < y_min || top > y_max) {
         return Err(refuse("3D cutaway Y must lie within the inspected bounds"));
     }
@@ -494,24 +1016,36 @@ pub fn inspect_exposed_volume_cutaway(
         .ok_or_else(|| refuse("Volume Z overflow"))?;
     let _ = crate::editing::Bounds::new((x, y_min, z), (x, y_min, z))?;
     let _ = crate::editing::Bounds::new((max_x, y_max, max_z), (max_x, y_max, max_z))?;
-    let mut chunks: BTreeMap<(i32, i32), Option<Chunk>> = BTreeMap::new();
-    let mut region_reader =
-        ReadOnlyRegionCache::new(session.original_world(), session.dimension())?;
-    let mut known: BTreeMap<(i32, i32, i32), (State, VoxelMaterial)> = BTreeMap::new();
+    let mut chunks: BTreeMap<(i32, i32), Option<Arc<Chunk>>> = BTreeMap::new();
+    let mut metadata: BTreeMap<(i32, i32), (Option<Chunk>, Option<Chunk>)> = BTreeMap::new();
+    let mut presence: BTreeMap<(i32, i32), bool> = BTreeMap::new();
+    let mut region_reader = session.source_reader()?;
+    let mut known: BTreeMap<(i32, i32, i32), (Arc<State>, VoxelMaterial)> = BTreeMap::new();
     let mut solids = Vec::new();
+    let mut palette = VoxelPalette::default();
     let mut missing_columns = 0;
     let mut tiles: BTreeMap<(i32, i32), SourceChunkTile> = BTreeMap::new();
     for dz in 0..depth as i32 {
         for dx in 0..width as i32 {
             let (wx, wz) = (x + dx, z + dz);
             let key = (wx.div_euclid(16), wz.div_euclid(16));
-            if !chunks.contains_key(&key) {
-                chunks.insert(key, region_reader.read_chunk(key.0, key.1)?);
+            if let std::collections::btree_map::Entry::Vacant(e) = chunks.entry(key) {
+                let (chunk, on_disk) =
+                    session.visible_chunk_base_shared_cached(&mut region_reader, key.0, key.1)?;
+                e.insert(chunk);
+                presence.insert(key, on_disk);
+                metadata.insert(
+                    key,
+                    staged_metadata_cached(session, &mut region_reader, key.0, key.1)?,
+                );
             }
+            let on_disk = *presence
+                .get(&key)
+                .ok_or_else(|| WorldError::Invalid("区块来源状态缺失".into()))?;
             let tile = tiles.entry(key).or_insert_with(|| SourceChunkTile {
                 chunk_x: key.0,
                 chunk_z: key.1,
-                source_present: chunks.get(&key).and_then(Option::as_ref).is_some(),
+                source_present: on_disk,
                 known_columns: 0,
                 unknown_columns: 0,
                 exposed_voxels: 0,
@@ -521,32 +1055,45 @@ pub fn inspect_exposed_volume_cutaway(
                 tile.unknown_columns += 1;
                 continue;
             };
+            let (biome, be) = metadata
+                .get(&key)
+                .ok_or_else(|| WorldError::Invalid("暂存元数据缓存缺失".into()))?;
+            let biome = biome.as_ref().unwrap_or(chunk.as_ref());
+            let be = be.as_ref().unwrap_or(chunk.as_ref());
             let mut column_known = false;
             for y in y_min..=y_max {
+                if y.rem_euclid(64) == 0 && cancelled() {
+                    return Err(refuse("精确体积读取已取消"));
+                }
                 let Some(original) =
                     chunk.block(wx.rem_euclid(16) as u8, y, wz.rem_euclid(16) as u8)
                 else {
                     continue;
                 };
                 column_known = true;
-                let state = session.effective_state((wx, y, wz), original);
+                let state = palette.state(session.effective_state_ref((wx, y, wz), original));
                 let solid = !is_air(&state);
                 let kind = material(&state);
                 known.insert((wx, y, wz), (state.clone(), kind));
                 if solid && y <= visible_top {
-                    solids.push(SurfaceVoxel {
-                        x: wx,
-                        y,
-                        z: wz,
-                        state,
-                        biome: chunk
-                            .biome(wx.rem_euclid(16) as u8, y, wz.rem_euclid(16) as u8)
-                            .map(str::to_owned),
-                        original_block_entity: chunk.has_block_entity(wx, y, wz),
-                        faces: 0,
-                        kind,
-                        staged: session.is_staged_block((wx, y, wz)),
-                        span: 1,
+                    solids.push({
+                        let data = crate::surface::VoxelData {
+                            state,
+                            biome: palette.biome(biome.biome(
+                                wx.rem_euclid(16) as u8,
+                                y,
+                                wz.rem_euclid(16) as u8,
+                            )),
+                            original_block_entity: be.has_block_entity(wx, y, wz),
+                            faces: 0,
+                            kind,
+                            staged: session.is_staged_block((wx, y, wz))
+                                || session.creation_origin(key.0, key.1, y),
+                            span: 1,
+                            fluid: None,
+                            light: Default::default(),
+                        };
+                        palette.voxel([wx, y, wz], data)
                     });
                 }
             }
@@ -558,34 +1105,96 @@ pub fn inspect_exposed_volume_cutaway(
             }
         }
     }
-    const SIDES: [(i32, i32, i32, u8); 6] = [
-        (0, 1, 0, FACE_TOP),
-        (0, -1, 0, FACE_BOTTOM),
-        (1, 0, 0, FACE_POS_X),
-        (-1, 0, 0, FACE_NEG_X),
-        (0, 0, 1, FACE_POS_Z),
-        (0, 0, -1, FACE_NEG_Z),
-    ];
     let mut voxels = Vec::new();
-    for mut voxel in solids {
-        for (dx, dy, dz, bit) in SIDES {
+    for (index, voxel) in solids.into_iter().enumerate() {
+        if index.is_multiple_of(256) && cancelled() {
+            return Err(refuse("精确体积可见性查询已取消"));
+        }
+        let mut faces = voxel.faces;
+        let cell = crate::surface_visibility::Cell {
+            state: &voxel.state,
+            kind: voxel.kind,
+            position: (voxel.x, voxel.y, voxel.z),
+        };
+        for direction in crate::surface_visibility::Direction::ALL {
+            let [dx, dy, dz] = direction.offset();
+            let bit = direction.flag();
             let (nx, ny, nz) = (voxel.x + dx, voxel.y + dy, voxel.z + dz);
             let clipped =
                 nx < x || nx > max_x || nz < z || nz > max_z || ny < y_min || ny > visible_top;
-            if clipped || exposed_against(&voxel.state, voxel.kind, known.get(&(nx, ny, nz))) {
-                voxel.faces |= bit;
+            if clipped
+                || visibility.exposed(
+                    cell,
+                    direction,
+                    known
+                        .get(&(nx, ny, nz))
+                        .map(|(state, kind)| crate::surface_visibility::Cell {
+                            state,
+                            kind: *kind,
+                            position: (nx, ny, nz),
+                        }),
+                )
+            {
+                faces |= bit;
             }
         }
-        if voxel.faces != 0 {
-            voxels.push(voxel);
+        if faces != 0
+            || visibility.unconditional(cell)
+            || (voxel.kind != VoxelMaterial::Liquid
+                && matches!(
+                    visibility.fluid_sample(cell)?,
+                    crate::fluid_surface::Sample::Fluid(..)
+                ))
+        {
+            voxels.push(if faces == voxel.faces {
+                voxel
+            } else {
+                palette.updated(&voxel, |data| data.faces = faces)
+            });
         }
     }
+    inspect_fluid_geometry(
+        session,
+        &mut region_reader,
+        &mut chunks,
+        &mut voxels,
+        visibility,
+        Some(crate::editing::Bounds {
+            minimum: [x, y_min, z],
+            maximum: [max_x, visible_top, max_z],
+        }),
+        cancelled,
+    )?;
+    voxels.retain(|voxel| {
+        let cell = crate::surface_visibility::Cell {
+            state: &voxel.state,
+            kind: voxel.kind,
+            position: (voxel.x, voxel.y, voxel.z),
+        };
+        if voxel.kind == VoxelMaterial::Liquid
+            && voxel.fluid_surface().is_some_and(|f| f.faces() == 0)
+        {
+            return false;
+        }
+        voxel.faces != 0
+            || visibility.unconditional(cell)
+            || voxel.fluid_surface().is_some_and(|f| f.faces() != 0)
+    });
     for voxel in &voxels {
         if let Some(tile) = tiles.get_mut(&(voxel.x.div_euclid(16), voxel.z.div_euclid(16))) {
             tile.exposed_voxels += 1;
         }
     }
+    let biomes = inspect_biomes(
+        session,
+        &mut region_reader,
+        &mut chunks,
+        &metadata,
+        tiles.keys().copied(),
+        cancelled,
+    )?;
     Ok(SurfaceView {
+        biomes,
         x,
         z,
         y_min,
@@ -594,15 +1203,20 @@ pub fn inspect_exposed_volume_cutaway(
         depth: depth as u16,
         voxels,
         missing_columns,
-        source_chunks: chunks.len(),
+        source_chunks: tiles.len(),
         source_tiles: tiles.into_values().collect(),
     })
 }
 
 #[cfg(test)]
+pub(crate) fn run_test_category(category: crate::test_categories::Category) {
+    tests::run_test_category(category);
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
+
     fn exact_surface_occluder_contract_preserves_transparency_and_partial_shapes() {
         let state = |name: &str, properties: &[(&str, &str)]| State {
             name: name.into(),
@@ -611,20 +1225,42 @@ mod tests {
                 .map(|(key, value)| (key.to_string(), value.to_string()))
                 .collect(),
         };
-        for name in ["minecraft:ice", "minecraft:packed_ice", "minecraft:blue_ice",
-            "minecraft:glass", "minecraft:tinted_glass", "minecraft:oak_leaves",
-            "modded:stone"] {
+        for name in [
+            "minecraft:ice",
+            "minecraft:glass",
+            "minecraft:tinted_glass",
+            "minecraft:oak_leaves",
+            "modded:stone",
+        ] {
             assert!(!known_full_occluder(&state(name, &[])), "{name}");
         }
-        for name in ["minecraft:stone", "minecraft:oak_planks", "minecraft:iron_ore"] {
+        for name in [
+            "minecraft:packed_ice",
+            "minecraft:blue_ice",
+            "minecraft:stone",
+            "minecraft:oak_planks",
+            "minecraft:iron_ore",
+        ] {
             assert!(known_full_occluder(&state(name, &[])), "{name}");
         }
-        assert!(known_full_occluder(&state("minecraft:stone_slab", &[("type", "double")])));
-        assert!(!known_full_occluder(&state("minecraft:stone_slab", &[("type", "top")])));
-        assert!(known_full_occluder(&state("minecraft:snow", &[("layers", "8")])));
-        assert!(!known_full_occluder(&state("minecraft:snow", &[("layers", "3")])));
+        assert!(known_full_occluder(&state(
+            "minecraft:stone_slab",
+            &[("type", "double")]
+        )));
+        assert!(!known_full_occluder(&state(
+            "minecraft:stone_slab",
+            &[("type", "top")]
+        )));
+        assert!(known_full_occluder(&state(
+            "minecraft:snow",
+            &[("layers", "8")]
+        )));
+        assert!(!known_full_occluder(&state(
+            "minecraft:snow",
+            &[("layers", "3")]
+        )));
     }
-    #[test]
+
     fn unknown_source_sections_and_vanilla_plants_cannot_hide_faces() {
         let stone = State {
             name: "minecraft:stone".into(),
@@ -668,7 +1304,7 @@ mod tests {
             Some(&(stone.clone(), VoxelMaterial::Solid))
         ));
     }
-    #[test]
+
     fn unknown_mod_neighbor_cannot_hide_original_faces() {
         let full = State {
             name: "minecraft:stone".into(),
@@ -689,28 +1325,39 @@ mod tests {
             Some(&(full.clone(), VoxelMaterial::Solid))
         ));
     }
-    #[test]
+
     fn exact_surface_culls_known_neighbors_but_not_unknown_source() {
         let state = State {
             name: "minecraft:stone".into(),
             properties: vec![],
         };
-        let voxel = SurfaceVoxel {
-            x: 0,
-            y: 64,
-            z: 0,
-            state: state.clone(),
-            biome: None,
-            original_block_entity: false,
-            faces: 0,
-            kind: VoxelMaterial::Solid,
-            staged: false,
-            span: 1,
-        };
+        let voxel = SurfaceVoxel::new(
+            [0, 64, 0],
+            crate::surface::VoxelData {
+                state: state.clone().into(),
+                biome: None,
+                original_block_entity: false,
+                faces: 0,
+                kind: VoxelMaterial::Solid,
+                staged: false,
+                span: 1,
+                fluid: None,
+                light: Default::default(),
+            },
+        );
         let mut columns = BTreeMap::new();
-        columns.insert((0, 0), Some((64, state.clone(), VoxelMaterial::Solid)));
-        columns.insert((1, 0), Some((64, state.clone(), VoxelMaterial::Solid)));
-        columns.insert((-1, 0), Some((63, state.clone(), VoxelMaterial::Solid)));
+        columns.insert(
+            (0, 0),
+            Some((64, Arc::clone(&voxel.state), VoxelMaterial::Solid)),
+        );
+        columns.insert(
+            (1, 0),
+            Some((64, Arc::clone(&voxel.state), VoxelMaterial::Solid)),
+        );
+        columns.insert(
+            (-1, 0),
+            Some((63, Arc::clone(&voxel.state), VoxelMaterial::Solid)),
+        );
         columns.insert((0, 1), None);
         let mask = top_faces(&voxel, -1, -1, 1, 1, &columns);
         assert_eq!(mask & FACE_POS_X, 0);
@@ -724,7 +1371,7 @@ mod tests {
             FACE_POS_X | FACE_NEG_X | FACE_POS_Z | FACE_NEG_Z
         );
     }
-    #[test]
+
     fn only_recognized_partial_vanilla_shapes_refuse_full_face_occlusion() {
         let solid = State {
             name: "minecraft:stone".into(),
@@ -768,7 +1415,7 @@ mod tests {
         };
         assert!(known_partial_occluder(&snow));
     }
-    #[test]
+
     fn original_source_tiles_are_sorted_and_distinguish_missing_sections() {
         let tile = SourceChunkTile {
             chunk_x: -1,
@@ -790,7 +1437,7 @@ mod tests {
         assert!(!missing.source_present);
         assert_eq!((-17_i32).div_euclid(16), missing.chunk_x);
     }
-    #[test]
+
     fn scene_budget_allows_3x3_chunks_but_never_unbounded_source_reads() {
         assert_eq!(MAX_VIEW_CELLS, 196_608);
         assert!(validate_view(64, 64, -64, -17).is_ok());
@@ -800,9 +1447,10 @@ mod tests {
         assert!(validate_view(1, 1, i32::MIN, i32::MAX).is_err());
         assert!(validate_view(1, 1, -384, -337).is_ok());
     }
-    #[test]
+
     fn summary_counts_render_faces_materials_and_source_metadata() {
         let view = SurfaceView {
+            biomes: Default::default(),
             x: 0,
             z: 0,
             y_min: -64,
@@ -819,21 +1467,24 @@ mod tests {
                 unknown_columns: 0,
                 exposed_voxels: 1,
             }],
-            voxels: vec![SurfaceVoxel {
-                x: 0,
-                y: -64,
-                z: 0,
-                state: State {
-                    name: "minecraft:glass".into(),
-                    properties: vec![],
+            voxels: vec![SurfaceVoxel::new(
+                [0, -64, 0],
+                crate::surface::VoxelData {
+                    state: State {
+                        name: "minecraft:glass".into(),
+                        properties: vec![],
+                    }
+                    .into(),
+                    biome: None,
+                    original_block_entity: true,
+                    faces: FACE_TOP | FACE_POS_X,
+                    kind: VoxelMaterial::Transparent,
+                    staged: true,
+                    span: 1,
+                    fluid: None,
+                    light: Default::default(),
                 },
-                biome: None,
-                original_block_entity: true,
-                faces: FACE_TOP | FACE_POS_X,
-                kind: VoxelMaterial::Transparent,
-                staged: true,
-                span: 1,
-            }],
+            )],
         };
         let stats = view.statistics();
         assert_eq!(stats.voxels, 1);
@@ -843,7 +1494,7 @@ mod tests {
             (1, 1, 1)
         );
     }
-    #[test]
+
     fn cutaway_accepts_negative_y_and_refuses_out_of_bounds_without_writing() {
         // Pure geometrical clipping: the selected layer is still the exact
         // source coordinate, and its newly exposed roof is a view cut only.
@@ -856,7 +1507,7 @@ mod tests {
             ALL_FACES
         );
     }
-    #[test]
+
     fn air_detection_is_explicit_not_derived_from_arbitrary_modded_name() {
         for name in [
             "minecraft:air",
@@ -873,5 +1524,135 @@ mod tests {
             name: "mod:custom_air".into(),
             properties: vec![]
         }));
+    }
+
+    fn shared_source_payload_lifecycle() {
+        use crate::fluid_surface::{inspect, Kind, Sample};
+        let water = State {
+            name: "minecraft:water".into(),
+            properties: vec![("level".into(), "0".into())],
+        };
+        let stone = State {
+            name: "minecraft:stone".into(),
+            properties: vec![],
+        };
+        let full = inspect(Sample::Fluid(Kind::Water, 0), (0, 0, 0), &mut |_| {
+            Ok(Sample::Fluid(Kind::Water, 0))
+        })
+        .unwrap()
+        .unwrap();
+        let edge = full
+            .with_faces(FACE_TOP | FACE_NEG_X)
+            .unwrap()
+            .with_overlays(FACE_NEG_X)
+            .unwrap();
+        let mut palette = VoxelPalette::default();
+        let voxels = (0..10_000)
+            .map(|index| {
+                let fluid = match index % 3 {
+                    0 => Some(full),
+                    1 => Some(edge),
+                    _ => None,
+                };
+                {
+                    let data = crate::surface::VoxelData {
+                        state: palette.state(if fluid.is_some() { &water } else { &stone }),
+                        biome: palette.biome(Some("minecraft:forest")),
+                        fluid: palette.fluid(fluid),
+                        original_block_entity: false,
+                        faces: ALL_FACES,
+                        kind: if fluid.is_some() {
+                            VoxelMaterial::Liquid
+                        } else {
+                            VoxelMaterial::Solid
+                        },
+                        staged: false,
+                        span: 1,
+                        light: Default::default(),
+                    };
+                    palette.voxel([index % 16, index / 256, index / 16 % 16], data)
+                }
+            })
+            .collect::<Vec<_>>();
+        assert!(Arc::ptr_eq(
+            voxels[0].fluid.as_ref().unwrap(),
+            voxels[3].fluid.as_ref().unwrap()
+        ));
+        assert!(!Arc::ptr_eq(
+            voxels[0].fluid.as_ref().unwrap(),
+            voxels[1].fluid.as_ref().unwrap()
+        ));
+        for (index, voxel) in voxels.iter().enumerate() {
+            assert_eq!(
+                voxel.fluid_surface(),
+                match index % 3 {
+                    0 => Some(full),
+                    1 => Some(edge),
+                    _ => None,
+                }
+            );
+        }
+        let weak = Arc::downgrade(voxels[0].fluid.as_ref().unwrap());
+        drop(palette);
+        let snapshot = voxels.clone();
+        let mut memory = crate::source_memory::Footprint::default();
+        memory.include(&voxels, voxels.capacity());
+        let first = memory.usage();
+        assert_eq!(first.unique_descriptors, 3);
+        assert_eq!(
+            (
+                first.unique_states,
+                first.unique_biomes,
+                first.unique_fluids
+            ),
+            (2, 1, 2)
+        );
+        memory.include(&snapshot, snapshot.capacity());
+        memory.shared_state(&snapshot[0].state);
+        let both = memory.usage();
+        assert_eq!(both.shared_bytes(), first.shared_bytes());
+        assert!(both.inline_bytes > first.inline_bytes);
+        let mut original = crate::source_memory::Footprint::default();
+        original.include(&voxels, voxels.capacity());
+        let original = original.seal();
+        let mut copy = crate::source_memory::Footprint::default();
+        copy.include(&snapshot, snapshot.capacity());
+        let copy = copy.seal();
+        let mut ledger = crate::source_memory::Ledger::default();
+        ledger.add(&original);
+        ledger.add(&copy);
+        assert_eq!(ledger.usage().shared_bytes(), both.shared_bytes());
+        assert_eq!(ledger.usage().inline_bytes, both.inline_bytes);
+        ledger.remove(&original);
+        assert_eq!(ledger.usage().total_bytes(), copy.usage().total_bytes());
+        ledger.remove(&copy);
+        assert_eq!(
+            (ledger.usage().total_bytes(), ledger.usage().voxels),
+            (0, 0)
+        );
+        drop(voxels);
+        assert!(weak.upgrade().is_some());
+        drop(snapshot);
+        assert!(
+            weak.upgrade().is_none(),
+            "统计和已释放的调色板不能保活源形状"
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
+        if category == crate::test_categories::Category::Geometry {
+            exact_surface_occluder_contract_preserves_transparency_and_partial_shapes();
+            unknown_source_sections_and_vanilla_plants_cannot_hide_faces();
+            unknown_mod_neighbor_cannot_hide_original_faces();
+            exact_surface_culls_known_neighbors_but_not_unknown_source();
+            only_recognized_partial_vanilla_shapes_refuse_full_face_occlusion();
+            original_source_tiles_are_sorted_and_distinguish_missing_sections();
+            scene_budget_allows_3x3_chunks_but_never_unbounded_source_reads();
+            summary_counts_render_faces_materials_and_source_metadata();
+            shared_source_payload_lifecycle();
+            cutaway_accepts_negative_y_and_refuses_out_of_bounds_without_writing();
+            air_detection_is_explicit_not_derived_from_arbitrary_modded_name();
+        }
     }
 }
