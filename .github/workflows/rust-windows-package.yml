@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       verify_tests:
-        description: 'Run full Rust release-profile tests before packaging'
+        description: 'Run the Rust workspace tests before packaging'
         required: true
         type: boolean
         default: true
@@ -44,11 +44,11 @@ jobs:
         if: github.event_name != 'workflow_dispatch' || inputs.verify_tests
         working-directory: rust
         shell: pwsh
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
       - name: Build native Windows x64 application
         working-directory: rust
         shell: pwsh
-        run: cargo build --release -p mcedit2-iced
+        run: cargo build --locked --release -p mcedit2-iced
       - name: Smoke test GUI and CLI release startup
         shell: pwsh
         run: |

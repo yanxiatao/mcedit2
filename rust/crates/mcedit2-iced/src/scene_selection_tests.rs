@@ -9,7 +9,11 @@ fn app() -> App {
     .unwrap();
     App {
         worlds: vec![world],
-            workspace: { let mut state = crate::workspace_tabs::State::default(); state.open(0); state },
+        workspace: {
+            let mut state = crate::workspace_tabs::State::default();
+            state.open(0);
+            state
+        },
         current: Some(0),
         surface_area: "-4,10,-4;3,17,3".into(),
         ..Default::default()
@@ -422,21 +426,18 @@ fn projected_selection_updates_the_snapshot_details_and_revokes_an_old_face() {
     assert!(app.surface_report.contains("changed"));
 }
 
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    if category == crate::test_categories::Category::Navigation {
-        selected_volume_keeps_source_cut_and_selection_through_all_camera_modes();
-        invalid_draft_cannot_cancel_retarget_or_remove_committed_volume();
-        automatic_world_still_reads_full_height_when_leaving_free_flight();
-        world_orthographic_reload_retains_volume_and_explicit_far_preview_releases_old_stream_frame(
-        );
-        free_flight_cannot_expand_a_selected_window_or_start_world_streaming();
-        cut_shift_resize_and_center_update_the_selected_window_consistently();
-        changing_world_or_dimension_revokes_the_selected_window();
-        camera_flight_survives_projection_switches_and_reset_reframes_the_selected_source();
-        bounded_source_read_and_perspective_pick_keep_actual_original_block_identity();
-        framed_window_keeps_source_corners_visible_at_world_border_and_narrow_aspect();
-        selected_surface_reads_full_height_frames_real_terrain_once_and_resumes_world_from_2d();
-        projected_selection_updates_the_snapshot_details_and_revokes_an_old_face();
-    }
+#[test]
+fn navigation_behavior() {
+    selected_volume_keeps_source_cut_and_selection_through_all_camera_modes();
+    invalid_draft_cannot_cancel_retarget_or_remove_committed_volume();
+    automatic_world_still_reads_full_height_when_leaving_free_flight();
+    world_orthographic_reload_retains_volume_and_explicit_far_preview_releases_old_stream_frame();
+    free_flight_cannot_expand_a_selected_window_or_start_world_streaming();
+    cut_shift_resize_and_center_update_the_selected_window_consistently();
+    changing_world_or_dimension_revokes_the_selected_window();
+    camera_flight_survives_projection_switches_and_reset_reframes_the_selected_source();
+    bounded_source_read_and_perspective_pick_keep_actual_original_block_identity();
+    framed_window_keeps_source_corners_visible_at_world_border_and_narrow_aspect();
+    selected_surface_reads_full_height_frames_real_terrain_once_and_resumes_world_from_2d();
+    projected_selection_updates_the_snapshot_details_and_revokes_an_old_face();
 }

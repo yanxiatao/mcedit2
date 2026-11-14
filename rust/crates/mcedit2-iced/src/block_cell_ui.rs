@@ -601,7 +601,6 @@ fn handle(app: &mut App, action: Action) -> Result<Task<Message>, String> {
                 return Err("所检查的位置或来源已改变，请重新读取".into());
             }
             let state = &app.object_inspector.cell;
-            let id = state.kind.clone().ok_or("请选择实际注册的方块实体类型")?;
             let payload = if state.custom {
                 Some(
                     serde_json::from_str::<Value>(&state.payload.text())
@@ -609,6 +608,14 @@ fn handle(app: &mut App, action: Action) -> Result<Task<Message>, String> {
                 )
             } else {
                 None
+            };
+            let id = if let Some(value) = &payload {
+                mcedit2_world::be_registry::payload_id(value).map_err(|e| e.to_string())?
+            } else {
+                state
+                    .kind
+                    .clone()
+                    .ok_or("请选择实际注册类型或提供完整 NBT")?
             };
             return mutate(app, read, Mutation::Create { id, payload });
         }
@@ -863,48 +870,51 @@ pub(crate) fn view(app: &App) -> Element<'_, Action> {
     } else {
         body = body.push(text("该位置没有保存方块实体。"));
         match &read.types {
-            Err(error) => body = body.push(text(error)),
+            Err(error) => {
+                body = body.push(text(format!(
+                    "无法提供默认载荷：{error}；可明确提供当前方块的完整自定义 NBT。"
+                )))
+            }
             Ok(types) if types.is_empty() => {
-                body = body.push(text("没有可依据的已注册方块实体类型。"))
+                body = body.push(text(
+                    "没有内置默认类型；自定义 NBT 的 id、版本与此方块共同确定本次载荷来源。",
+                ))
             }
             Ok(types) => {
-                let template = state.kind.as_ref().is_some_and(|id| {
-                    mcedit2_world::container_data::references(read.cell.version)
-                        .is_some_and(|refs| refs.contains_key(id))
-                });
-                body = body
-                    .push(
-                        pick_list(types.clone(), state.kind.clone(), {
-                            let read = Arc::clone(read);
-                            move |kind| Action::Kind(Arc::clone(&read), kind)
-                        })
-                        .placeholder("实际注册的方块实体类型"),
-                    )
-                    .push(
-                        checkbox(state.custom)
-                            .label("使用自定义完整 NBT（类型化 JSON）")
-                            .on_toggle({
-                                let read = Arc::clone(read);
-                                move |value| Action::Custom(Arc::clone(&read), value)
-                            }),
-                    )
-                    .push(button("载入客户端默认 NBT 到草稿").on_press_maybe(
-                        (current && template).then_some(Action::Template(Arc::clone(read))),
-                    ));
-                if state.custom {
-                    body = body.push(text_editor(&state.payload).height(180).on_action({
-                        let read = Arc::clone(read);
-                        move |action| Action::Payload(Arc::clone(&read), action)
-                    }));
-                }
                 body = body.push(
-                    button("创建方块实体").on_press_maybe(
-                        (edit && state.kind.is_some() && (state.custom || template))
-                            .then_some(Action::Create(Arc::clone(read))),
-                    ),
-                );
+                    pick_list(types.clone(), state.kind.clone(), {
+                        let read = Arc::clone(read);
+                        move |kind| Action::Kind(Arc::clone(&read), kind)
+                    })
+                    .placeholder("已注册的默认类型"),
+                )
             }
         }
+        let template = state.kind.as_ref().is_some_and(|id| {
+            mcedit2_world::container_data::references(read.cell.version)
+                .is_some_and(|refs| refs.contains_key(id))
+        });
+        body = body
+            .push(
+                checkbox(state.custom)
+                    .label("明确提供此方块的完整自定义 NBT（类型化 JSON，保留未知注册关系）")
+                    .on_toggle({
+                        let read = Arc::clone(read);
+                        move |value| Action::Custom(Arc::clone(&read), value)
+                    }),
+            )
+            .push(button("载入客户端默认 NBT 到草稿").on_press_maybe(
+                (current && template).then_some(Action::Template(Arc::clone(read))),
+            ));
+        if state.custom {
+            body = body.push(text_editor(&state.payload).height(180).on_action({
+                let read = Arc::clone(read);
+                move |action| Action::Payload(Arc::clone(&read), action)
+            }));
+        }
+        body = body.push(button("创建方块实体").on_press_maybe(
+            (edit && (state.custom || template)).then_some(Action::Create(Arc::clone(read))),
+        ));
     }
     body.push(
         text("方块状态保持原值。世界操作先预览后确认；独立文件进入一次文档历史，均需另行保存。")

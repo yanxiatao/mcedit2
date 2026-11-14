@@ -109,14 +109,10 @@ impl VariantPlan {
 }
 
 #[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
     fn prepared_choice_keys_match_direct_selection_for_multipart_and_invalid_candidates() {
         let state = State {
             name: "demo:machine".into(),
@@ -137,9 +133,10 @@ mod tests {
                     let selected = inputs
                         .iter()
                         .map(|(value, multipart)| {
-                            ChosenModel::parse(choose_weighted(
+                            ChosenModel::parse(choose_weighted_version(
                                 value,
-                                deterministic_model_seed(&state, pos, *multipart),
+                                ModelSample::from(pos).seed(&state, *multipart),
+                                false,
                             )?)
                         })
                         .collect::<Option<Vec<_>>>();
@@ -172,9 +169,9 @@ mod tests {
             for (mode, multipart) in [("direct", false), ("multipart", true)] {
                 let expected =
                     ChosenModel::parse(&values[case[mode].as_u64().unwrap() as usize]).unwrap();
-                let seed = deterministic_model_seed(&state, pos, multipart);
+                let seed = ModelSample::from(pos).seed(&state, multipart);
                 assert_eq!(
-                    ChosenModel::parse(choose_weighted(&values, seed).unwrap())
+                    ChosenModel::parse(choose_weighted_version(&values, seed, false).unwrap())
                         .unwrap()
                         .key,
                     expected.key
@@ -220,13 +217,6 @@ mod tests {
                 source.properties,
                 p
             );
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Models {
-            prepared_choice_keys_match_direct_selection_for_multipart_and_invalid_candidates();
         }
     }
 }

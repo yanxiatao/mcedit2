@@ -201,7 +201,7 @@ impl ArchivedRegion {
         cancelled: impl FnMut() -> bool,
     ) -> Result<(Self, HistoricalTargets), WorldError> {
         let path = storage_path(world, dimension, storage, &Role::Main)?;
-        let (main, image) = origin.original_witness(&path, MAX_IMAGE, |bytes| {
+        let (main, image) = origin.original_witness(&path, budget.bytes(), |bytes| {
             let mut used = retained;
             charge_budget(&mut used, bytes, budget)
         })?;
@@ -251,7 +251,7 @@ impl ArchivedRegion {
         }
         let main = origin.archived_file(version)?;
         let image = origin
-            .read_version_reserved(version, MAX_IMAGE, |bytes| {
+            .read_version_reserved(version, budget.bytes(), |bytes| {
                 let mut used = retained;
                 charge_budget(&mut used, bytes, budget)
             })?
@@ -333,7 +333,7 @@ impl ArchivedRegion {
         let path = storage_path(world, dimension, storage, &Role::Main)?;
         let image = self
             .main
-            .read(&world.root, &path, MAX_IMAGE, source, |bytes| {
+            .read(&world.root, &path, budget.bytes(), source, |bytes| {
                 let mut used = retained;
                 charge_budget(&mut used, bytes, budget)
             })?;
@@ -399,6 +399,7 @@ impl ArchivedRegion {
         targets: &BTreeMap<Coord, Option<Vec<u8>>>,
         retained: usize,
         source: &impl crate::entity_editing::IdentitySource,
+        budget: crate::editing::EditWorkBudget,
     ) -> Result<BTreeMap<Coord, EncodedSlot>, WorldError> {
         let chunks = targets.keys().copied().collect();
         let loaded = self.targets(
@@ -407,7 +408,7 @@ impl ArchivedRegion {
             &proof.storage,
             &chunks,
             retained,
-            crate::editing::EditWorkBudget::from_bytes(MAX_WORK)?,
+            budget,
             source,
             || false,
         )?;

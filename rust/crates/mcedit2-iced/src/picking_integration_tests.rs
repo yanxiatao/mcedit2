@@ -608,15 +608,13 @@ fn cached_pick_geometry_preserves_world_position_when_mesh_origin_moves() {
     );
 }
 
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    if category == crate::test_categories::Category::Rendering {
-        if !crate::spectator_stream::serial_reference() {
-            next_source_snapshot_does_not_wait_for_previous_gpu_handoff();
-        }
-        previous_frame_is_released_only_after_current_complete_mesh_is_presented();
-        real_mesh_pick_enters_preview_stage_and_undo_without_writing_source();
-        source_mesh_world_proof_and_drag_anchors_are_revalidated();
-        cached_pick_geometry_preserves_world_position_when_mesh_origin_moves();
+#[test]
+fn rendering_behavior() {
+    if !crate::spectator_stream::serial_reference() {
+        next_source_snapshot_does_not_wait_for_previous_gpu_handoff();
     }
+    previous_frame_is_released_only_after_current_complete_mesh_is_presented();
+    real_mesh_pick_enters_preview_stage_and_undo_without_writing_source();
+    source_mesh_world_proof_and_drag_anchors_are_revalidated();
+    cached_pick_geometry_preserves_world_position_when_mesh_origin_moves();
 }

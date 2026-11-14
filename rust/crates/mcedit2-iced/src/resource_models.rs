@@ -5,7 +5,7 @@
 //! mod-specific geometry or name-derived fallback is constructed here.
 use crate::models::{Box3, ElementRotation, Part};
 use crate::{isometric::Face, resource_ids};
-use crate::{special_gltf, special_mtl, special_obj};
+use crate::{special_mtl, special_obj};
 use mcedit2_world::sections::State;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -28,14 +28,6 @@ mod obj;
 pub(crate) use obj::obj_source_suffix;
 #[path = "uv_lock.rs"]
 mod uv_lock;
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-    graph::run_test_category(category);
-    obj::run_test_category(category);
-    uv_lock_tests::run_test_category(category);
-    variants::run_test_category(category);
-}
 
 #[path = "configured_models.rs"]
 mod configured;
@@ -124,12 +116,6 @@ pub(crate) struct ModelBank {
     obj_meshes: BTreeMap<String, std::sync::Arc<Vec<special_obj::Triangle>>>,
     obj_sources: BTreeMap<String, special_obj::Document>,
     obj_libraries: BTreeMap<String, std::sync::Arc<BTreeMap<String, special_mtl::Material>>>,
-    gltf_meshes: BTreeMap<String, Vec<special_obj::Triangle>>,
-    gltf_materials: BTreeMap<String, BTreeMap<String, special_gltf::StaticPbrMaterial>>,
-    #[cfg(test)]
-    gltf_sources: BTreeMap<String, (String, Vec<u8>)>,
-    #[cfg(test)]
-    gltf_buffers: BTreeMap<String, Vec<u8>>,
     obj_materials: BTreeMap<String, std::sync::Arc<BTreeMap<String, special_mtl::Material>>>,
     obj_mask_overlays: BTreeMap<(String, String), String>,
     json_sizes: BTreeMap<String, usize>,
@@ -357,18 +343,10 @@ impl ChosenModel {
         })
     }
 }
-fn deterministic_model_seed(
-    state: &State,
-    pos: impl Into<ModelSample> + Copy,
-    multipart: bool,
-) -> i64 {
-    pos.into().seed(state, multipart)
-}
+
 /// Choose a weighted Java model entry without a global RNG: reloading a
 /// chunk/camera yields the same source XYZ appearance and matched UVs.
-fn choose_weighted(value: &Value, seed: i64) -> Option<&Value> {
-    choose_weighted_version(value, seed, false)
-}
+
 fn choose_weighted_version(value: &Value, seed: i64, legacy: bool) -> Option<&Value> {
     let Some(_) = value.as_array() else {
         random::weight(value)?;
@@ -1265,103 +1243,7 @@ impl ModelBank {
         self.compiled.take();
         Ok(true)
     }
-    /// Static glTF / GLB source meshes share the same vertex material pipeline
-    /// as OBJ. All buffers must be embedded; there is no network/file resolver.
-    #[cfg(test)]
-    pub fn insert_gltf(&mut self, path: &str, bytes: &[u8]) -> Result<bool, String> {
-        let parts: Vec<_> = path.split('/').collect();
-        if parts.len() < 5
-            || parts[0] != "assets"
-            || parts[2] != "models"
-            || !resource_ids::namespace(parts[1])
-        {
-            return Ok(false);
-        }
-        let name = parts[3..].join("/");
-        let name = name
-            .strip_suffix(".gltf")
-            .or_else(|| name.strip_suffix(".glb"));
-        let Some(name) = name else {
-            return Ok(false);
-        };
-        if !resource_ids::path(name) {
-            return Ok(false);
-        }
-        let key = format!(
-            "model:{}:{}",
-            parts[1],
-            name.strip_prefix("block/").unwrap_or(name)
-        );
-        // Defer glTF decoding until the complete pack stack is ingested.
-        // A .bin member may precede or follow the referring model in ZIPs.
-        let budget_key = format!("gltf:{key}");
-        let total = self.checked_json_size(&budget_key, bytes.len())?;
-        self.gltf_sources
-            .insert(key, (path.to_owned(), bytes.to_vec()));
-        self.json_sizes.insert(budget_key, bytes.len());
-        self.total_json_bytes = total;
-        Ok(true)
-    }
-    /// External .bin blobs are only resolved as exact, same-pack resource
-    /// members after loading all layers. They are never opened by URI.
-    #[cfg(test)]
-    pub fn insert_gltf_buffer(&mut self, path: &str, bytes: &[u8]) -> Result<bool, String> {
-        let parts: Vec<_> = path.split('/').collect();
-        if parts.len() < 5
-            || parts[0] != "assets"
-            || parts[2] != "models"
-            || !resource_ids::namespace(parts[1])
-        {
-            return Ok(false);
-        }
-        let relative = parts[3..].join("/");
-        if !relative.ends_with(".bin") || !resource_ids::path(&relative) {
-            return Ok(false);
-        }
-        let budget_key = format!("gltf-buffer:{path}");
-        let total = self.checked_json_size(&budget_key, bytes.len())?;
-        self.json_sizes.insert(budget_key, bytes.len());
-        self.total_json_bytes = total;
-        self.gltf_buffers.insert(path.to_owned(), bytes.to_vec());
-        Ok(true)
-    }
-    /// Compile loaded models only when all resource pack layers are present.
-    /// Missing/unsupported models are skipped with an explicit diagnostic.
-    #[cfg(test)]
-    pub fn finish_gltf(&mut self) -> Vec<String> {
-        let mut errors = Vec::new();
-        self.gltf_meshes.clear();
-        self.gltf_materials.clear();
-        for (id, (source, bytes)) in &self.gltf_sources {
-            let folder = source.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
-            let resolved = special_gltf::parse_with_resolver(bytes, &|uri| {
-                // The decoder has already validated relative URI components.
-                self.gltf_buffers.get(&format!("{folder}/{uri}")).cloned()
-            });
-            match resolved {
-                Ok(mesh) => {
-                    match special_gltf::material_factors(bytes) {
-                        Ok(mut mat) => {
-                            for value in mat.values_mut() {
-                                if let Some(uri) = value.base_color_uri.as_deref() {
-                                    value.base_color_texture =
-                                        special_gltf::pack_image_id(source, uri);
-                                }
-                            }
-                            self.gltf_materials.insert(id.clone(), mat);
-                        }
-                        Err(e) => {
-                            errors.push(format!("{source}: {e}"));
-                            continue;
-                        }
-                    }
-                    self.gltf_meshes.insert(id.clone(), mesh);
-                }
-                Err(e) => errors.push(format!("{source}: {e}")),
-            }
-        }
-        errors
-    }
+
     /// List exact original MTL opacity-map pairs. Resource decoding and
     /// overlay allocation belong to the atlas, never to model geometry.
     #[cfg(test)]
@@ -1398,31 +1280,16 @@ impl ModelBank {
                 return None;
             }
         };
-        if self.obj_sources.is_empty()
-            && self.gltf_meshes.is_empty()
-            && native.is_none()
-            && !self.has_layer_models
-        {
+        if self.obj_sources.is_empty() && native.is_none() && !self.has_layer_models {
             return None;
         }
         let selected = self.selections_at(state, pos)?;
         if selected.iter().any(|m| {
-            self.files.get(&m.key).is_some_and(|d| {
-                d.get("mcedit2:static_renderer").is_some()
-                    || d.get("loader").and_then(Value::as_str).is_some_and(|l| {
-                        matches!(
-                            l,
-                            "mcedit2:gltf"
-                                | "forge:gltf"
-                                | "neoforge:gltf"
-                                | "mcedit2:glb"
-                                | "forge:glb"
-                                | "neoforge:glb"
-                        )
-                    })
-            })
+            self.files
+                .get(&m.key)
+                .is_some_and(|d| d.get("mcedit2:static_renderer").is_some())
         }) {
-            return self.experimental_obj_at(state, pos);
+            return self.declared_obj_at(state, pos);
         }
         let mut out = Vec::new();
         for chosen in selected {
@@ -1461,12 +1328,12 @@ impl ModelBank {
         }
         (!out.is_empty()).then_some(out)
     }
-    fn experimental_obj_at(
+    fn declared_obj_at(
         &self,
         state: &State,
         pos: impl Into<ModelSample> + Copy,
     ) -> Option<Vec<ObjSelection>> {
-        if self.obj_meshes.is_empty() && self.gltf_meshes.is_empty() {
+        if self.obj_meshes.is_empty() {
             return None;
         }
         let mut out = Vec::new();
@@ -1480,15 +1347,11 @@ impl ModelBank {
             let suffix = if let Some(adapter) = adapter {
                 match adapter.get("format")?.as_str()? {
                     "obj" => ".obj",
-                    "gltf" => ".gltf",
-                    "glb" => ".glb",
                     _ => return None,
                 }
             } else {
                 match model.get("loader")?.as_str()? {
                     "forge:obj" | "neoforge:obj" => ".obj",
-                    "mcedit2:gltf" | "forge:gltf" | "neoforge:gltf" => ".gltf",
-                    "mcedit2:glb" | "forge:glb" | "neoforge:glb" => ".glb",
                     _ => return None,
                 }
             };
@@ -1505,11 +1368,7 @@ impl ModelBank {
             let path = path.strip_suffix(suffix)?;
             let path = path.strip_prefix("block/").unwrap_or(path);
             let id = format!("model:{ns}:{path}");
-            let mesh = if suffix == ".obj" {
-                self.obj_meshes.get(&id)?.as_slice()
-            } else {
-                self.gltf_meshes.get(&id)?.as_slice()
-            };
+            let mesh = self.obj_meshes.get(&id)?.as_slice();
             let rotation = Part {
                 root: None,
                 bounds: Box3::FULL,
@@ -1521,21 +1380,14 @@ impl ModelBank {
                 .and_then(|a| a.get("textures"))
                 .or_else(|| model.get("textures"))
                 .and_then(Value::as_object);
-            let materials = if suffix == ".obj" {
-                self.obj_materials.get(&id)
-            } else {
-                None
-            };
+            let materials = self.obj_materials.get(&id);
             let id_key = id.clone();
-            let gltf_materials = self.gltf_materials.get(&id);
             for tri in mesh {
                 let mtl = materials.and_then(|m| m.get(&tri.material));
-                let pbr = gltf_materials.and_then(|m| m.get(&tri.material));
                 let raw = mappings
                     .and_then(|m| m.get(&tri.material))
                     .and_then(Value::as_str)
                     .or_else(|| mtl.and_then(|m| m.map_kd.as_deref()))
-                    .or_else(|| pbr.and_then(|m| m.base_color_texture.as_deref()))
                     .or_else(|| {
                         mappings
                             .and_then(|m| m.get("particle"))
@@ -1556,13 +1408,10 @@ impl ModelBank {
                         .get(&(id_key.clone(), tri.material.clone()))
                         .cloned()
                         .unwrap_or_else(|| format!("{ns}:{id}")),
-                    tint: mtl
-                        .map(|m| m.diffuse)
-                        .or_else(|| pbr.map(|m| m.base_color))
-                        .unwrap_or([1.; 4]),
-                    alpha_mode: pbr.map(|m| m.alpha_mode.clone()),
-                    alpha_cutoff: pbr.map_or(0.5, |m| m.alpha_cutoff),
-                    double_sided: pbr.is_none_or(|m| m.double_sided),
+                    tint: mtl.map(|m| m.diffuse).unwrap_or([1.; 4]),
+                    alpha_mode: None,
+                    alpha_cutoff: 0.5,
+                    double_sided: true,
                     colors: [[1.0; 4]; 3],
                     cull: None,
                     render_type: None,
@@ -1587,22 +1436,13 @@ impl ModelBank {
         let chosen = self.selections_at(state, pos)?;
         let mut out = Vec::new();
         for model in chosen {
-            // 已解析的显式实验静态后端没有 JSON 元素，不能再补一个方块盒。
-            let experimental = self.files.get(&model.key).is_some_and(|d| {
-                d.get("mcedit2:static_renderer").is_some()
-                    || d.get("loader").and_then(Value::as_str).is_some_and(|l| {
-                        matches!(
-                            l,
-                            "mcedit2:gltf"
-                                | "forge:gltf"
-                                | "neoforge:gltf"
-                                | "mcedit2:glb"
-                                | "forge:glb"
-                                | "neoforge:glb"
-                        )
-                    })
-            });
-            if experimental && self.experimental_obj_at(state, pos).is_some() {
+            // Explicit OBJ adapters supply their own triangles, without JSON boxes.
+            if self
+                .files
+                .get(&model.key)
+                .is_some_and(|d| d.get("mcedit2:static_renderer").is_some())
+                && self.declared_obj_at(state, pos).is_some()
+            {
                 continue;
             }
             let compiled = self.compiled_elements(&model)?;
@@ -1838,6 +1678,7 @@ impl ModelBank {
 mod tests {
     use super::*;
 
+    #[test]
     fn reversed_java_element_endpoints_keep_inner_faces_and_uv() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -1865,6 +1706,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn java_unqualified_parent_model_and_texture_use_minecraft_namespace() {
         let mut bank = ModelBank::default();
         for (path, json) in [
@@ -1905,6 +1747,7 @@ mod tests {
         assert!(!wanted.contains("demo:stone"));
     }
 
+    #[test]
     fn composite_dependencies_root_reflections_and_cullfaces_stay_consistent() {
         let mut bank = ModelBank::default();
         for (path, doc) in [
@@ -1961,6 +1804,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn vanilla_tintindex_is_preserved_only_on_explicit_tinted_faces() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -1992,6 +1836,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn weighted_variants_are_stable_per_source_xyz_and_match_texture_geometry() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -2041,6 +1886,7 @@ mod tests {
         assert!(short > 0 && tall > short);
     }
 
+    #[test]
     fn multipart_weighted_apply_reuses_client_seed_for_each_part() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -2082,15 +1928,17 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert_eq!(bank.parts_at(&state, source).unwrap().len(), 2);
-        assert!(choose_weighted(
+        assert!(choose_weighted_version(
             &serde_json::json!([
                 {"model":"x","weight":0}
             ]),
-            0
+            0,
+            false
         )
         .is_none());
     }
 
+    #[test]
     fn modded_json_models_use_exact_vanilla_elements_but_reject_custom_loaders() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -2132,6 +1980,7 @@ mod tests {
         assert!(bank.parts_at(&state, (2, 64, 4)).is_none());
     }
 
+    #[test]
     fn state_variants_inherit_named_top_side_and_preserve_namespace() {
         let mut bank = ModelBank::default();
         bank.insert("assets/test/blockstates/widget.json",
@@ -2150,6 +1999,7 @@ mod tests {
         assert!(bank.texture(&s("other:widget", &[]), Face::Top).is_none());
     }
 
+    #[test]
     fn cyclic_texture_aliases_and_untrusted_paths_fail_closed() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -2172,6 +2022,7 @@ mod tests {
             .unwrap());
     }
 
+    #[test]
     fn vanilla_model_elements_produce_exact_unrotated_cuboids() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -2193,6 +2044,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn rotated_or_multipart_models_do_not_invent_geometry() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -2211,6 +2063,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn quarter_turn_variant_rotates_exact_cuboid_and_face_texture() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -2231,6 +2084,7 @@ mod tests {
         assert_eq!(bank.texture(&s, Face::PosZ), Some("test:east".into()));
     }
 
+    #[test]
     fn unsupported_variant_rotation_fail_closed() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -2247,6 +2101,7 @@ mod tests {
         assert_eq!(bank.texture(&s("test:bad", &[]), Face::Top), None);
     }
 
+    #[test]
     fn json_cullface_is_optional_and_y_variant_rotates_world_direction() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -2271,6 +2126,7 @@ mod tests {
         assert_eq!(bank.face_cull_direction(&state, Face::Top, 1), None);
     }
 
+    #[test]
     fn explicit_json_model_only_renders_declared_faces_with_original_local_uvs() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -2294,6 +2150,7 @@ mod tests {
         assert_eq!(selected.texture, "test:red");
     }
 
+    #[test]
     fn absent_vanilla_cube_parent_recovers_geometry_and_face_culling() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -2328,6 +2185,7 @@ mod tests {
         assert!(vanilla_parent_elements("model:test:cube_all").is_none());
     }
 
+    #[test]
     fn vanilla_cube_column_parent_preserves_end_side_texture_aliases() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -2352,6 +2210,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn vanilla_cross_parent_keeps_two_zero_thickness_quads() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -2382,6 +2241,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn nested_modded_item_models_and_custom_parent_support_extended_exact_geometry() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -2429,6 +2289,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn bounded_large_block_models_render_all_selected_elements_consistently() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -2459,6 +2320,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn dotted_mod_resource_json_resolves_texture_and_keeps_namespace() {
         let mut bank = ModelBank::default();
         assert_eq!(
@@ -2489,6 +2351,7 @@ mod tests {
         assert_eq!(normalize_model("create.addon:block/a//b"), None);
     }
 
+    #[test]
     fn model_bank_accepts_thousands_of_original_resource_models() {
         let mut bank = ModelBank::default();
         for i in 0..4_200 {
@@ -2504,6 +2367,7 @@ mod tests {
         assert_eq!(bank.total_json_bytes, old);
     }
 
+    #[test]
     fn vanilla_implicit_uv_preserves_partial_element_face_dimensions() {
         let slab: Value = serde_json::from_str(r#"{"from":[2,0,3],"to":[14,8,13]}"#).unwrap();
         assert_eq!(
@@ -2532,6 +2396,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn inherited_model_missing_uv_uses_element_bounds_not_full_texture() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -2553,6 +2418,7 @@ mod tests {
         assert_eq!(f.texture, "test:wood");
     }
 
+    #[test]
     fn per_element_face_texture_alias_crop_and_quarter_turn() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -2588,6 +2454,7 @@ mod tests {
         assert!(bank.element_face(&state, Face::NegZ, 1).is_none());
     }
 
+    #[test]
     fn multipart_conditions_flatten_matching_models_and_keep_element_faces() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -2636,6 +2503,7 @@ mod tests {
         assert_eq!(bank.elements(&none).unwrap().len(), 1);
     }
 
+    #[test]
     fn nested_multipart_condition_semantics_fail_closed_for_invalid_data() {
         let state = s("test:machine", &[("on", "true"), ("axis", "z")]);
         let good: Value = serde_json::from_str(
@@ -2649,6 +2517,7 @@ mod tests {
         assert_eq!(condition_matches(&missing, &state), Some(false));
     }
 
+    #[test]
     fn multipart_primitive_conditions_and_negated_alternatives_select_real_models() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -2692,6 +2561,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn vanilla_crossed_plant_planes_keep_opposing_faces() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -2738,6 +2608,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn flat_plane_without_declared_normal_face_is_not_invented() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -2754,6 +2625,7 @@ mod tests {
         assert!(bank.parts(&s("test:invalid", &[])).is_none());
     }
 
+    #[test]
     fn tilted_resource_model_parts_preserve_true_vertices() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -2775,6 +2647,7 @@ mod tests {
         assert!(bank.elements(&state).is_none()); // legacy AABB route refuses
     }
 
+    #[test]
     fn inherited_tinted_cross_and_leaves_preserve_biome_tintindex() {
         let mut bank = ModelBank::default();
         for (name, parent, key) in [
@@ -2824,6 +2697,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn vanilla_fence_parent_templates_recover_real_post_and_rails() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -2859,6 +2733,7 @@ mod tests {
         assert!(vanilla_parent_elements("model:other:template_fence_side").is_none());
     }
 
+    #[test]
     fn fallback_cube_top_template_preserves_top_and_side_textures() {
         let mut bank = ModelBank::default();
         bank.insert(
@@ -2887,6 +2762,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn texture_variants_match_all_state_properties_without_guessing() {
         assert!(variant_matches(
             "axis=y,facing=north",
@@ -2894,46 +2770,5 @@ mod tests {
         ));
         assert!(!variant_matches("axis=x", &s("x:block", &[("axis", "y")])));
         assert!(!variant_matches("unsupported", &s("x:block", &[])));
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Models {
-            reversed_java_element_endpoints_keep_inner_faces_and_uv();
-            java_unqualified_parent_model_and_texture_use_minecraft_namespace();
-            composite_dependencies_root_reflections_and_cullfaces_stay_consistent();
-            vanilla_tintindex_is_preserved_only_on_explicit_tinted_faces();
-            weighted_variants_are_stable_per_source_xyz_and_match_texture_geometry();
-            multipart_weighted_apply_reuses_client_seed_for_each_part();
-            modded_json_models_use_exact_vanilla_elements_but_reject_custom_loaders();
-            state_variants_inherit_named_top_side_and_preserve_namespace();
-            cyclic_texture_aliases_and_untrusted_paths_fail_closed();
-            vanilla_model_elements_produce_exact_unrotated_cuboids();
-            rotated_or_multipart_models_do_not_invent_geometry();
-            quarter_turn_variant_rotates_exact_cuboid_and_face_texture();
-            unsupported_variant_rotation_fail_closed();
-            json_cullface_is_optional_and_y_variant_rotates_world_direction();
-            explicit_json_model_only_renders_declared_faces_with_original_local_uvs();
-            absent_vanilla_cube_parent_recovers_geometry_and_face_culling();
-            vanilla_cube_column_parent_preserves_end_side_texture_aliases();
-            vanilla_cross_parent_keeps_two_zero_thickness_quads();
-            nested_modded_item_models_and_custom_parent_support_extended_exact_geometry();
-            bounded_large_block_models_render_all_selected_elements_consistently();
-            dotted_mod_resource_json_resolves_texture_and_keeps_namespace();
-            model_bank_accepts_thousands_of_original_resource_models();
-            vanilla_implicit_uv_preserves_partial_element_face_dimensions();
-            inherited_model_missing_uv_uses_element_bounds_not_full_texture();
-            per_element_face_texture_alias_crop_and_quarter_turn();
-            multipart_conditions_flatten_matching_models_and_keep_element_faces();
-            nested_multipart_condition_semantics_fail_closed_for_invalid_data();
-            multipart_primitive_conditions_and_negated_alternatives_select_real_models();
-            vanilla_crossed_plant_planes_keep_opposing_faces();
-            flat_plane_without_declared_normal_face_is_not_invented();
-            tilted_resource_model_parts_preserve_true_vertices();
-            inherited_tinted_cross_and_leaves_preserve_biome_tintindex();
-            vanilla_fence_parent_templates_recover_real_post_and_rails();
-            fallback_cube_top_template_preserves_top_and_side_textures();
-            texture_variants_match_all_state_properties_without_guessing();
-        }
     }
 }

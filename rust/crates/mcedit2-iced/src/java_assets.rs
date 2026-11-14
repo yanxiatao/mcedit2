@@ -1095,13 +1095,11 @@ pub(super) fn open(paths: &[PathBuf], control: &LoadControl) -> Result<TextureBa
 }
 
 #[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires local GPU / installed Minecraft resources"]
 
     fn real_scene_model_coverage() {
         let world = mcedit2_world::inspect_world(PathBuf::from(
@@ -1224,6 +1222,7 @@ mod tests {
         output.into_inner()
     }
 
+    #[test]
     fn static_decode_retains_full_image_and_only_allocates_selected_animation_frame() {
         let bytes = png();
         let mut oversized = bytes.clone();
@@ -1306,6 +1305,7 @@ mod tests {
         assert!(animated);
     }
 
+    #[test]
     fn cancelled_load_never_reads_an_input_source() {
         let control = LoadControl {
             cancelled: Arc::new(AtomicBool::new(true)),
@@ -1316,6 +1316,7 @@ mod tests {
             .contains("取消"));
     }
 
+    #[test]
     fn java_pipeline_keeps_referenced_non_block_textures_and_skips_unrelated_gui() {
         use std::io::Write;
         let path = std::env::temp_dir().join(format!(
@@ -1357,6 +1358,7 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
 
+    #[test]
     fn atlas_cancellation_stops_before_publishing_any_partial_atlas() {
         let tile = Tile {
             width: 64,
@@ -1378,6 +1380,7 @@ mod tests {
         assert_eq!(calls, 4);
     }
 
+    #[test]
     fn all_png_mode_and_explicit_budget_report_actual_loading() {
         use std::io::Write;
         let path = std::env::temp_dir().join(format!("mcedit2-all-png-{}.zip", std::process::id()));
@@ -1428,6 +1431,7 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
 
+    #[test]
     fn source_index_budget_counts_live_entries_and_releases_replaced_sources() {
         let id = "test:tile".to_owned();
         let source = Source {
@@ -1524,6 +1528,7 @@ mod tests {
             .contains("预算"));
     }
 
+    #[test]
     fn many_java_layers_load_every_texture_and_apply_the_last_overlay() {
         use std::io::Write;
         let root = std::env::temp_dir().join(format!(
@@ -1594,6 +1599,7 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
     fn atlas_contains_more_than_u16_texture_ids_without_dropping_entries() {
         let tiles = (0..65_537)
             .map(|i| {
@@ -1637,6 +1643,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn asymmetric_texture_corners_match_java_world_face_coordinates() {
         use crate::isometric::Face;
         use std::io::Write;
@@ -1709,24 +1716,13 @@ mod tests {
         fs::remove_file(path).unwrap();
     }
 
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Installed {
-            real_scene_model_coverage();
-        }
+    #[test]
+    fn test_super_client_asset_tests_complete() {
+        super::client_asset_tests::complete();
+    }
 
-        if category == crate::test_categories::Category::Assets {
-            super::client_asset_tests::complete();
-            png::verify_reference();
-            static_decode_retains_full_image_and_only_allocates_selected_animation_frame();
-            cancelled_load_never_reads_an_input_source();
-            java_pipeline_keeps_referenced_non_block_textures_and_skips_unrelated_gui();
-            atlas_cancellation_stops_before_publishing_any_partial_atlas();
-            all_png_mode_and_explicit_budget_report_actual_loading();
-            source_index_budget_counts_live_entries_and_releases_replaced_sources();
-            many_java_layers_load_every_texture_and_apply_the_last_overlay();
-            atlas_contains_more_than_u16_texture_ids_without_dropping_entries();
-            asymmetric_texture_corners_match_java_world_face_coordinates();
-        }
+    #[test]
+    fn test_png_verify_reference() {
+        png::verify_reference();
     }
 }

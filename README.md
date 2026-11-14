@@ -38,7 +38,7 @@ cargo run -p mcedit2-iced -- --inspect "/path/to/Minecraft/saves/World"
 
 **Important limitations:** not all Minecraft releases, snapshots, modded blocks, rendering effects, Block Entities, entities, or original MCEdit2 editing functions have been verified or fully ported. The 3D far horizon uses progressively reduced detail, not game-equivalent complete simulation. Do not edit your only copy of a world.
 
-当前本机验证结果见[中文重写进度记录](rust/PROGRESS.md)：2026-10-27 的 Rust 工作区现为 25 个类别测试入口，默认 22 类通过，GPU 与本机实例大类另已通过。测试组织及命令见[按类别测试说明](rust/TESTING.md)。完整功能迁移和真实存档验收仍有缺口；本轮验证在本机完成。另见 [Rust 工作区说明](rust/README.md)与[格式和保存约定](rust/COMPATIBILITY.md)。
+当前测试采用标准 Rust harness，命令及需要额外设备 / 实例资源的检查见[测试说明](rust/TESTING.md)。历史验收结果见[进度记录](rust/PROGRESS.md)，完整迁移和真实存档验收仍有缺口。另见 [Rust 工作区说明](rust/README.md)与[格式和保存约定](rust/COMPATIBILITY.md)。
 
 ## Licensing and history
 

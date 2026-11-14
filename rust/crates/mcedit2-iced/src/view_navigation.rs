@@ -277,10 +277,5 @@ pub(crate) fn controls(target: Target) -> iced::widget::Row<'static, crate::Mess
 }
 
 #[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
-
-#[cfg(test)]
 #[path = "view_navigation_tests.rs"]
 mod tests;

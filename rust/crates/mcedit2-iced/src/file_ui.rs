@@ -233,43 +233,15 @@ fn save<'a>(app: &'a App, world: &'a WorldSummary) -> Element<'a, Message> {
                 for summary in intent.candidates.summaries() {
                     body = body.push(text(summary));
                 }
-                let (phrase, expected, changed, confirm) = if intent.be_mode {
-                    (
-                        &app.be_save_phrase,
-                        "SAVE_BE_NBT",
-                        Message::BeSavePhrase as fn(String) -> Message,
-                        Message::ConfirmBeSave,
-                    )
+                let confirm = if intent.be_mode {
+                    Message::ConfirmBeSave
                 } else {
-                    (
-                        &app.save_phrase,
-                        "SAVE",
-                        Message::SavePhrase as fn(String) -> Message,
-                        Message::ConfirmWorldSave,
-                    )
+                    Message::ConfirmWorldSave
                 };
-                let confirm_label = l.pick("确认保存并保留备份", "Save and keep backups");
                 body = body.push(
-                    row![
-                        text_input(
-                            &format!(
-                                "{} {expected}",
-                                l.pick("确认写入请输入", "To confirm writing, type")
-                            ),
-                            phrase
-                        )
-                        .on_input(changed)
-                        .width(Length::Fill),
-                        if phrase == expected && !joint {
-                            button(confirm_label)
-                                .style(button::primary)
-                                .on_press(confirm)
-                        } else {
-                            button(confirm_label)
-                        }
-                    ]
-                    .spacing(8)
-                    .wrap(),
+                    button(l.pick("确认保存并保留备份", "Save and keep backups"))
+                        .style(button::primary)
+                        .on_press_maybe((!joint && !app.readonly).then_some(confirm)),
                 );
             }
         }
@@ -468,8 +440,8 @@ fn save_groups<'a>(
     if !dimensions.is_empty() {
         body = body.push(text(dimensions.join("、")));
     }
-    body=body.push(text("联合保存包含此存档所有已修改维度，分别采用各维度的高度 / 光照设置；当前 Region 预览继续参与核对。输入 SAVE，包含实体、方块实体或区块 NBT 时输入 SAVE_BE_NBT。"));
-    body = body.push(text_input("确认短语", &app.mixed_phrase).on_input(Message::MixedPhrase));
+    body=body.push(text("联合保存包含此存档所有已修改维度，分别采用各维度的高度 / 光照设置；当前 Region 预览继续参与核对。普通保存通过按钮确认；区块删除在区块工作区单独确认，恢复时请核对事务方向。"));
+
     body = body.push(
         row![
             button("准备联合保存")

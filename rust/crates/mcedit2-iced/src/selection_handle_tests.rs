@@ -55,6 +55,7 @@ fn accept(app: &mut App, message: Message) -> SelectionBox {
     let _ = crate::update(app, message);
     current(app).unwrap()
 }
+#[test]
 fn world_views() {
     let (mut app, scene, mesh, hit) = crate::picking_integration_tests::fixture();
     app.manual_textures = true;
@@ -140,6 +141,7 @@ fn world_views() {
     }
     let _ = hit;
 }
+#[test]
 fn planar_views_and_history() {
     let mut f = Fixture::new(3955);
     crate::object_fixture::populate(&mut f);
@@ -312,6 +314,7 @@ fn planar_views_and_history() {
     assert_eq!(f.file("region/r.0.0.mca"), terrain);
     assert_eq!(f.file("entities/r.0.0.mca"), entities);
 }
+#[test]
 fn resize_move_cancel() {
     let f = Fixture::new(3955);
     let mut app = metadata_tests::app(&f);
@@ -503,14 +506,4 @@ fn resize_move_cancel() {
         )),
     );
     assert!(!retained.lock().unwrap().active());
-}
-pub(super) fn run(category: crate::test_categories::Category) {
-    match category {
-        crate::test_categories::Category::Rendering => {
-            world_views();
-            planar_views_and_history();
-            resize_move_cancel();
-        }
-        _ => (),
-    }
 }

@@ -216,15 +216,12 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Document, String> {
     }
     Ok(document)
 }
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
     fn forward_uv_indices_negative_vertices_groups_normals_and_colors_are_preserved() {
         let source=b"mtllib material.mtl\no Visible\ng Surface\nusemtl Painted Body\nv 0 0 0\nv 2 0 0 2\nv 0 1 0\nf -3/1/1/1 -2/2/1/2 -1/3/1/3\nvt 0 0\nvt 1 0\nvt 0 1\nvn 0 0 1\nvc 1 0 0 1\nvc 0 1 0 0.5\nvc 0 0 1 0.25\n";
         let mesh = parse(source).unwrap();
@@ -241,6 +238,7 @@ mod tests {
         assert!(parse(b"v 0 0 0\nf 1 2 3\n").is_err());
     }
 
+    #[test]
     fn static_material_quad_triangulates_with_bottom_origin_uv() {
         let obj = b"v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nusemtl casing\nf 1/1 2/2 3/3 4/4\n";
         let triangles = parse(obj).unwrap().triangles;
@@ -251,17 +249,9 @@ mod tests {
         assert_eq!(triangles[1].xyz[2], [-0.5, 0.5, -0.5]);
     }
 
+    #[test]
     fn obj_parser_rejects_bad_indices_and_nan() {
         assert!(parse(b"v 0 0 0\nf 2 1 1\n").is_err());
         assert!(parse(b"v NaN 0 0\nvt 0 0\nf 1/1 1/1 1/1\n").is_err());
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Models {
-            forward_uv_indices_negative_vertices_groups_normals_and_colors_are_preserved();
-            static_material_quad_triangulates_with_bottom_origin_uv();
-            obj_parser_rejects_bad_indices_and_nan();
-        }
     }
 }

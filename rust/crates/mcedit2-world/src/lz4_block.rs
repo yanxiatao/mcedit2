@@ -112,10 +112,6 @@ pub(crate) fn encode(data: &[u8]) -> Result<Vec<u8>, WorldError> {
     out.extend([0u8; 12]);
     Ok(out)
 }
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
 
 #[cfg(test)]
 mod tests {
@@ -143,6 +139,7 @@ mod tests {
         end
     }
 
+    #[test]
     fn java_block_stream_supports_raw_and_lz4_blocks_and_exact_end() {
         let data = vec![0x45; 4096];
         let mut stream = block(&data, false);
@@ -156,6 +153,7 @@ mod tests {
         assert!(decode(&stream).is_err());
     }
 
+    #[test]
     fn malformed_checksum_and_lengths_cannot_be_silently_loaded() {
         let mut bytes = block(&[0x55; 128], false);
         bytes.extend(terminal());
@@ -169,13 +167,5 @@ mod tests {
         unknown[8] = 0xf6;
         unknown.extend(terminal());
         assert!(decode(&unknown).is_err());
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Formats {
-            java_block_stream_supports_raw_and_lz4_blocks_and_exact_end();
-            malformed_checksum_and_lengths_cannot_be_silently_loaded();
-        }
     }
 }

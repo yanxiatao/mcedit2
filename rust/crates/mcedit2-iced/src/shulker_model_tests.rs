@@ -76,6 +76,7 @@ fn orient([x, y, z]: [f32; 3], facing: &str) -> [f32; 3] {
     }
 }
 
+#[test]
 fn shulker_all_colors_directions_match_client_vertices_and_uvs() {
     let f = fixture();
     let bank = f.open();
@@ -181,6 +182,7 @@ fn shulker_all_colors_directions_match_client_vertices_and_uvs() {
     }
 }
 
+#[test]
 fn shulker_closed_shell_keeps_source_picking_in_all_projections() {
     use iced::{Point, Size};
     let f = fixture();
@@ -234,6 +236,7 @@ fn shulker_closed_shell_keeps_source_picking_in_all_projections() {
     }
 }
 
+#[test]
 fn shulker_explicit_empty_custom_and_foreign_models_are_preserved() {
     let f = fixture();
     f.put(
@@ -281,6 +284,7 @@ fn shulker_explicit_empty_custom_and_foreign_models_are_preserved() {
     assert_eq!(normal.len(), 2);
 }
 
+#[test]
 fn shulker_entity_overlay_is_used_instead_of_particle_and_missing_sheet_is_diagnosed() {
     let f = fixture();
     let overlay = Fixture::new();
@@ -328,6 +332,7 @@ fn shulker_entity_overlay_is_used_instead_of_particle_and_missing_sheet_is_diagn
     }
 }
 
+#[test]
 fn shulker_reserved_model_collision_is_an_explicit_load_error() {
     let f = fixture();
     f.put(
@@ -346,15 +351,4 @@ fn shulker_reserved_model_collision_is_an_explicit_load_error() {
         error.contains("mcedit2:builtin/shulker/shulker_box"),
         "{error}"
     );
-}
-
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    if category == crate::test_categories::Category::SpecialModels {
-        shulker_all_colors_directions_match_client_vertices_and_uvs();
-        shulker_closed_shell_keeps_source_picking_in_all_projections();
-        shulker_explicit_empty_custom_and_foreign_models_are_preserved();
-        shulker_entity_overlay_is_used_instead_of_particle_and_missing_sheet_is_diagnosed();
-        shulker_reserved_model_collision_is_an_explicit_load_error();
-    }
 }

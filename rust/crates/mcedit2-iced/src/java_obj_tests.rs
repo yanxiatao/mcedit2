@@ -190,6 +190,7 @@ pub(crate) fn isometric_scene(bank: Arc<TextureBank>) -> crate::isometric::Isome
     }
 }
 
+#[test]
 fn production_composite_keeps_obj_groups_colors_uv_reflection_and_json_elements() {
     let fixture = fixture();
     let bank = fixture.open();
@@ -281,6 +282,7 @@ fn production_composite_keeps_obj_groups_colors_uv_reflection_and_json_elements(
     }
 }
 
+#[test]
 fn unmatched_valid_multipart_never_invents_a_placeholder_cube() {
     let fixture = fixture();
     fixture.put(
@@ -310,6 +312,7 @@ fn unmatched_valid_multipart_never_invents_a_placeholder_cube() {
         .is_none());
 }
 
+#[test]
 fn production_obj_honors_mtl_override_variant_rotation_and_never_reads_external_paths() {
     let fixture = fixture();
     fixture.put("assets/demo/models/block/assembly.json",br##"{"parent":"demo:block/base","loader":"neoforge:obj","model":"demo:models/mesh/shape.obj","mtl_override":"demo:models/alternate.mtl","flip_v":false,"visibility":{"Hidden":false},"textures":{"alias":"demo:entity/direct"}}"##);
@@ -341,6 +344,7 @@ fn production_obj_honors_mtl_override_variant_rotation_and_never_reads_external_
         .any(|w| w.contains("材质库引用无效")));
 }
 
+#[test]
 fn obj_zip_and_directory_have_identical_compiled_meshes() {
     use std::io::Write;
     let fixture = fixture();
@@ -379,6 +383,9 @@ fn obj_zip_and_directory_have_identical_compiled_meshes() {
     let b = crate::spectator::build(&archive);
     assert_eq!(a, b);
 }
+
+#[test]
+#[ignore = "requires local GPU / installed Minecraft resources"]
 
 fn real_instance_native_obj_models_keep_visible_components_and_materials() {
     let path = std::env::var_os("MCEDIT2_TEST_WORLD").expect("设置 MCEDIT2_TEST_WORLD");
@@ -479,18 +486,4 @@ fn real_instance_native_obj_models_keep_visible_components_and_materials() {
         serde_json::to_vec_pretty(&positions).unwrap(),
     )
     .unwrap();
-}
-
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    if category == crate::test_categories::Category::Models {
-        production_composite_keeps_obj_groups_colors_uv_reflection_and_json_elements();
-        unmatched_valid_multipart_never_invents_a_placeholder_cube();
-        production_obj_honors_mtl_override_variant_rotation_and_never_reads_external_paths();
-        obj_zip_and_directory_have_identical_compiled_meshes();
-    }
-
-    if category == crate::test_categories::Category::Installed {
-        real_instance_native_obj_models_keep_visible_components_and_materials();
-    }
 }

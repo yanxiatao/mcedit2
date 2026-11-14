@@ -51,7 +51,6 @@ pub use search::{NbtHit, NbtResults, PreparedNbt};
 #[path = "structure_deletion.rs"]
 mod deletion;
 const HISTORY_LIMIT: usize = 100;
-const MAX_FILE: u64 = 64 * 1024 * 1024;
 const DOCUMENT_SPACE: &str = "mcedit2:structure";
 fn invalid(message: impl ToString) -> WorldError {
     WorldError::Invalid(message.to_string())
@@ -114,19 +113,22 @@ impl Document {
         budget: EditWorkBudget,
     ) -> Result<Self, WorldError> {
         let metadata = std::fs::symlink_metadata(path)?;
-        if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > MAX_FILE {
-            return Err(invalid("结构文档必须是 64 MiB 内的普通文件"));
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.len() > (budget.bytes() / 4) as u64
+        {
+            return Err(invalid("结构文档不是普通文件，或超过所选工作预算"));
         }
         budget.check(
             (metadata.len() as usize)
                 .checked_mul(4)
                 .ok_or_else(|| invalid("结构文件工作集溢出"))?,
         )?;
-        let bytes = std::fs::read(path)?;
+        let bytes = crate::read_limited_file(path, (budget.bytes() / 4) as u64)?;
         let proof = SourceFileProof::from_bytes(path, &bytes)?;
         if format != Format::Clipboard {
             // 独立原位保存不能丢弃第二段压缩流或尾随载荷。
-            crate::nbt_file::read_nbt(path)?;
+            crate::nbt_file::read_nbt_with_limit(path, (budget.bytes() / 4) as u64)?;
         }
         let version = match format {
             Format::Legacy => legacy_version.ok_or_else(|| {
@@ -145,7 +147,10 @@ impl Document {
                 }
             }
             Format::SpongeV2 | Format::SpongeV3 | Format::Structure => {
-                let (_, raw) = crate::nbt_envelope::NbtEnvelope::decode(bytes)?;
+                let (_, raw) = crate::nbt_envelope::NbtEnvelope::decode_limited(
+                    bytes,
+                    (budget.bytes() / 4) as u64,
+                )?;
                 let root = parse_root(&raw).map_err(invalid)?;
                 let source = if format == Format::SpongeV3 {
                     root.require("Schematic", 10).map_err(invalid)?

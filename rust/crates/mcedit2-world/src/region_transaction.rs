@@ -26,12 +26,14 @@ use std::path::{Path, PathBuf};
 mod group;
 mod history;
 pub use group::{
-    apply_region_group, finalize_region_group, finalize_region_group_with_history,
-    rollback_region_group, rollback_region_group_with_history, validate_region_group,
-    RegionGroupReceipt,
+    apply_region_group, apply_region_group_with_budget, finalize_region_group,
+    finalize_region_group_with_budget, finalize_region_group_with_history,
+    finalize_region_group_with_history_with_budget, rollback_region_group,
+    rollback_region_group_with_budget, rollback_region_group_with_history,
+    rollback_region_group_with_history_with_budget, validate_region_group,
+    validate_region_group_with_budget, RegionGroupReceipt,
 };
 
-const MAX_REGION_IMAGE: u64 = 256 * 1024 * 1024;
 const MARKER_VERSION: u32 = 1;
 fn refuse(text: impl Into<String>) -> WorldError {
     WorldError::Invalid(text.into())
@@ -59,15 +61,19 @@ fn ensure_regular(path: &Path) -> Result<(), WorldError> {
     }
     Ok(())
 }
-fn read_region_bytes(path: &Path) -> Result<Vec<u8>, WorldError> {
+fn read_region_bytes(
+    path: &Path,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<Vec<u8>, WorldError> {
     ensure_regular(path)?;
     let file = fs::File::open(path)?;
-    if file.metadata()?.len() > MAX_REGION_IMAGE {
-        return Err(refuse("Region 或备份超过 256 MiB 事务预算"));
+    if file.metadata()?.len() > budget.bytes() as u64 {
+        return Err(refuse("Region 或备份超过当前事务预算"));
     }
     let mut bytes = Vec::new();
-    file.take(MAX_REGION_IMAGE + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_REGION_IMAGE {
+    file.take(budget.bytes() as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > budget.bytes() as u64 {
         return Err(refuse("Region 在读取期间超过事务预算"));
     }
     Ok(bytes)
@@ -268,12 +274,15 @@ fn preflight_artifacts(files: &Paths, marker: &Marker) -> Result<(), WorldError>
     crate::transaction_artifacts::verify_hash(&files.abandoned, &marker.replacement_sha256)?;
     verify_archives(files, marker)
 }
-fn verify_marker(marker: &Marker) -> Result<(), WorldError> {
+fn verify_marker(
+    marker: &Marker,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<(), WorldError> {
     if marker.version != MARKER_VERSION
         || marker.original_size < 8192
         || marker.replacement_size <= marker.original_size
-        || marker.original_size > MAX_REGION_IMAGE
-        || marker.replacement_size > MAX_REGION_IMAGE
+        || marker.original_size > budget.bytes() as u64
+        || marker.replacement_size > budget.bytes() as u64
     {
         return Err(refuse("Invalid pending region transaction marker"));
     }
@@ -289,7 +298,10 @@ fn verify_marker(marker: &Marker) -> Result<(), WorldError> {
     }
     Ok(())
 }
-fn read_pending(region: PathBuf) -> Result<(Marker, Paths), WorldError> {
+fn read_pending(
+    region: PathBuf,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<(Marker, Paths), WorldError> {
     let pending = suffix(&region, ".mcedit2.pending.json")?;
     ensure_regular(&pending)?;
     if fs::metadata(&pending)?.len() > 4096 {
@@ -297,10 +309,10 @@ fn read_pending(region: PathBuf) -> Result<(Marker, Paths), WorldError> {
     }
     let marker: Marker = serde_json::from_slice(&fs::read(&pending)?)
         .map_err(|e| refuse(format!("Invalid pending region transaction marker: {e}")))?;
-    verify_marker(&marker)?;
+    verify_marker(&marker, budget)?;
     let related = paths(region, &marker.original_sha256, &marker.replacement_sha256)?;
     ensure_regular(&related.backup)?;
-    let backup = read_region_bytes(&related.backup)?;
+    let backup = read_region_bytes(&related.backup, budget)?;
     if backup.len() as u64 != marker.original_size || sha(&backup) != marker.original_sha256 {
         return Err(refuse(
             "Original backup is missing, truncated or corrupted; manual recovery required",
@@ -316,9 +328,22 @@ pub fn apply_single_region(
     dimension: &str,
     candidate: &NativeRegionCandidate,
 ) -> Result<RegionWriteReceipt, WorldError> {
+    apply_single_region_with_budget(
+        world,
+        dimension,
+        candidate,
+        crate::editing::EditWorkBudget::default(),
+    )
+}
+pub fn apply_single_region_with_budget(
+    world: &WorldSummary,
+    dimension: &str,
+    candidate: &NativeRegionCandidate,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<RegionWriteReceipt, WorldError> {
     let _guard = crate::world_write_lock::acquire(&world.root, false)?;
     group::require_no_active_group(world)?;
-    apply_region_with_mode(world, dimension, candidate, false)
+    apply_region_with_mode(world, dimension, candidate, false, budget)
 }
 /// Explicitly confirmed original-NBT-authenticated BE save route.
 /// This is the ONLY public write path that can accept existing BE scalar
@@ -330,6 +355,21 @@ pub fn apply_authenticated_be_single_region(
     candidate: &NativeRegionCandidate,
     confirmation: &str,
 ) -> Result<RegionWriteReceipt, WorldError> {
+    apply_authenticated_be_single_region_with_budget(
+        world,
+        dimension,
+        candidate,
+        confirmation,
+        crate::editing::EditWorkBudget::default(),
+    )
+}
+pub fn apply_authenticated_be_single_region_with_budget(
+    world: &WorldSummary,
+    dimension: &str,
+    candidate: &NativeRegionCandidate,
+    confirmation: &str,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<RegionWriteReceipt, WorldError> {
     let _guard = crate::world_write_lock::acquire(&world.root, false)?;
     group::require_no_active_group(world)?;
     if confirmation != "SAVE_BE_NBT"
@@ -339,13 +379,14 @@ pub fn apply_authenticated_be_single_region(
             "BE save requires an original BE scalar proof and exact SAVE_BE_NBT confirmation",
         ));
     }
-    apply_region_with_mode(world, dimension, candidate, true)
+    apply_region_with_mode(world, dimension, candidate, true, budget)
 }
 fn apply_region_with_mode(
     world: &WorldSummary,
     dimension: &str,
     candidate: &NativeRegionCandidate,
     allow_be: bool,
+    budget: crate::editing::EditWorkBudget,
 ) -> Result<RegionWriteReceipt, WorldError> {
     if !candidate.section_proofs.is_empty() {
         return Err(refuse("新 section 须通过混合组复核维度合同并保存"));
@@ -377,7 +418,7 @@ fn apply_region_with_mode(
             "Region candidate references an untrusted/noncanonical path",
         ));
     }
-    let original = read_region_bytes(&region)?;
+    let original = read_region_bytes(&region, budget)?;
     verify_candidate(&original, candidate)?;
     let next = sha(&candidate.image);
     let files = paths(region, &candidate.original_region_sha256, &next)?;
@@ -395,7 +436,7 @@ fn apply_region_with_mode(
     // Re-check the whole source immediately before replacement. A game or
     // other editor mutating the world during this operation is unsupported.
     ensure_regular(&files.region)?;
-    if sha(&read_region_bytes(&files.region)?) != marker.original_sha256 {
+    if sha(&read_region_bytes(&files.region, budget)?) != marker.original_sha256 {
         return Err(refuse(
             "Original Region changed during staging; pending marker retained for recovery",
         ));
@@ -421,7 +462,24 @@ pub fn finalize_single_region(
     rz: i32,
     extension: &str,
 ) -> Result<RegionWriteReceipt, WorldError> {
-    finalize_single_region_with_history(world, dimension, rx, rz, extension)
+    finalize_single_region_with_budget(
+        world,
+        dimension,
+        rx,
+        rz,
+        extension,
+        crate::editing::EditWorkBudget::default(),
+    )
+}
+pub fn finalize_single_region_with_budget(
+    world: &WorldSummary,
+    dimension: &str,
+    rx: i32,
+    rz: i32,
+    extension: &str,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<RegionWriteReceipt, WorldError> {
+    finalize_single_region_with_history_with_budget(world, dimension, rx, rz, extension, budget)
         .map(|(receipt, _)| receipt)
 }
 /// 旧单文件事务的完成记录与真实来源同时返回，调用方可保留已有会话历史。
@@ -432,9 +490,26 @@ pub fn finalize_single_region_with_history(
     rz: i32,
     extension: &str,
 ) -> Result<(RegionWriteReceipt, crate::history_source::Archive), WorldError> {
+    finalize_single_region_with_history_with_budget(
+        world,
+        dimension,
+        rx,
+        rz,
+        extension,
+        crate::editing::EditWorkBudget::default(),
+    )
+}
+pub fn finalize_single_region_with_history_with_budget(
+    world: &WorldSummary,
+    dimension: &str,
+    rx: i32,
+    rz: i32,
+    extension: &str,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<(RegionWriteReceipt, crate::history_source::Archive), WorldError> {
     let _guard = crate::world_write_lock::acquire(&world.root, false)?;
     group::require_no_active_group(world)?;
-    let receipt = finalize_region(world, dimension, rx, rz, extension)?;
+    let receipt = finalize_region(world, dimension, rx, rz, extension, budget)?;
     let archive = history::resolved(world, dimension, std::slice::from_ref(&receipt), false, [])?;
     Ok((receipt, archive))
 }
@@ -444,11 +519,12 @@ fn finalize_region(
     rx: i32,
     rz: i32,
     extension: &str,
+    budget: crate::editing::EditWorkBudget,
 ) -> Result<RegionWriteReceipt, WorldError> {
     let region = expected_region_path(world, dimension, rx, rz, extension)?;
-    let (marker, files) = read_pending(region)?;
+    let (marker, files) = read_pending(region, budget)?;
     ensure_regular(&files.region)?;
-    let replacement = read_region_bytes(&files.region)?;
+    let replacement = read_region_bytes(&files.region, budget)?;
     if sha(&replacement) != marker.replacement_sha256 {
         return Err(refuse(
             "Cannot finalize: Region is not exactly the planned replacement",
@@ -480,7 +556,24 @@ pub fn rollback_pending_region(
     rz: i32,
     extension: &str,
 ) -> Result<RegionWriteReceipt, WorldError> {
-    rollback_pending_region_with_history(world, dimension, rx, rz, extension)
+    rollback_pending_region_with_budget(
+        world,
+        dimension,
+        rx,
+        rz,
+        extension,
+        crate::editing::EditWorkBudget::default(),
+    )
+}
+pub fn rollback_pending_region_with_budget(
+    world: &WorldSummary,
+    dimension: &str,
+    rx: i32,
+    rz: i32,
+    extension: &str,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<RegionWriteReceipt, WorldError> {
+    rollback_pending_region_with_history_with_budget(world, dimension, rx, rz, extension, budget)
         .map(|(receipt, _)| receipt)
 }
 /// 回滚保持原始来源，恢复界面据同一归档观察实际磁盘头，不清除会话。
@@ -491,9 +584,26 @@ pub fn rollback_pending_region_with_history(
     rz: i32,
     extension: &str,
 ) -> Result<(RegionWriteReceipt, crate::history_source::Archive), WorldError> {
+    rollback_pending_region_with_history_with_budget(
+        world,
+        dimension,
+        rx,
+        rz,
+        extension,
+        crate::editing::EditWorkBudget::default(),
+    )
+}
+pub fn rollback_pending_region_with_history_with_budget(
+    world: &WorldSummary,
+    dimension: &str,
+    rx: i32,
+    rz: i32,
+    extension: &str,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<(RegionWriteReceipt, crate::history_source::Archive), WorldError> {
     let _guard = crate::world_write_lock::acquire(&world.root, false)?;
     group::require_no_active_group(world)?;
-    let receipt = rollback_region(world, dimension, rx, rz, extension)?;
+    let receipt = rollback_region(world, dimension, rx, rz, extension, budget)?;
     let archive = history::resolved(world, dimension, std::slice::from_ref(&receipt), true, [])?;
     Ok((receipt, archive))
 }
@@ -503,11 +613,12 @@ fn rollback_region(
     rx: i32,
     rz: i32,
     extension: &str,
+    budget: crate::editing::EditWorkBudget,
 ) -> Result<RegionWriteReceipt, WorldError> {
     let region = expected_region_path(world, dimension, rx, rz, extension)?;
-    let (marker, files) = read_pending(region)?;
+    let (marker, files) = read_pending(region, budget)?;
     ensure_regular(&files.region)?;
-    let current_bytes = read_region_bytes(&files.region)?;
+    let current_bytes = read_region_bytes(&files.region, budget)?;
     let current = sha(&current_bytes);
     if current != marker.original_sha256 && current != marker.replacement_sha256 {
         return Err(refuse(
@@ -527,7 +638,7 @@ fn rollback_region(
                 return Err(refuse("Interrupted restoration stage has invalid hash"));
             }
         } else {
-            let original = read_region_bytes(&files.backup)?;
+            let original = read_region_bytes(&files.backup, budget)?;
             append_atomic_marker(&files.restore, &original)?;
         }
         // One-file replacement of verified backup; never regenerate original
@@ -535,7 +646,7 @@ fn rollback_region(
         replace_existing(&files.restore, &files.region)?;
         parent_sync(&files.region)?;
     }
-    if sha(&read_region_bytes(&files.region)?) != marker.original_sha256 {
+    if sha(&read_region_bytes(&files.region, budget)?) != marker.original_sha256 {
         return Err(refuse(
             "Rollback verification failed; pending marker preserved",
         ));
@@ -558,7 +669,7 @@ fn rollback_region(
     }
     crate::transaction_artifacts::archive(&files.pending, &files.rolled_back)?;
     parent_sync(&files.region)?;
-    let replacement_backup = retained_replacement(&files, &marker.replacement_sha256)?;
+    let replacement_backup = retained_replacement(&files, &marker.replacement_sha256, budget)?;
     Ok(RegionWriteReceipt {
         region_path: files.region,
         backup_path: files.backup,
@@ -568,10 +679,14 @@ fn rollback_region(
         replacement_backup,
     })
 }
-fn retained_replacement(files: &Paths, expected: &str) -> Result<Option<PathBuf>, WorldError> {
+fn retained_replacement(
+    files: &Paths,
+    expected: &str,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<Option<PathBuf>, WorldError> {
     match fs::symlink_metadata(&files.replacement_backup) {
         Ok(_) => {
-            if sha(&read_region_bytes(&files.replacement_backup)?) != expected {
+            if sha(&read_region_bytes(&files.replacement_backup, budget)?) != expected {
                 return Err(refuse("旧 Region 替换版本备份的摘要改变"));
             }
             Ok(Some(files.replacement_backup.clone()))
@@ -579,9 +694,4 @@ fn retained_replacement(files: &Paths, expected: &str) -> Result<Option<PathBuf>
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
     }
-}
-
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    group::run_test_category(category);
 }

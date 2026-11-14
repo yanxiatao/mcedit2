@@ -167,74 +167,31 @@ mod world_browser;
 mod world_hover;
 mod world_info;
 mod world_save;
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    #[cfg(debug_assertions)]
-    if category == crate::test_categories::Category::Navigation {
-        input_batches::verify();
-    }
-    hover_query::run_test_category(category);
-    tests::run_test_category(category);
-    auto_assets::run_test_category(category);
-    block_names::run_test_category(category);
-    canvas_raster::run_test_category(category);
-    chunk_mesh_cache::run_test_category(category);
-    frustum::run_test_category(category);
-    gpu_mesh::run_test_category(category);
-    gpu_scene::run_test_category(category);
-    isometric::run_test_category(category);
-    legacy_render::run_test_category(category);
-    material_mode::run_test_category(category);
-    mesh_async::run_test_category(category);
-    models::run_test_category(category);
-    orthographic_world::run_test_category(category);
-    palette::run_test_category(category);
-    picking::run_test_category(category);
-    picking_integration_tests::run_test_category(category);
-    transfer_edit::run_test_category(category);
-    structure_exchange::run_test_category(category);
-    block_edit::run_test_category(category);
-    brush_stroke::run_test_category(category);
-    brush_cursor::run_test_category(category);
-    plugin_ui::run_test_category(category);
-    metadata_tests::run_test_category(category);
-    selection_clipboard::run_test_category(category);
-    selection_edit::run_test_category(category);
-    inventory_ui::run_test_category(category);
-    item_icons::run_test_category(category);
-    if category == test_categories::Category::Rendering {
-        selection_contour::run_tests();
-    }
-    selection_handle::run_test_category(category);
-    object_tests::run_test_category(category);
-    workspace_ui::run_test_category(category);
-    workspace_tabs::run_test_category(category);
-    map_editor::run_test_category(category);
-    quad_view::run_test_category(category);
-    repeating_uv::run_test_category(category);
-    resource_budget::run_test_category(category);
-    resource_ids::run_test_category(category);
-    resource_models::run_test_category(category);
-    root_transform::run_test_category(category);
-    slice_canvas::run_test_category(category);
-    special_gltf::run_test_category(category);
-    world_mesh::run_test_category(category);
-    scene_selection::run_test_category(category);
-    scene_layers::run_test_category(category);
-    entity_geometry::run_test_category(category);
-    sign_render_tests::run_test_category(category);
-    special_mtl::run_test_category(category);
-    special_obj::run_test_category(category);
-    spectator::run_test_category(category);
-    spectator_stream::run_test_category(category);
-    static_triangle_uv::run_test_category(category);
-    textures::run_test_category(category);
-    top_down::run_test_category(category);
-    view_navigation::run_test_category(category);
+
+#[cfg(debug_assertions)]
+#[test]
+fn test_input_batches_verify() {
+    input_batches::verify();
 }
 
+#[test]
+fn test_selection_contour_run_tests() {
+    selection_contour::run_tests();
+}
+
+mod armor_geometry;
+mod camera_distance;
+mod chunk_operations_ui;
+mod chunk_outline;
+mod elytra_geometry;
+mod entity_fire;
+mod entity_geometry;
+mod entity_visibility;
+mod equipment_geometry;
 mod keyboard_bindings;
 mod lighting;
+#[cfg(target_os = "linux")]
+mod linux_memory;
 mod mesh_geometry;
 mod minimap;
 mod navigation_bindings;
@@ -249,29 +206,10 @@ mod resource_ids;
 mod resource_models;
 mod root_transform;
 mod runtime_rates;
-mod sky_background;
-mod slice_canvas;
-#[cfg(test)]
-mod special_gltf;
-mod special_gltf_types;
-mod view_compass;
-mod work_plane;
-mod world_camera;
-mod world_mesh;
-mod world_ruler;
-#[cfg(not(test))]
-use special_gltf_types as special_gltf;
-mod armor_geometry;
-mod camera_distance;
-mod chunk_operations_ui;
-mod chunk_outline;
-mod elytra_geometry;
-mod entity_fire;
-mod entity_geometry;
-mod entity_visibility;
-mod equipment_geometry;
 mod scene_layers;
 mod scene_selection;
+mod sky_background;
+mod slice_canvas;
 mod source_visibility;
 mod special_mtl;
 mod special_obj;
@@ -283,7 +221,12 @@ mod terrain_budget;
 mod textures;
 mod toolbar;
 mod top_down;
+mod view_compass;
 mod view_navigation;
+mod work_plane;
+mod world_camera;
+mod world_mesh;
+mod world_ruler;
 use gpu_scene::GpuScene;
 use gpu_scene::SceneSource;
 use iced::widget::{button, canvas, column, container, row, scrollable, text, text_input};
@@ -485,6 +428,7 @@ fn dispatch_open(nonce: u64, path: PathBuf) -> iced::Task<Message> {
 /// 用户明确检查的候选镜像集合；仅生成预览不会修改磁盘。
 #[derive(Debug, Clone)]
 struct SaveIntent {
+    budget: mcedit2_world::editing::EditWorkBudget,
     key: (usize, usize),
     timestamp: u32,
     candidates: save_postprocess::Candidates,
@@ -517,8 +461,8 @@ fn persist_intent(
     prepared: &mut Option<mcedit2_world::mixed_transaction::PendingSummary>,
 ) -> Result<SaveOutcome, String> {
     use mcedit2_world::mixed_transaction;
-    if let Some(pending) =
-        mixed_transaction::pending_summary(world).map_err(|error| error.to_string())?
+    if let Some(pending) = mixed_transaction::pending_summary_with_budget(world, intent.budget)
+        .map_err(|error| error.to_string())?
     {
         return Err(format!(
             "已有事务 {}，请先完成或回滚",
@@ -537,19 +481,25 @@ fn persist_intent(
             history: None,
         });
     }
-    mixed_transaction::prepare(
+    mixed_transaction::prepare_with_budget(
         world,
         &candidates,
         false,
         if has_be { "SAVE_BE_NBT" } else { "SAVE" },
+        intent.budget,
     )
     .map_err(|error| error.to_string())?;
-    let pending = mixed_transaction::pending_summary(world)
+    let pending = mixed_transaction::pending_summary_with_budget(world, intent.budget)
         .map_err(|error| error.to_string())?
         .ok_or("保存准备后缺少实际事务记录")?;
     *prepared = Some(pending.clone());
-    let (files, history) = mixed_transaction::finish_with_history(world, false, Some(&pending))
-        .map_err(|error| error.to_string())?;
+    let (files, history) = mixed_transaction::finish_with_history_with_budget(
+        world,
+        false,
+        Some(&pending),
+        intent.budget,
+    )
+    .map_err(|error| error.to_string())?;
     Ok(SaveOutcome {
         backups: pending.backups,
         files,
@@ -637,14 +587,13 @@ fn parse_scene_window(input: &str) -> Result<Bounds, String> {
     for v in [minimum, maximum] {
         Bounds::new((v[0], v[1], v[2]), (v[0], v[1], v[2])).map_err(|e| e.to_string())?;
     }
-    for (index, maximum_size) in [(0, 64), (1, 48), (2, 64)] {
-        if maximum[index] as i64 - minimum[index] as i64 + 1 > maximum_size {
-            return Err("3D view is limited to 64x64x48 source cells".into());
-        }
-    }
-    // 三维选区可交给预算化编辑；旧剪贴板等工具仍使用各自的工作量限制。
-    // The strict read-only 196608-source-cell limit is enforced by the backend.
-    Ok(Bounds { minimum, maximum })
+    let bounds = Bounds { minimum, maximum };
+    mcedit2_world::surface::validate_scene_bounds(
+        bounds,
+        mcedit2_world::editing::EditWorkBudget::default(),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(bounds)
 }
 fn shifted_scene(input: &str, dx: i32, dy: i32, dz: i32) -> Result<String, String> {
     let area = parse_scene_window(input)?;
@@ -812,7 +761,6 @@ struct App {
     entity_edit_delta: String,
     entity_edit_status: String,
     nbt_group_status: String,
-    mixed_phrase: String,
     mixed_busy: bool,
     mixed_status: String,
     mixed_key: Option<(usize, usize)>,
@@ -937,11 +885,9 @@ struct App {
     patch_path: String,
     clipboard_destination: String,
     exchange: structure_exchange::State,
-    save_phrase: String,
     recover_region: String,
     recovery_phrase: String,
     save_preview: Option<SaveIntent>,
-    be_save_phrase: String,
     be_prepared: Option<(usize, usize, BeScalarPreview)>,
     edit_report: String,
     sessions: BTreeMap<(usize, usize), Session>,
@@ -1160,7 +1106,6 @@ enum Message {
         u8,
         Result<(usize, Vec<mcedit2_world::nbt_file::SaveIdentity>), String>,
     ),
-    MixedPhrase(String),
     MixedPrepare,
     MixedFinish,
     MixedRollback,
@@ -1352,14 +1297,12 @@ enum Message {
     ClipboardDestination(String),
     PreviewBeRegion,
     PrepareWorldSave,
-    SavePhrase(String),
     ConfirmWorldSave,
     RegionBatchPath(String),
     PreviewRegionBatch,
     ExportRegionBatch,
     VerifyRegionBatch,
     PrepareBeSave,
-    BeSavePhrase(String),
     ConfirmBeSave,
     RecoverRegion(String),
     RecoveryPhrase(String),
@@ -1700,8 +1643,6 @@ impl App {
         self.clear_block_preview();
         self.be_prepared = None;
         self.save_preview = None;
-        self.save_phrase.clear();
-        self.be_save_phrase.clear();
     }
     fn enqueue_near(
         &mut self,
@@ -2816,7 +2757,6 @@ impl App {
         self.be_prepared = None;
         self.clear_block_preview();
         self.save_preview = None;
-        self.save_phrase.clear();
         self.block_result = format!("Selected interactive 2D cell ({x},{y},{z}): {detail}");
     }
     fn current_world_context(&self) -> Result<(usize, usize, WorldSummary, String), String> {
@@ -2851,8 +2791,6 @@ impl App {
         self.save_cancelled = Default::default();
         self.save_planning = false;
         self.save_preview = None;
-        self.save_phrase.clear();
-        self.be_save_phrase.clear();
         self.be_prepared = None;
         self.clear_block_preview();
         let result = (|| -> Result<_, String> {
@@ -2873,7 +2811,10 @@ impl App {
             )
             .map_err(|_| "系统时间超出 Region 时间戳范围")?;
             let request = self.save_postprocess.request(&world, &dimension);
-            let session = self.current_session((wi, di))?.clone();
+            let save_budget = self.block_edit.budget.parse()?;
+            let session = self.current_session((wi, di))?;
+            session.set_work_budget(save_budget);
+            let session = session.clone();
             Ok(((wi, di), world, session, request, timestamp))
         })();
         let (key, world, session, request, timestamp) = match result {
@@ -2914,10 +2855,10 @@ impl App {
                     return Err("保存预检已取消".into());
                 }
                 let (regions, chunks, bytes) = plans.stats();
-                let phrase = if be_mode { "SAVE_BE_NBT" } else { "SAVE" };
-                let report=format!("保存预检：{regions} 个文件，涉及 {chunks} 个区块，{bytes} 字节候选（包含需要重算的邻块）。本次尚未修改文件。关闭 Minecraft 后输入 {phrase} 确认保存。");
+                let report=format!("保存预检：{regions} 个文件，涉及 {chunks} 个区块，{bytes} 字节候选（包含需要重算的邻块）。本次尚未修改文件。关闭 Minecraft 后点击确认保存。");
                 Ok((
                     SaveIntent {
+                        budget: session.work_budget(),
                         key,
                         timestamp,
                         candidates: plans,
@@ -2938,7 +2879,6 @@ impl App {
     }
     fn recover_region(&mut self, rollback: bool) -> Task<Message> {
         self.save_preview = None;
-        self.save_phrase.clear();
         self.clear_block_preview();
         let confirmation = if rollback { "ROLLBACK" } else { "FINALIZE" };
         if self.readonly || self.recovery_phrase != confirmation {
@@ -2978,8 +2918,10 @@ impl App {
         self.recovery_phrase.clear();
         let context = (|| -> Result<_, String> {
             let (_, _, world, _) = self.current_world_context()?;
-            let pending = mcedit2_world::mixed_transaction::pending_summary(&world)
-                .map_err(|e| e.to_string())?;
+            let budget = self.block_edit.budget.parse()?;
+            let pending =
+                mcedit2_world::mixed_transaction::pending_summary_with_budget(&world, budget)
+                    .map_err(|e| e.to_string())?;
             Ok(pending)
         })();
         let pending = match context {
@@ -2999,7 +2941,11 @@ impl App {
         args: launch::Arguments,
         desktop_enabled: bool,
     ) -> Result<(Self, iced::Task<Message>), String> {
-        let (view_state, saved) = view_state::State::load()?;
+        let (mut view_state, saved) = view_state::State::load()?;
+        let nbt_search = view_state.optional("nbt_search", nbt_search::State::load());
+        let block_definitions =
+            view_state.optional("block_definitions", block_definitions_ui::State::load());
+        let preference_errors = view_state.load_errors.clone();
         let desktop = desktop_state::State::new(saved, desktop_enabled);
         let library = library::State::restore(&desktop.saved.library);
         let world_browser = world_browser::State::restore(&desktop.saved.world_browser);
@@ -3011,8 +2957,8 @@ impl App {
         };
         let mut app = App {
             view_state,
-            nbt_search: nbt_search::State::load()?,
-            block_definitions: block_definitions_ui::State::load()?,
+            nbt_search,
+            block_definitions,
             desktop,
             world_browser,
             library,
@@ -3045,6 +2991,7 @@ impl App {
             use_gpu: true,
             ..Default::default()
         };
+        app.messages.extend(preference_errors);
         desktop_state::restore_panels(&mut app);
         brush_stroke::restore(&mut app);
         selection_preferences::restore(&mut app);
@@ -4147,7 +4094,6 @@ fn update_impl(app: &mut App, message: Message) -> iced::Task<Message> {
                 }
             }
         }
-        Message::MixedPhrase(value) => app.mixed_phrase = value,
         action @ (Message::MixedPrepare | Message::MixedFinish | Message::MixedRollback) => {
             let kind = match action {
                 Message::MixedPrepare => 0,
@@ -5452,8 +5398,6 @@ fn update_impl(app: &mut App, message: Message) -> iced::Task<Message> {
             }
         }
         Message::MoveSlice(dx, dy, dz) => app.pan_slice(dx, dy, dz),
-        Message::SavePhrase(value) => app.save_phrase = value,
-        Message::BeSavePhrase(value) => app.be_save_phrase = value,
         Message::PrepareBeSave => return app.prepare_be_save(),
         Message::ConfirmBeSave => return app.confirm_be_save(),
         Message::RecoverRegion(value) => app.recover_region = value,
@@ -5491,15 +5435,7 @@ fn update_impl(app: &mut App, message: Message) -> iced::Task<Message> {
             app.grid_revision = app.grid_revision.wrapping_add(1);
             app.surface = None;
             app.save_preview = None;
-            app.grid_main.cancel();
-            app.grid_horizontal.cancel();
-            app.grid_vertical.cancel();
-            app.grid_revision = app.grid_revision.wrapping_add(1);
             app.slice_grid = None;
-            app.grid_main.cancel();
-            app.grid_horizontal.cancel();
-            app.grid_vertical.cancel();
-            app.grid_revision = app.grid_revision.wrapping_add(1);
             app.vertical_grid = None;
             app.open_nonce = app.open_nonce.wrapping_add(1);
             app.open_pending = None;
@@ -6103,13 +6039,11 @@ fn update_impl(app: &mut App, message: Message) -> iced::Task<Message> {
             app.edit_target = value;
             app.clear_block_preview();
             app.save_preview = None;
-            app.save_phrase.clear();
         }
         Message::FilterText(value) => {
             app.edit_filter = value;
             app.clear_block_preview();
             app.save_preview = None;
-            app.save_phrase.clear();
         }
         Message::AnalyzeRegionPlan => {
             let timestamp = SystemTime::now()
@@ -6173,7 +6107,6 @@ fn update_impl(app: &mut App, message: Message) -> iced::Task<Message> {
             app.fill_seed = value;
             app.clear_block_preview();
             app.save_preview = None;
-            app.save_phrase.clear();
         }
         Message::PreviewFill => return flood_fill::update(app, flood_fill::Action::Preview),
         Message::PreviewBrush(shape) => block_edit::start(app, block_edit::Tool::Brush(shape)),
@@ -6182,7 +6115,6 @@ fn update_impl(app: &mut App, message: Message) -> iced::Task<Message> {
             app.clone_destination = value;
             app.clear_block_preview();
             app.save_preview = None;
-            app.save_phrase.clear();
         }
         Message::PreviewClone => {
             return transfer_edit::update(
@@ -6213,7 +6145,6 @@ fn update_impl(app: &mut App, message: Message) -> iced::Task<Message> {
             return transfer_edit::update(app, transfer_edit::Action::History(true))
         }
         Message::DiscardEdits => {
-            app.be_save_phrase.clear();
             if let Some(key) = app.current_key() {
                 if let Some(editor) = app.sessions.get_mut(&key) {
                     editor.discard();
@@ -6232,7 +6163,6 @@ fn update_impl(app: &mut App, message: Message) -> iced::Task<Message> {
             app.nbt_documents.clear();
             app.open_nonce = app.open_nonce.wrapping_add(1);
             app.open_pending = None;
-            app.be_save_phrase.clear();
             app.be_prepared = None;
             app.grid_main.cancel();
             app.grid_horizontal.cancel();
@@ -6255,7 +6185,6 @@ fn update_impl(app: &mut App, message: Message) -> iced::Task<Message> {
             app.grid_revision = app.grid_revision.wrapping_add(1);
             app.vertical_grid = None;
             app.recovery_phrase.clear();
-            app.save_phrase.clear();
             app.path.clear();
             app.restart_asset_request();
             app.texture_loading = false;
@@ -7492,6 +7421,7 @@ fn run_gui(args: launch::Arguments) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
 
+    #[test]
     fn asset_progress_base_publication_and_cancellation_obey_the_request_nonce() {
         let mut app = super::App {
             texture_load_nonce: 4,
@@ -7550,6 +7480,7 @@ mod tests {
         assert_ne!(app.texture_load_nonce, nonce);
     }
 
+    #[test]
     fn near_refresh_retains_completed_view_and_rejects_other_worlds() {
         use std::sync::Arc;
         let mut app = super::App {
@@ -7587,6 +7518,7 @@ mod tests {
         assert!(app.surface.is_none());
     }
 
+    #[test]
     fn read_only_refresh_keeps_spectator_mesh_until_new_source_is_ready() {
         let mut before = super::App::default().render_signature();
         before.source = Some((0, 0, 3, 10, 5, 2));
@@ -7606,6 +7538,7 @@ mod tests {
     use mcedit2_world::editing::{Bounds, SliceCell};
     use mcedit2_world::sections::State;
 
+    #[test]
     fn superseded_indexer_and_near_read_cannot_publish_stale_results() {
         let mut app = super::App {
             open_nonce: 8,
@@ -7627,6 +7560,7 @@ mod tests {
         assert!(app.slice_grid.is_none());
     }
 
+    #[test]
     fn opened_world_immediately_schedules_source_3d_and_hides_advanced_panel() {
         let mut app = super::App {
             show_advanced: true,
@@ -7664,6 +7598,7 @@ mod tests {
         assert!(app.render_signature() == before);
     }
 
+    #[test]
     fn rapid_open_requests_keep_only_latest_source_path() {
         let mut app = super::App {
             path: "original-A".into(),
@@ -7682,6 +7617,7 @@ mod tests {
         assert!(app.open_pending.is_none());
     }
 
+    #[test]
     fn far_tile_cache_is_bounded_and_lod_sensitive() {
         use super::{far_cache_key, FAR_CACHE_PATCHES, FAR_CACHE_VOXELS};
         use mcedit2_world::far_view::{FarChunkPatch, FarChunkRequest};
@@ -7710,15 +7646,49 @@ mod tests {
             far_cache_key(sample),
             far_cache_key(FarChunkRequest { span: 16, ..sample })
         );
-        const {
-            assert!(FAR_CACHE_PATCHES <= 4096);
+        let (mut app, scene, _, _) = crate::picking_integration_tests::fixture();
+        let key = app.current_key().unwrap();
+        let mut cache = super::FarProgress {
+            nonce: 0,
+            key,
+            center: (0, 0),
+            radius: 1,
+            source: std::sync::Arc::new(app.display_session(key).unwrap().clone()),
+            remaining: Default::default(),
+            total: 0,
+            complete: 0,
+            errors: 0,
+            cache: Default::default(),
+            cache_order: Default::default(),
+            cached_voxels: 0,
+        };
+        for cx in 0..=FAR_CACHE_PATCHES as i32 {
+            cache.remember(FarChunkRequest { cx, ..sample }, &patch);
         }
-        const {
-            assert!(FAR_CACHE_VOXELS <= 90_000);
-        }
-        assert_eq!(patch.voxels.len(), 0);
+        assert_eq!(cache.cache.len(), FAR_CACHE_PATCHES);
+        assert!(!cache
+            .cache
+            .contains_key(&far_cache_key(FarChunkRequest { cx: 0, ..sample })));
+        assert!(cache.cache.contains_key(&far_cache_key(FarChunkRequest {
+            cx: FAR_CACHE_PATCHES as i32,
+            ..sample
+        })));
+        let dense = std::sync::Arc::new(FarChunkPatch {
+            voxels: vec![scene.surface.voxels[0].clone(); FAR_CACHE_VOXELS / 2 + 1],
+            ..(*patch).clone()
+        });
+        let sample = FarChunkRequest { cx: -2, ..sample };
+        cache.remember(sample, &dense);
+        let next = FarChunkRequest { span: 16, ..sample };
+        cache.remember(next, &dense);
+        assert!(!cache.cache.contains_key(&far_cache_key(sample)));
+        assert!(cache.cache.contains_key(&far_cache_key(next)));
+        assert_eq!(cache.cached_voxels, dense.voxels.len());
+        cache.remember(next, &dense);
+        assert_eq!(cache.cached_voxels, dense.voxels.len());
     }
 
+    #[test]
     fn render_signature_ignores_animation_and_hover_but_tracks_camera_changes() {
         let mut app = super::App::default();
         let original = app.render_signature();
@@ -7728,6 +7698,7 @@ mod tests {
         assert!(original != app.render_signature());
     }
 
+    #[test]
     fn flight_frame_clock_starts_and_stops_with_movement() {
         use iced::keyboard::{Event, Key, Modifiers};
         let (mut app, _, _, _) = crate::picking_integration_tests::fixture();
@@ -7754,6 +7725,7 @@ mod tests {
         assert!(app.spectator_last_frame.is_none());
     }
 
+    #[test]
     fn viewport_3d_navigation_is_independent_of_block_edit_budget() {
         let a = parse_scene_window("0,-64,0;15,-33,15").unwrap();
         assert_eq!(a.volume().unwrap(), 8192);
@@ -7768,8 +7740,8 @@ mod tests {
                 .unwrap(),
             196_608
         );
-        assert!(parse_scene_window("0,-64,0;64,-33,15").is_err());
-        assert!(parse_scene_window("0,-64,0;15,-16,15").is_err());
+        assert!(parse_scene_window("0,-64,0;64,-33,15").is_ok());
+        assert!(parse_scene_window("0,-64,0;15,-16,15").is_ok());
         assert!(shifted_scene("29999980,0,0;29999995,15,15", 16, 0, 0).is_err());
         assert_eq!(
             shifted_scene("-32,-64,-32;-1,-17,-1", 16, 0, 16).unwrap(),
@@ -7777,6 +7749,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn centering_in_spectator_moves_camera_and_keeps_current_orientation() {
         let mut app = super::App {
             spectator: true,
@@ -7801,6 +7774,7 @@ mod tests {
         assert_eq!(app.spectator_camera.position, [43.5, 125.5, -65.5]);
     }
 
+    #[test]
     fn interactive_slice_shift_and_cell_symbols_reject_overflow() {
         let bounds = Bounds::new((-16, -64, 0), (-1, -64, 15)).unwrap();
         assert_eq!(
@@ -7837,6 +7811,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn original_region_name_parser_accepts_signed_coords_and_refuses_extra_paths() {
         assert_eq!(parse_region_name("r.-1.2.mca").unwrap(), (-1, 2, "mca"));
         assert_eq!(parse_region_name("r.0.-9.mcr").unwrap(), (0, -9, "mcr"));
@@ -7853,29 +7828,4 @@ mod tests {
             assert!(parse_region_name(value).is_err(), "{value}");
         }
     }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Background {
-            asset_progress_base_publication_and_cancellation_obey_the_request_nonce();
-            near_refresh_retains_completed_view_and_rejects_other_worlds();
-            read_only_refresh_keeps_spectator_mesh_until_new_source_is_ready();
-            superseded_indexer_and_near_read_cannot_publish_stale_results();
-            rapid_open_requests_keep_only_latest_source_path();
-        }
-
-        if category == crate::test_categories::Category::Navigation {
-            opened_world_immediately_schedules_source_3d_and_hides_advanced_panel();
-            far_tile_cache_is_bounded_and_lod_sensitive();
-            render_signature_ignores_animation_and_hover_but_tracks_camera_changes();
-            flight_frame_clock_starts_and_stops_with_movement();
-            viewport_3d_navigation_is_independent_of_block_edit_budget();
-            centering_in_spectator_moves_camera_and_keeps_current_orientation();
-            interactive_slice_shift_and_cell_symbols_reject_overflow();
-            original_region_name_parser_accepts_signed_coords_and_refuses_extra_paths();
-        }
-    }
 }
-
-#[cfg(test)]
-mod test_categories;

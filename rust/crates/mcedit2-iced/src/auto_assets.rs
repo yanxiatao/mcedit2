@@ -673,15 +673,13 @@ pub(crate) fn load_manual(
     });
     Task::run(receiver, |message| message)
 }
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-    framework::run_test_category(category);
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires local GPU / installed Minecraft resources"]
 
     fn real_chunk_mesh_matches_source_coordinates() {
         let world = mcedit2_world::inspect_world(PathBuf::from(
@@ -774,6 +772,9 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    #[ignore = "requires local GPU / installed Minecraft resources"]
 
     fn real_instance_assets_finish_loading() {
         let path = std::env::var_os("MCEDIT2_TEST_WORLD").expect("设置 MCEDIT2_TEST_WORLD");
@@ -916,6 +917,7 @@ mod tests {
         probe_chunk_mesh(world.clone(), Some(bank));
     }
 
+    #[test]
     fn client_version_path_cannot_escape_world_ancestors() {
         for value in ["../../other", "", "1.21.1/../evil", "1.21.1\\other"] {
             assert!(!is_simple_version(value));
@@ -924,6 +926,7 @@ mod tests {
         assert!(is_simple_version("1.20.1-forge"));
     }
 
+    #[test]
     fn exact_launcher_paths_support_prism_and_vanilla_without_traversal() {
         let base = Path::new("/launcher");
         let paths = candidate_paths(base, "1.21.1");
@@ -936,6 +939,7 @@ mod tests {
         assert!(locate_in([base], "../unsafe").is_err());
     }
 
+    #[test]
     fn world_local_launcher_takes_priority_over_global_installs() {
         let root = std::env::temp_dir().join(format!(
             "mcedit2-auto-asset-precedence-{}-{}",
@@ -969,6 +973,7 @@ mod tests {
         zip.finish().unwrap();
     }
 
+    #[test]
     fn large_instance_keeps_all_mods_and_enabled_packs_in_priority_order() {
         let root = std::env::temp_dir().join(format!(
             "mcedit2-large-resource-stack-{}-{}",
@@ -1027,6 +1032,7 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
     fn damaged_mod_archive_stops_resource_discovery() {
         let root =
             std::env::temp_dir().join(format!("mcedit2-damaged-mod-assets-{}", std::process::id()));
@@ -1043,6 +1049,7 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
     fn active_mods_kubejs_and_enabled_packs_follow_the_selected_world_instance() {
         let root =
             std::env::temp_dir().join(format!("mcedit2-instance-discovery-{}", std::process::id()));
@@ -1104,6 +1111,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[test]
     fn selected_pack_options_refuse_escape_and_never_enable_all_installed_zips() {
         let root = std::env::temp_dir().join(format!(
             "mcedit2-selected-pack-paths-{}",
@@ -1126,6 +1134,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[test]
     fn missing_local_install_does_not_guess_a_nonexistent_jar() {
         let root = std::env::temp_dir().join(format!(
             "mcedit2-auto-assets-missing-{}",
@@ -1135,24 +1144,5 @@ mod tests {
         assert!(locate_in([root.as_path()], "9.9.9-absent")
             .unwrap()
             .is_none());
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Installed {
-            real_chunk_mesh_matches_source_coordinates();
-            real_instance_assets_finish_loading();
-        }
-
-        if category == crate::test_categories::Category::Sources {
-            client_version_path_cannot_escape_world_ancestors();
-            exact_launcher_paths_support_prism_and_vanilla_without_traversal();
-            world_local_launcher_takes_priority_over_global_installs();
-            large_instance_keeps_all_mods_and_enabled_packs_in_priority_order();
-            damaged_mod_archive_stops_resource_discovery();
-            active_mods_kubejs_and_enabled_packs_follow_the_selected_world_instance();
-            selected_pack_options_refuse_escape_and_never_enable_all_installed_zips();
-            missing_local_install_does_not_guess_a_nonexistent_jar();
-        }
     }
 }

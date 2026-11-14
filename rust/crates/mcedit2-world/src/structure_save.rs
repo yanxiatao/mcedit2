@@ -86,8 +86,8 @@ fn image(path: &Path, journal: &Journal) -> PathBuf {
 }
 fn checked(path: &Path) -> Result<PathBuf, WorldError> {
     let metadata = fs::symlink_metadata(path)?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > MAX_FILE {
-        return Err(invalid("结构保存目标不是 64 MiB 内的普通文件"));
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(invalid("结构保存目标不是普通文件"));
     }
     Ok(fs::canonicalize(path)?)
 }
@@ -184,7 +184,7 @@ fn stage(candidate: &Candidate, budget: EditWorkBudget) -> Result<(), WorldError
     let _guard = crate::world_write_lock::acquire_file(&candidate.path, false)?;
     let path = checked(&candidate.path)?;
     require_inactive(&path, budget)?;
-    let source = read(&path, MAX_FILE, budget)?;
+    let source = read(&path, (budget.bytes() / 4) as u64, budget)?;
     if hash(&source) != candidate.journal.source_sha
         || hash(&candidate.bytes) != candidate.journal.candidate_sha
     {
@@ -253,9 +253,13 @@ fn recover_expected(
     if phase != Phase::Prepared && phase != desired {
         return Err(invalid("结构恢复方向已确定，必须继续原方向"));
     }
-    let old = read(&original(&path, &journal), MAX_FILE, budget)?;
-    let next = read(&image(&path, &journal), MAX_FILE, budget)?;
-    let current = hash(&read(&path, MAX_FILE, budget)?);
+    let old = read(
+        &original(&path, &journal),
+        (budget.bytes() / 4) as u64,
+        budget,
+    )?;
+    let next = read(&image(&path, &journal), (budget.bytes() / 4) as u64, budget)?;
+    let current = hash(&read(&path, (budget.bytes() / 4) as u64, budget)?);
     if hash(&old) != journal.source_sha
         || hash(&next) != journal.candidate_sha
         || (current != journal.source_sha && current != journal.candidate_sha)
@@ -283,7 +287,7 @@ fn recover_expected(
     let temp = artifact(&path, "replace");
     if current != *expected {
         transaction_artifacts::store(&temp, target)?;
-        if hash(&read(&path, MAX_FILE, budget)?) != current {
+        if hash(&read(&path, (budget.bytes() / 4) as u64, budget)?) != current {
             return Err(invalid("结构文件在替换前已变化，保留事务等待处理"));
         }
         replace_existing(&temp, &path)?;
@@ -301,7 +305,7 @@ fn recover_expected(
             Err(error) => return Err(error.into()),
         }
     }
-    if hash(&read(&path, MAX_FILE, budget)?) != *expected {
+    if hash(&read(&path, (budget.bytes() / 4) as u64, budget)?) != *expected {
         return Err(invalid("结构保存完成后目标摘要不符"));
     }
     let ending = match direction {
@@ -343,7 +347,7 @@ impl Document {
         let payload = if self.format == Format::Clipboard {
             bytes.to_vec()
         } else {
-            NbtEnvelope::decode(bytes.to_vec())?.1
+            NbtEnvelope::decode_limited(bytes.to_vec(), (budget.bytes() / 4) as u64)?.1
         };
         let mut seen = BTreeSet::new();
         for snapshot in std::iter::once(&self.current)
@@ -358,7 +362,7 @@ impl Document {
             let encoded = if self.format == Format::Clipboard {
                 encoded
             } else {
-                NbtEnvelope::decode(encoded)?.1
+                NbtEnvelope::decode_limited(encoded, (budget.bytes() / 4) as u64)?.1
             };
             if encoded == payload {
                 return Ok(Arc::clone(snapshot));
@@ -404,7 +408,7 @@ impl Document {
         } else {
             let bytes = read(
                 &image_or_original(&path, &journal, direction),
-                MAX_FILE,
+                (budget.bytes() / 4) as u64,
                 budget,
             )?;
             if hash(&bytes) != *expected {
@@ -414,7 +418,7 @@ impl Document {
         };
         self.check_history_budget(&baseline, budget)?;
         recover_expected(&path, direction, self.read_only, budget, Some(&journal))?;
-        let bytes = read(&path, MAX_FILE, budget)?;
+        let bytes = read(&path, (budget.bytes() / 4) as u64, budget)?;
         let source = SourceFileProof::from_bytes(&path, &bytes)?;
         if source.sha256 != *expected {
             return Err(invalid("结构文件在恢复与重读之间已变化"));
@@ -434,7 +438,7 @@ impl Document {
         require_inactive(&self.path, budget)?;
         let source = self.source_file();
         source.verify()?;
-        let original = read(&self.path, MAX_FILE, budget)?;
+        let original = read(&self.path, (budget.bytes() / 4) as u64, budget)?;
         if hash(&original) != source.sha256 {
             return Err(invalid("结构源文件已被外部修改"));
         }
@@ -442,12 +446,12 @@ impl Document {
         let bytes = if self.format == Format::Clipboard {
             encoded
         } else {
-            let (envelope, _) = NbtEnvelope::decode(original)?;
-            let (_, raw) = NbtEnvelope::decode(encoded)?;
-            envelope.encode(&raw)?
+            let (envelope, _) = NbtEnvelope::decode_limited(original, (budget.bytes() / 4) as u64)?;
+            let (_, raw) = NbtEnvelope::decode_limited(encoded, (budget.bytes() / 4) as u64)?;
+            envelope.encode_limited(&raw, (budget.bytes() / 4) as u64)?
         };
-        if bytes.len() as u64 > MAX_FILE {
-            return Err(invalid("结构编码候选超过 64 MiB"));
+        if bytes.len() as u64 > (budget.bytes() / 4) as u64 {
+            return Err(invalid("结构编码候选超过当前文件预算"));
         }
         let mut decoded =
             self.format

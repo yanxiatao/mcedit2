@@ -1021,14 +1021,23 @@ mod map_tests;
 #[cfg(test)]
 #[path = "brush_stroke_tests.rs"]
 mod tests;
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    if category == crate::test_categories::Category::Rendering {
-        tests::continuous_stroke_pipeline();
-        map_tests::projected_view_pipeline();
-    }
-    if category == crate::test_categories::Category::Background {
-        map_tests::refresh_races();
-        preferences::run_tests();
-    }
+
+#[test]
+fn test_tests_continuous_stroke_pipeline() {
+    tests::continuous_stroke_pipeline();
+}
+
+#[test]
+fn test_map_tests_projected_view_pipeline() {
+    map_tests::projected_view_pipeline();
+}
+
+#[test]
+fn test_map_tests_refresh_races() {
+    map_tests::refresh_races();
+}
+
+#[test]
+fn test_preferences_run_tests() {
+    preferences::run_tests();
 }

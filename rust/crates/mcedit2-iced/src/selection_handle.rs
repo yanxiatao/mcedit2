@@ -1256,7 +1256,3 @@ impl Layer {
 #[cfg(test)]
 #[path = "selection_handle_tests.rs"]
 mod tests;
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run(category);
-}

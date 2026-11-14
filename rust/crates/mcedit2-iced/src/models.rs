@@ -930,15 +930,12 @@ pub(crate) fn boxes(state: &State) -> Vec<Box3> {
     }
     vec![Box3::FULL]
 }
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
     fn directed_endpoints_match_vertex_winding_through_root_and_variant_rotations() {
         for mask in 0..8 {
             let from = std::array::from_fn(|i| if mask & (1 << i) == 0 { 1. } else { 15. });
@@ -1004,6 +1001,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn water_and_lava_levels_have_static_source_geometry() {
         let source = fluid_part(&state("minecraft:water", &[("level", "0")]), false).unwrap();
         let flow = fluid_part(&state("minecraft:water", &[("level", "4")]), false).unwrap();
@@ -1021,6 +1019,7 @@ mod tests {
         assert!(fluid_part(&state("other:fluid", &[]), false).is_none());
     }
 
+    #[test]
     fn lod_walls_join_verified_tiles_without_inventing_missing_cliffs() {
         use mcedit2_world::surface::{SurfaceVoxel, VoxelMaterial, ALL_FACES};
         let tile = |x: i32, z: i32, y: i32, span: u8| {
@@ -1073,6 +1072,7 @@ mod tests {
         assert_eq!(only_known.len(), 1);
     }
 
+    #[test]
     fn duplicate_lod_column_keeps_topmost_verified_elevation() {
         use mcedit2_world::surface::{SurfaceVoxel, VoxelMaterial, ALL_FACES};
         let make = |x, y, kind| {
@@ -1125,6 +1125,7 @@ mod tests {
         assert!(top_only.walls(&canopy_only.voxels[0]).is_empty());
     }
 
+    #[test]
     fn lod_edges_handle_negative_chunks_and_lower_fluid_surfaces() {
         use mcedit2_world::surface::{SurfaceView, SurfaceVoxel, VoxelMaterial, ALL_FACES};
         let water = SurfaceVoxel::new(
@@ -1175,6 +1176,7 @@ mod tests {
         }));
     }
 
+    #[test]
     fn water_lod_horizon_stays_above_seabed_solid_layer() {
         use mcedit2_world::surface::{SurfaceVoxel, VoxelMaterial, ALL_FACES};
         let make = |x, y, kind| {
@@ -1215,6 +1217,7 @@ mod tests {
         assert_eq!(height.walls(&view.voxels[1]).len(), 1);
     }
 
+    #[test]
     fn exact_lod_perimeter_requires_four_equal_ground_tops() {
         use mcedit2_world::surface::{SurfaceVoxel, VoxelMaterial, ALL_FACES};
         let tile = |x, z, y, span| {
@@ -1277,6 +1280,7 @@ mod tests {
         assert_eq!(walls[0].1.bounds.min[2], 0.);
     }
 
+    #[test]
     fn exact_lod_perimeter_handles_negative_coordinates() {
         use mcedit2_world::surface::{SurfaceVoxel, VoxelMaterial, ALL_FACES};
         let tile = |x, z, y, span| {
@@ -1354,6 +1358,7 @@ mod tests {
         .unwrap()
         .map(|surface| fluid_face_vertices(surface.with_faces(mask).unwrap(), face))
     }
+    #[test]
     fn adjacent_static_fluid_levels_share_sloped_corners_and_side_tops() {
         let source = state("minecraft:water", &[("level", "0")]);
         let flow = state("minecraft:water", &[("level", "4")]);
@@ -1372,6 +1377,7 @@ mod tests {
         assert_eq!(wall[3][1], -0.499);
     }
 
+    #[test]
     fn stacked_original_fluids_extend_lower_cell_to_full_height() {
         let source = state("minecraft:water", &[("level", "0")]);
         let shallow = state("minecraft:water", &[("level", "7")]);
@@ -1385,6 +1391,7 @@ mod tests {
         assert_eq!(side[0][1], -0.499);
     }
 
+    #[test]
     fn fluid_corners_do_not_invent_missing_neighbors() {
         let fluid = state("minecraft:lava", &[("level", "6")]);
         let map = HashMap::new();
@@ -1395,6 +1402,7 @@ mod tests {
         assert!(source_fluid_vertices(&stone, (10, 64, 10), Face::Top, &map).is_none());
     }
 
+    #[test]
     fn slab_snow_and_carpet_heights_are_signed_world_offsets() {
         let bottom = boxes(&state("minecraft:stone_slab", &[("type", "bottom")]))[0];
         let top = boxes(&state("minecraft:stone_slab", &[("type", "top")]))[0];
@@ -1409,6 +1417,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn stair_shapes_and_face_culling_require_full_cover() {
         let stairs = boxes(&state(
             "minecraft:oak_stairs",
@@ -1424,6 +1433,7 @@ mod tests {
         assert!(!stairs[0].occluded_by(&stairs[1], 1, true));
     }
 
+    #[test]
     fn five_stair_shapes_select_exact_directional_quarters_for_both_halves() {
         fn footprints(name: &str, facing: &str, shape: &str, half: &str) -> Vec<(bool, bool)> {
             let parts = boxes(&state(
@@ -1499,6 +1509,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn stair_missing_or_unrecognized_properties_do_not_invent_modded_shapes() {
         assert_eq!(
             boxes(&state("example:granite_stairs", &[("shape", "inner_left")])),
@@ -1515,6 +1526,7 @@ mod tests {
         assert_eq!(boxes(&state("minecraft:oak_stairs", &[])).len(), 3);
     }
 
+    #[test]
     fn java_stair_json_parts_override_shape_based_fallbacks() {
         let mut bank = crate::resource_models::ModelBank::default();
         bank.insert(
@@ -1542,6 +1554,7 @@ mod tests {
         assert_eq!(model[0].bounds.max[1], -0.25);
     }
 
+    #[test]
     fn zero_thickness_model_planes_are_supported_only_as_explicit_surfaces() {
         let plane = Box3::from_model_units_plane([0.8, 0.0, 8.0], [15.2, 16.0, 8.0]).unwrap();
         assert_eq!(plane.min[2], 0.0);
@@ -1551,6 +1564,7 @@ mod tests {
         assert!(Box3::from_model_units_plane([0.0, 0.0, 0.0], [16.0, 16.0, 16.0]).is_none());
     }
 
+    #[test]
     fn bounded_extended_java_models_preserve_outside_block_geometry() {
         let b = Box3::from_model_units([-16.0, 0.0, -8.0], [32.0, 16.0, 24.0]).unwrap();
         assert_eq!(b.min, [-1.5, -0.5, -1.0]);
@@ -1562,6 +1576,7 @@ mod tests {
         assert!(Box3::from_model_units([0.0, 0.0, 0.0], [f32::INFINITY, 16.0, 16.0]).is_none());
     }
 
+    #[test]
     fn model_unit_boxes_check_signed_scale_and_invalid_dimensions() {
         let a = Box3::from_model_units([2.0, 0.0, 4.0], [14.0, 8.0, 12.0]).unwrap();
         assert_eq!(a.min, [-0.375, -0.5, -0.25]);
@@ -1570,6 +1585,7 @@ mod tests {
         assert!(Box3::from_model_units([0.0, 0.0, 0.0], [17.0, 16.0, 16.0]).is_some());
     }
 
+    #[test]
     fn java_y_and_x_quarter_turns_preserve_exact_box_dimensions() {
         let box_ = Box3::from_model_units([0.0, 0.0, 0.0], [4.0, 12.0, 16.0]).unwrap();
         let y = box_.rotate(0, 90).unwrap();
@@ -1580,6 +1596,7 @@ mod tests {
         assert!(box_.rotate(45, 0).is_none());
     }
 
+    #[test]
     fn angled_model_face_is_quad_not_axis_aligned_aabb() {
         let part = Part {
             root: None,
@@ -1606,6 +1623,7 @@ mod tests {
         assert!(!part.boundary(0, true));
     }
 
+    #[test]
     fn glass_panes_and_iron_bars_keep_thin_centers_and_only_true_connections() {
         for material in [
             "minecraft:glass_pane",
@@ -1626,6 +1644,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn vanilla_walls_follow_none_low_tall_and_up_states() {
         let wall = "minecraft:cobblestone_wall";
         let shaped = boxes(&state(
@@ -1647,6 +1666,7 @@ mod tests {
         assert_eq!(boxes(&state(wall, &[("up", "false")])).len(), 1);
     }
 
+    #[test]
     fn vanilla_double_height_doors_follow_facing_hinge_and_open_state() {
         let state_for = |facing: &str, hinge: &str, open: &str, half: &str| {
             state(
@@ -1695,6 +1715,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn door_fallback_does_not_invent_foreign_or_invalid_geometry() {
         assert_eq!(
             boxes(&state("mod:oak_door", &[("open", "true")])),
@@ -1716,6 +1737,7 @@ mod tests {
         assert!(boxes(&state("minecraft:iron_door", &[]))[0].max[2] < 0.0);
     }
 
+    #[test]
     fn custom_java_door_model_json_takes_priority_over_native_fallback() {
         let mut bank = crate::resource_models::ModelBank::default();
         bank.insert(
@@ -1749,6 +1771,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn vanilla_fence_connected_arms_have_distinct_upper_and_lower_rails() {
         let fence = "minecraft:oak_fence";
         let post = boxes(&state(fence, &[("north", "false")]));
@@ -1767,6 +1790,7 @@ mod tests {
         assert!(!crossed.iter().skip(1).any(|b| b.min[1] < -0.125));
     }
 
+    #[test]
     fn fence_gate_opening_and_facing_change_shape_not_block_identity() {
         let gate = "minecraft:oak_fence_gate";
         let closed = boxes(&state(gate, &[("open", "false"), ("facing", "north")]));
@@ -1785,6 +1809,7 @@ mod tests {
         assert!(lowered[2].max[1] < closed[2].max[1]);
     }
 
+    #[test]
     fn available_java_resource_model_overrides_fallback_structural_geometry() {
         let mut original = crate::resource_models::ModelBank::default();
         original
@@ -1810,6 +1835,7 @@ mod tests {
         assert_ne!(from_json[0].bounds, boxes(&block)[0]);
     }
 
+    #[test]
     fn foreign_namespaces_never_inherit_vanilla_thin_geometry() {
         for block in [
             "other:iron_bars",
@@ -1821,6 +1847,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn no_modded_block_model_is_invented() {
         assert_eq!(boxes(&state("other:custom_stairs", &[])), vec![Box3::FULL]);
         assert_eq!(boxes(&state("numeric:108", &[])), vec![Box3::FULL]);
@@ -1836,42 +1863,5 @@ mod tests {
                 .min[0],
             0.3125
         );
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Models {
-            directed_endpoints_match_vertex_winding_through_root_and_variant_rotations();
-            water_and_lava_levels_have_static_source_geometry();
-            lod_walls_join_verified_tiles_without_inventing_missing_cliffs();
-            duplicate_lod_column_keeps_topmost_verified_elevation();
-            lod_edges_handle_negative_chunks_and_lower_fluid_surfaces();
-            water_lod_horizon_stays_above_seabed_solid_layer();
-            exact_lod_perimeter_requires_four_equal_ground_tops();
-            exact_lod_perimeter_handles_negative_coordinates();
-            adjacent_static_fluid_levels_share_sloped_corners_and_side_tops();
-            stacked_original_fluids_extend_lower_cell_to_full_height();
-            fluid_corners_do_not_invent_missing_neighbors();
-            slab_snow_and_carpet_heights_are_signed_world_offsets();
-            stair_shapes_and_face_culling_require_full_cover();
-            five_stair_shapes_select_exact_directional_quarters_for_both_halves();
-            stair_missing_or_unrecognized_properties_do_not_invent_modded_shapes();
-            java_stair_json_parts_override_shape_based_fallbacks();
-            zero_thickness_model_planes_are_supported_only_as_explicit_surfaces();
-            bounded_extended_java_models_preserve_outside_block_geometry();
-            model_unit_boxes_check_signed_scale_and_invalid_dimensions();
-            java_y_and_x_quarter_turns_preserve_exact_box_dimensions();
-            angled_model_face_is_quad_not_axis_aligned_aabb();
-            glass_panes_and_iron_bars_keep_thin_centers_and_only_true_connections();
-            vanilla_walls_follow_none_low_tall_and_up_states();
-            vanilla_double_height_doors_follow_facing_hinge_and_open_state();
-            door_fallback_does_not_invent_foreign_or_invalid_geometry();
-            custom_java_door_model_json_takes_priority_over_native_fallback();
-            vanilla_fence_connected_arms_have_distinct_upper_and_lower_rails();
-            fence_gate_opening_and_facing_change_shape_not_block_identity();
-            available_java_resource_model_overrides_fallback_structural_geometry();
-            foreign_namespaces_never_inherit_vanilla_thin_geometry();
-            no_modded_block_model_is_invented();
-        }
     }
 }

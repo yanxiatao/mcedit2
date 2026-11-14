@@ -4,6 +4,9 @@ use crate::textures::{LoadControl, TextureBank};
 use mcedit2_world::{editing::Session, surface::SurfaceView};
 use std::{path::PathBuf, time::Instant};
 
+#[test]
+#[ignore = "requires local GPU / installed Minecraft resources"]
+
 fn real_source_mesh_phase_profile() {
     let gpu_profile = std::env::var_os("MCEDIT2_GPU_PROFILE").is_some();
     let ui_profile = std::env::var_os("MCEDIT2_UI_PROFILE").is_some();
@@ -344,16 +347,4 @@ fn real_source_mesh_phase_profile() {
         .join("../../target")
         .join(format!("mesh-profile-{tag}.json"));
     std::fs::write(out, serde_json::to_vec_pretty(&stats).unwrap()).unwrap();
-}
-
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    if category == crate::test_categories::Category::Installed
-        || (category == crate::test_categories::Category::Rendering
-            && (std::env::var_os("MCEDIT2_GPU_PROFILE_WORLD").is_some()
-                || std::env::var_os("MCEDIT2_UI_PROFILE").is_some()
-                || std::env::var_os("MCEDIT2_APP_PROFILE").is_some()))
-    {
-        real_source_mesh_phase_profile();
-    }
 }

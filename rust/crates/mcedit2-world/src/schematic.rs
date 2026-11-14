@@ -495,15 +495,15 @@ pub fn decode_legacy_with_budget(
     compressed: &[u8],
     budget: EditWorkBudget,
 ) -> Result<BlockClipboard, WorldError> {
-    if compressed.len() > 64 * 1024 * 1024 {
-        return Err(err("Schematic exceeds 64 MiB compressed"));
+    if compressed.len() > (budget.bytes() / 4) {
+        return Err(err("Schematic exceeds 当前文件预算 compressed"));
     }
     let mut raw = Vec::new();
     GzDecoder::new(compressed)
-        .take(64 * 1024 * 1024 + 1)
+        .take((budget.bytes() / 4) as u64 + 1)
         .read_to_end(&mut raw)?;
-    if raw.len() > 64 * 1024 * 1024 {
-        return Err(err("Schematic exceeds 64 MiB expanded"));
+    if raw.len() > (budget.bytes() / 4) {
+        return Err(err("Schematic exceeds 当前文件预算 expanded"));
     }
     budget.check(
         raw.len()
@@ -671,16 +671,18 @@ pub fn import_legacy_with_budget(
         return Err(err("Expected a .schematic file"));
     }
     let meta = fs::symlink_metadata(path)?;
-    if !meta.file_type().is_file() || meta.file_type().is_symlink() || meta.len() > 64 * 1024 * 1024
+    if !meta.file_type().is_file()
+        || meta.file_type().is_symlink()
+        || meta.len() > (budget.bytes() / 4) as u64
     {
-        return Err(err("Schematic must be a regular file of <= 64 MiB"));
+        return Err(err("Schematic must be a regular file of <= 当前文件预算"));
     }
     budget.check(
         (fs::metadata(path)?.len() as usize)
             .checked_mul(4)
             .ok_or_else(|| err("结构文件工作集溢出"))?,
     )?;
-    let bytes = fs::read(path)?;
+    let bytes = crate::read_limited_file(path, (budget.bytes() / 4) as u64)?;
     let mut clip = decode_legacy_with_budget(world, dimension, &bytes, budget)?;
     clip.source_file = Some(clipboard::SourceFileProof::from_bytes(path, &bytes)?);
     Ok(clip)
@@ -884,14 +886,14 @@ pub(crate) fn encode_legacy_with_budget(
     }
     nbt.push(0);
     let original = nbt_tag(10, "Schematic", &nbt)?;
-    if original.len() > 64 * 1024 * 1024 {
-        return Err(err("Legacy schematic expanded NBT exceeds 64 MiB"));
+    if original.len() > (budget.bytes() / 4) {
+        return Err(err("Legacy schematic expanded NBT exceeds 当前文件预算"));
     }
     let mut compressor = GzEncoder::new(Vec::new(), Compression::default());
     compressor.write_all(&original)?;
     let output = compressor.finish()?;
-    if output.len() > 64 * 1024 * 1024 {
-        return Err(err("Legacy schematic compressed NBT exceeds 64 MiB"));
+    if output.len() > (budget.bytes() / 4) {
+        return Err(err("Legacy schematic compressed NBT exceeds 当前文件预算"));
     }
     Ok(output)
 }
@@ -911,15 +913,15 @@ pub fn decode_sponge_v2_with_budget(
     compressed: &[u8],
     budget: EditWorkBudget,
 ) -> Result<BlockClipboard, WorldError> {
-    if compressed.len() > 64 * 1024 * 1024 {
-        return Err(err("Sponge schematic exceeds 64 MiB"));
+    if compressed.len() > (budget.bytes() / 4) {
+        return Err(err("Sponge schematic exceeds 当前文件预算"));
     }
     let mut raw = Vec::new();
     GzDecoder::new(compressed)
-        .take(64 * 1024 * 1024 + 1)
+        .take((budget.bytes() / 4) as u64 + 1)
         .read_to_end(&mut raw)?;
-    if raw.len() > 64 * 1024 * 1024 {
-        return Err(err("Sponge expanded NBT exceeds 64 MiB"));
+    if raw.len() > (budget.bytes() / 4) {
+        return Err(err("Sponge expanded NBT exceeds 当前文件预算"));
     }
     budget.check(
         raw.len()
@@ -1076,16 +1078,18 @@ pub fn import_sponge_v2_with_budget(
         return Err(err("Expected Sponge .schem file"));
     }
     let meta = fs::symlink_metadata(path)?;
-    if !meta.file_type().is_file() || meta.file_type().is_symlink() || meta.len() > 64 * 1024 * 1024
+    if !meta.file_type().is_file()
+        || meta.file_type().is_symlink()
+        || meta.len() > (budget.bytes() / 4) as u64
     {
-        return Err(err("Sponge .schem must be a regular file <= 64 MiB"));
+        return Err(err("Sponge .schem must be a regular file <= 当前文件预算"));
     }
     budget.check(
         (fs::metadata(path)?.len() as usize)
             .checked_mul(4)
             .ok_or_else(|| err("结构文件工作集溢出"))?,
     )?;
-    let bytes = fs::read(path)?;
+    let bytes = crate::read_limited_file(path, (budget.bytes() / 4) as u64)?;
     let mut clip = decode_sponge_v2_with_budget(world, dimension, &bytes, budget)?;
     clip.source_file = Some(clipboard::SourceFileProof::from_bytes(path, &bytes)?);
     Ok(clip)
@@ -1274,13 +1278,13 @@ pub(crate) fn encode_sponge_v2_with_budget(
     }
     fields.push(0);
     let raw = nbt_tag(10, "Schematic", &fields)?;
-    if raw.len() > 64 * 1024 * 1024 {
+    if raw.len() > (budget.bytes() / 4) {
         return Err(err("Uncompressed Sponge NBT too large"));
     }
     let mut zipper = GzEncoder::new(Vec::new(), Compression::default());
     zipper.write_all(&raw)?;
     let compressed = zipper.finish()?;
-    if compressed.len() > 64 * 1024 * 1024 {
+    if compressed.len() > (budget.bytes() / 4) {
         return Err(err("Compressed Sponge NBT too large"));
     }
     Ok(compressed)
@@ -1300,15 +1304,15 @@ pub fn decode_sponge_v3_with_budget(
     compressed: &[u8],
     budget: EditWorkBudget,
 ) -> Result<BlockClipboard, WorldError> {
-    if compressed.len() > 64 * 1024 * 1024 {
-        return Err(err("Sponge schematic exceeds 64 MiB"));
+    if compressed.len() > (budget.bytes() / 4) {
+        return Err(err("Sponge schematic exceeds 当前文件预算"));
     }
     let mut raw = Vec::new();
     GzDecoder::new(compressed)
-        .take(64 * 1024 * 1024 + 1)
+        .take((budget.bytes() / 4) as u64 + 1)
         .read_to_end(&mut raw)?;
-    if raw.len() > 64 * 1024 * 1024 {
-        return Err(err("Sponge expanded NBT exceeds 64 MiB"));
+    if raw.len() > (budget.bytes() / 4) {
+        return Err(err("Sponge expanded NBT exceeds 当前文件预算"));
     }
     budget.check(
         raw.len()
@@ -1494,16 +1498,18 @@ pub fn import_sponge_v3_with_budget(
         return Err(err("Expected Sponge .schem file"));
     }
     let meta = fs::symlink_metadata(path)?;
-    if !meta.file_type().is_file() || meta.file_type().is_symlink() || meta.len() > 64 * 1024 * 1024
+    if !meta.file_type().is_file()
+        || meta.file_type().is_symlink()
+        || meta.len() > (budget.bytes() / 4) as u64
     {
-        return Err(err("Sponge .schem must be a regular file <= 64 MiB"));
+        return Err(err("Sponge .schem must be a regular file <= 当前文件预算"));
     }
     budget.check(
         (fs::metadata(path)?.len() as usize)
             .checked_mul(4)
             .ok_or_else(|| err("结构文件工作集溢出"))?,
     )?;
-    let bytes = fs::read(path)?;
+    let bytes = crate::read_limited_file(path, (budget.bytes() / 4) as u64)?;
     let mut clip = decode_sponge_v3_with_budget(world, dimension, &bytes, budget)?;
     clip.source_file = Some(clipboard::SourceFileProof::from_bytes(path, &bytes)?);
     Ok(clip)
@@ -1523,7 +1529,10 @@ pub fn decode_structure_with_budget(
     bytes: &[u8],
     budget: EditWorkBudget,
 ) -> Result<BlockClipboard, WorldError> {
-    let (_, raw) = crate::nbt_envelope::NbtEnvelope::decode(bytes.to_vec())?;
+    let (_, raw) = crate::nbt_envelope::NbtEnvelope::decode_limited(
+        bytes.to_vec(),
+        (budget.bytes() / 4) as u64,
+    )?;
     budget.check(
         raw.len()
             .checked_mul(4)
@@ -1721,7 +1730,7 @@ pub fn import_structure_with_budget(
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.file_type().is_file()
         || metadata.file_type().is_symlink()
-        || metadata.len() > 64 * 1024 * 1024
+        || metadata.len() > (budget.bytes() / 4) as u64
     {
         return Err(err("原版结构文件无效或超预算"));
     }
@@ -1730,7 +1739,7 @@ pub fn import_structure_with_budget(
             .checked_mul(4)
             .ok_or_else(|| err("结构文件工作集溢出"))?,
     )?;
-    let bytes = fs::read(path)?;
+    let bytes = crate::read_limited_file(path, (budget.bytes() / 4) as u64)?;
     let mut clip = decode_structure_with_budget(world, dimension, &bytes, budget)?;
     clip.source_file = Some(clipboard::SourceFileProof::from_bytes(path, &bytes)?);
     Ok(clip)
@@ -1909,13 +1918,13 @@ pub(crate) fn encode_structure_with_budget(
     }
     body.push(0);
     let raw = nbt_tag(10, "", &body)?;
-    if raw.len() > 64 * 1024 * 1024 {
+    if raw.len() > (budget.bytes() / 4) {
         return Err(err("原版结构解压数据超过预算"));
     }
     let mut gzip = GzEncoder::new(Vec::new(), Compression::default());
     gzip.write_all(&raw)?;
     let bytes = gzip.finish()?;
-    if bytes.len() > 64 * 1024 * 1024 {
+    if bytes.len() > (budget.bytes() / 4) {
         return Err(err("原版结构压缩数据超过预算"));
     }
     Ok(bytes)
@@ -2082,21 +2091,16 @@ pub(crate) fn encode_sponge_v3_with_budget(
     let mut inner = nbt_tag(10, "Schematic", &fields)?;
     inner.push(0);
     let raw = nbt_tag(10, "", &inner)?;
-    if raw.len() > 64 * 1024 * 1024 {
+    if raw.len() > (budget.bytes() / 4) {
         return Err(err("Uncompressed Sponge NBT too large"));
     }
     let mut zipper = GzEncoder::new(Vec::new(), Compression::default());
     zipper.write_all(&raw)?;
     let compressed = zipper.finish()?;
-    if compressed.len() > 64 * 1024 * 1024 {
+    if compressed.len() > (budget.bytes() / 4) {
         return Err(err("Compressed Sponge NBT too large"));
     }
     Ok(compressed)
-}
-
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
 }
 
 #[cfg(test)]
@@ -2135,6 +2139,7 @@ mod tests {
         zip.finish().unwrap()
     }
 
+    #[test]
     fn strict_sponge_v2_named_block_roundtrip_preserves_states_and_properties() {
         use crate::clipboard;
         use crate::sections::State;
@@ -2203,6 +2208,7 @@ mod tests {
         fs::remove_dir_all(location).unwrap();
     }
 
+    #[test]
     fn sponge_v3_nested_blocks_roundtrip_and_opaque_nbt_guards() {
         use crate::clipboard;
         use crate::sections::State;
@@ -2276,6 +2282,7 @@ mod tests {
         fs::remove_dir_all(folder).unwrap();
     }
 
+    #[test]
     fn old_schematic_preserves_addblocks_and_refuses_block_entities() {
         let w = WorldSummary {
             world_data: Default::default(),
@@ -2293,14 +2300,5 @@ mod tests {
         assert_eq!(clip.blocks[1].name, "numeric:301");
         assert_eq!(clip.blocks[1].properties[0].1, "7");
         assert!(decode_legacy(&w, "minecraft:overworld", &sample(true)).is_err());
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Interchange {
-            strict_sponge_v2_named_block_roundtrip_preserves_states_and_properties();
-            sponge_v3_nested_blocks_roundtrip_and_opaque_nbt_guards();
-            old_schematic_preserves_addblocks_and_refuses_block_entities();
-        }
     }
 }

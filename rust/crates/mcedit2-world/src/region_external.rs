@@ -80,11 +80,7 @@ pub(crate) fn read_sidecar(path: &Path) -> Result<Vec<u8>, WorldError> {
     {
         return Err(err("MCC 不是普通文件或超 32 MiB"));
     }
-    let b = fs::read(path)?;
-    if b.len() > 32 * 1024 * 1024 {
-        return Err(err("MCC 读取时超过 32 MiB"));
-    }
-    Ok(b)
+    crate::read_limited_file(path, 32 * 1024 * 1024)
 }
 pub(crate) fn decode(method: u8, payload: &[u8]) -> Result<(NbtEnvelope, Vec<u8>), WorldError> {
     if payload.len() > 32 * 1024 * 1024 {
@@ -146,25 +142,46 @@ pub fn requires_external(
     extension: &str,
     changes: &[NativeChunkCandidate],
 ) -> Result<bool, WorldError> {
-    let path = expected_region_path(world, dimension, region.0, region.1, extension)?;
-    let original = fs::read(path)?;
-    let slots = region_plan::parse_slots(&original)?;
-    requires_external_from_source(&original, region, changes, &slots)
+    requires_external_with_budget(
+        world,
+        dimension,
+        region,
+        extension,
+        changes,
+        crate::editing::EditWorkBudget::default(),
+    )
 }
+pub fn requires_external_with_budget(
+    world: &WorldSummary,
+    dimension: &str,
+    region: (i32, i32),
+    extension: &str,
+    changes: &[NativeChunkCandidate],
+    budget: crate::editing::EditWorkBudget,
+) -> Result<bool, WorldError> {
+    let path = expected_region_path(world, dimension, region.0, region.1, extension)?;
+    let original = crate::read_limited_file(&path, budget.bytes() as u64)?;
+    let slots = region_plan::parse_slots(&original)?;
+    requires_external_from_source(&original, region, changes, &slots, budget)
+}
+
 pub(crate) fn requires_external_cached(
     original: &[u8],
     region: (i32, i32),
     changes: &[NativeChunkCandidate],
+    budget: crate::editing::EditWorkBudget,
 ) -> Result<bool, WorldError> {
     let slots = region_plan::parse_slots(original)?;
-    requires_external_from_source(original, region, changes, &slots)
+    requires_external_from_source(original, region, changes, &slots, budget)
 }
 fn requires_external_from_source(
     original: &[u8],
     region: (i32, i32),
     changes: &[NativeChunkCandidate],
     slots: &[Option<region_plan::Slot>; 1024],
+    budget: crate::editing::EditWorkBudget,
 ) -> Result<bool, WorldError> {
+    budget.check(original.len())?;
     if changes.is_empty() {
         return Err(err("外部块探测需要变更"));
     }
@@ -203,6 +220,27 @@ pub fn prepare(
     be_replay: &[BeReplayStep],
     timestamp: u32,
 ) -> Result<MccBundleCandidate, WorldError> {
+    prepare_with_budget(
+        world,
+        dimension,
+        region,
+        extension,
+        changes,
+        be_replay,
+        timestamp,
+        crate::editing::EditWorkBudget::default(),
+    )
+}
+pub fn prepare_with_budget(
+    world: &WorldSummary,
+    dimension: &str,
+    region: (i32, i32),
+    extension: &str,
+    changes: &[NativeChunkCandidate],
+    be_replay: &[BeReplayStep],
+    timestamp: u32,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<MccBundleCandidate, WorldError> {
     prepare_with_history(
         world,
         dimension,
@@ -214,6 +252,7 @@ pub fn prepare(
         &[],
         &[],
         timestamp,
+        budget,
     )
 }
 pub fn prepare_history(
@@ -227,6 +266,31 @@ pub fn prepare_history(
     sections: &[crate::chunk_creation::SectionCreationProof],
     timestamp: u32,
 ) -> Result<MccBundleCandidate, WorldError> {
+    prepare_history_with_budget(
+        world,
+        dimension,
+        region,
+        extension,
+        changes,
+        history,
+        biomes,
+        sections,
+        timestamp,
+        crate::editing::EditWorkBudget::default(),
+    )
+}
+pub fn prepare_history_with_budget(
+    world: &WorldSummary,
+    dimension: &str,
+    region: (i32, i32),
+    extension: &str,
+    changes: &[NativeChunkCandidate],
+    history: &[crate::editing::BeProof],
+    biomes: &[crate::biome_editing::Proof],
+    sections: &[crate::chunk_creation::SectionCreationProof],
+    timestamp: u32,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<MccBundleCandidate, WorldError> {
     prepare_with_history(
         world,
         dimension,
@@ -238,6 +302,7 @@ pub fn prepare_history(
         biomes,
         sections,
         timestamp,
+        budget,
     )
 }
 fn prepare_with_history(
@@ -251,14 +316,16 @@ fn prepare_with_history(
     biomes: &[crate::biome_editing::Proof],
     sections: &[crate::chunk_creation::SectionCreationProof],
     timestamp: u32,
+    budget: crate::editing::EditWorkBudget,
 ) -> Result<MccBundleCandidate, WorldError> {
     let path = expected_region_path(world, dimension, region.0, region.1, extension)?;
-    let original = fs::read(&path)?;
+    let original = crate::read_limited_file(&path, budget.bytes() as u64)?;
     prepare_from_source(
         world, dimension, region, extension, changes, be_replay, history, biomes, sections,
-        timestamp, path, &original, None,
+        timestamp, path, &original, None, budget,
     )
 }
+
 pub(crate) fn prepare_history_cached(
     world: &WorldSummary,
     dimension: &str,
@@ -272,6 +339,7 @@ pub(crate) fn prepare_history_cached(
     path: PathBuf,
     original: &[u8],
     reader: &mut crate::block_lookup::ReadOnlyRegionCache<'_>,
+    budget: crate::editing::EditWorkBudget,
 ) -> Result<MccBundleCandidate, WorldError> {
     prepare_from_source(
         world,
@@ -287,6 +355,7 @@ pub(crate) fn prepare_history_cached(
         path,
         original,
         Some(reader),
+        budget,
     )
 }
 fn prepare_from_source(
@@ -303,6 +372,7 @@ fn prepare_from_source(
     path: PathBuf,
     original: &[u8],
     mut reader: Option<&mut crate::block_lookup::ReadOnlyRegionCache<'_>>,
+    budget: crate::editing::EditWorkBudget,
 ) -> Result<MccBundleCandidate, WorldError> {
     if !be_replay.is_empty() && !history.is_empty() {
         return Err(err("MCC BE 历史不能与旧证明混用"));
@@ -311,6 +381,7 @@ fn prepare_from_source(
         return Err(err("MCC 候选数量超限"));
     }
     let slots = region_plan::parse_slots(original)?;
+    budget.check(original.len().saturating_mul(2))?;
     let mut image = original.to_vec();
     let mut files = Vec::new();
     let mut seen = BTreeSet::new();
@@ -399,9 +470,15 @@ fn prepare_from_source(
         }
         let bytes = region_plan::compress(method, &envelope.encode(&change.patched_nbt)?)?;
         let sector = image.len() / SECTOR;
-        if sector > 0x00ff_ffff || image.len() + SECTOR > 256 * 1024 * 1024 {
+        if sector > 0x00ff_ffff || image.len().saturating_add(SECTOR) > budget.bytes() {
             return Err(err("MCC Region 扇区超限"));
         }
+        budget.check(
+            original
+                .len()
+                .saturating_add(image.len())
+                .saturating_add(SECTOR),
+        )?;
         image.resize(image.len() + SECTOR, 0);
         let at = sector * SECTOR;
         image[at..at + 4].copy_from_slice(&1u32.to_be_bytes());

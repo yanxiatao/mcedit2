@@ -1333,7 +1333,7 @@ fn bounded_isometric_voxel_surface_uses_original_height_and_overlay_without_worl
     let mut editor = Session::new(world.metadata(), "minecraft:overworld").unwrap();
     assert!(editor.inspect_surface(0, 0, -64, -33, 16, 16).is_ok());
     assert!(editor.inspect_surface(0, 0, -64, -17, 16, 16).is_ok());
-    // 64x64x48 is a read-only scene budget; the original world remains byte exact.
+    // Read-only windows use the work budget; the original world remains byte exact.
     let wide = editor.inspect_surface(0, 0, -64, -17, 64, 64).unwrap();
     assert_eq!(wide.source_chunks, 16);
     assert!(wide.source_tiles.len() == 16);
@@ -1344,13 +1344,13 @@ fn bounded_isometric_voxel_surface_uses_original_height_and_overlay_without_worl
             .sum::<usize>(),
         4096
     );
-    // 俯视读取完整 Section 坐标范围，与保留三维体素的 48 层预算分开。
+    // 俯视读取完整 Section 坐标范围，保留真实格式的高度边界。
     assert!(editor.inspect_surface(0, 0, -64, -16, 16, 16).is_ok());
     assert!(editor.inspect_surface(0, 0, -64, 319, 16, 16).is_ok());
     let tall = editor.inspect_surface(0, 0, -2048, 2047, 1, 1).unwrap();
     assert_eq!(tall.voxels[0].y, -49);
     assert!(editor.inspect_surface(0, 0, -2048, 2048, 1, 1).is_err());
-    assert!(editor.inspect_surface(0, 0, -64, -17, 65, 16).is_err());
+    assert!(editor.inspect_surface(0, 0, -64, -17, 65, 16).is_ok());
     let view = editor.inspect_surface(0, 0, -64, -63, 2, 2).unwrap();
     assert_eq!(view.voxels.len(), 4);
     assert_eq!(view.missing_columns, 0);
@@ -1513,9 +1513,7 @@ fn native_multilayer_original_exposed_volume_culls_hidden_blocks_and_shows_real_
         .voxels
         .iter()
         .any(|v| (v.x, v.y, v.z) == (2, -63, 1) && v.faces & FACE_NEG_X != 0));
-    assert!(session
-        .inspect_exposed_volume(0, 0, -64, -16, 3, 3)
-        .is_err());
+    assert!(session.inspect_exposed_volume(0, 0, -64, -16, 3, 3).is_ok());
     assert!(session.inspect_exposed_volume(0, 0, -64, -17, 3, 3).is_ok());
     assert_eq!(world.bytes_now(), original);
 }
@@ -2672,3 +2670,52 @@ fn complete_structure_exchange_and_resampled_source_proofs() {
 
 #[path = "support/large_plugin_cases.rs"]
 mod large_plugin_cases;
+
+#[test]
+fn enlarged_save_budget_accepts_large_regions_and_preserves_history() {
+    use mcedit2_world::{editing::EditWorkBudget, mixed_transaction};
+    let original = NativeWorld::create(true);
+    let region = original.path.join("region/r.0.0.mca");
+    let length = 256 * 1024 * 1024 + 4096;
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&region)
+        .unwrap()
+        .set_len(length)
+        .unwrap();
+    let world = original.metadata();
+    let mut editor = Session::new(world.clone(), "minecraft:overworld").unwrap();
+    let state = parse_state("minecraft:gold_block").unwrap();
+    editor
+        .commit(
+            editor
+                .prepare(Bounds::new((0, -64, 0), (0, -64, 0)).unwrap(), &state, None)
+                .unwrap(),
+        )
+        .unwrap();
+    assert!(editor.prepare_mixed_region_candidates(55).is_err());
+    assert_eq!(fs::metadata(&region).unwrap().len(), length);
+    let budget = EditWorkBudget::from_mib("2048").unwrap();
+    editor.set_work_budget(budget);
+    let candidates = editor.prepare_mixed_region_candidates(55).unwrap();
+    assert!(mixed_transaction::prepare_with_budget(
+        &world,
+        &candidates,
+        false,
+        "SAVE",
+        EditWorkBudget::default()
+    )
+    .is_err());
+    assert_eq!(fs::metadata(&region).unwrap().len(), length);
+    mixed_transaction::prepare_with_budget(&world, &candidates, false, "SAVE", budget).unwrap();
+    drop(candidates);
+    let (_, archive) =
+        mixed_transaction::finish_with_history_with_budget(&world, false, None, budget).unwrap();
+    archive.verify_current().unwrap();
+    let reopened = Session::new(world, "minecraft:overworld").unwrap();
+    match reopened.visible_block((0, -64, 0)).unwrap() {
+        Lookup::Present(block) => assert_eq!(block.state, state),
+        other => panic!("saved block unavailable: {other:?}"),
+    }
+    assert!(fs::metadata(&region).unwrap().len() > length);
+}

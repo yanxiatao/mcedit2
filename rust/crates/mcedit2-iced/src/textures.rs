@@ -1284,10 +1284,7 @@ pub(crate) struct LoadStatistics {
 /// collide. The atlas loader still applies its existing memory budget.
 fn texture_id(path: &str) -> Option<String> {
     let parts: Vec<_> = path.split('/').collect();
-    if parts.len() < 4
-        || parts[0] != "assets"
-        || !matches!(parts[2], "textures" | "models")
-        || !path.ends_with(".png")
+    if parts.len() < 4 || parts[0] != "assets" || parts[2] != "textures" || !path.ends_with(".png")
     {
         return None;
     }
@@ -1299,11 +1296,6 @@ fn texture_id(path: &str) -> Option<String> {
     let name = relative.strip_suffix(".png")?;
     if !resource_ids::path(name) {
         return None;
-    }
-    if parts[2] == "models" {
-        // glTF image URIs commonly live beside the .gltf itself, not in
-        // Minecraft's textures/ folder. Give them a collision-free atlas ID.
-        return Some(format!("{namespace}:__gltf/{name}"));
     }
     // Climate tables have an independent 256x256 source decoder.
     if namespace == "minecraft" && matches!(name, "colormap/grass" | "colormap/foliage") {
@@ -1475,8 +1467,6 @@ enum PackAsset {
     Colormap(&'static str),
     Model,
     Obj,
-    Gltf,
-    GltfBuffer,
     Mtl,
     Metadata(String),
     Texture(String),
@@ -1500,12 +1490,6 @@ impl PackAsset {
         }
         if let Some(id) = texture_id(name) {
             return Some(Self::Texture(id));
-        }
-        if name.ends_with(".bin") && name.contains("/models/") {
-            return Some(Self::GltfBuffer);
-        }
-        if (name.ends_with(".gltf") || name.ends_with(".glb")) && name.contains("/models/") {
-            return Some(Self::Gltf);
         }
         if name.ends_with(".mtl") && name.contains("/models/") {
             return Some(Self::Mtl);
@@ -2099,17 +2083,6 @@ impl TextureBank {
                     Arc::make_mut(&mut self.warnings).push(format!("Skipped OBJ {name}: {e}"));
                 }
             }
-            PackAsset::Gltf => {
-                if let Err(e) = Arc::make_mut(&mut self.models).insert_gltf(name, &bytes) {
-                    Arc::make_mut(&mut self.warnings).push(format!("Skipped glTF {name}: {e}"));
-                }
-            }
-            PackAsset::GltfBuffer => {
-                if let Err(e) = Arc::make_mut(&mut self.models).insert_gltf_buffer(name, &bytes) {
-                    Arc::make_mut(&mut self.warnings)
-                        .push(format!("Skipped glTF buffer {name}: {e}"));
-                }
-            }
             PackAsset::Mtl => {
                 if let Err(e) = Arc::make_mut(&mut self.models).insert_mtl(name, &bytes) {
                     Arc::make_mut(&mut self.warnings).push(format!("Skipped MTL {name}: {e}"));
@@ -2570,9 +2543,6 @@ impl TextureBank {
             return Err("Packs contain no supported assets/*/textures/block/*.png".into());
         }
         Arc::make_mut(&mut out.tiles).insert(MISSING_TEXTURE_ID.into(), missing_texture());
-        // Resolve pack-local external .bin references only after all ZIP/JAR
-        // entries and overlay layers have been added, independent of order.
-        Arc::make_mut(&mut out.warnings).extend(Arc::make_mut(&mut out.models).finish_gltf());
         out.finalize_animations();
         out.bake_mtl_masks();
         eprintln!("[assets] 开始建立图集：{} 个纹理", out.tiles.len());
@@ -3373,29 +3343,27 @@ impl TextureBank {
         self.get(&self.resolve_id(state, face)?)
     }
 }
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    if category == crate::test_categories::Category::Materials {
-        animation_tests::verify_materials();
-    }
-    if category == crate::test_categories::Category::Rendering {
-        animation_tests::verify_rendering();
-    }
-    if category == crate::test_categories::Category::Background {
-        animation_tests::verify_background();
-    }
-    tests::run_test_category(category);
-    java_assets::run_test_category(category);
-    builtin_tests::run_test_category(category);
-    java_obj_tests::run_test_category(category);
-    shulker_tests::run_test_category(category);
-    stack_tests::run_test_category(category);
+
+#[test]
+fn test_animation_tests_verify_materials() {
+    animation_tests::verify_materials();
+}
+
+#[test]
+fn test_animation_tests_verify_rendering() {
+    animation_tests::verify_rendering();
+}
+
+#[test]
+fn test_animation_tests_verify_background() {
+    animation_tests::verify_background();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
     fn declared_alpha_types_preserve_coverage_and_blended_tripwire() {
         let tripwire = AlphaMode::from_render_type("tripwire").unwrap();
         assert_eq!(tripwire.gpu_bits() & 3, 2);
@@ -3429,6 +3397,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn vanilla_colormap_samples_registered_climate_and_skips_unknown_mods() {
         let mut tints = biome_colors::Resources::default();
         tints.grass_colormap = Some(Tile {
@@ -3451,6 +3420,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn grass_and_water_tint_use_original_biome_name() {
         let swamp = biome_color(Some("minecraft:swamp"), "water");
         let ocean = biome_color(Some("minecraft:deep_cold_ocean"), "water");
@@ -3463,6 +3433,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn vanilla_vegetation_without_json_parent_uses_only_real_sprite_tints() {
         let mut bank = TextureBank::default();
         let top = state("minecraft:grass_block", vec![]);
@@ -3522,6 +3493,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn water_tint_respects_available_original_sprite_and_missing_checker() {
         let mut bank = TextureBank::default();
         let water = state("minecraft:water", vec![]);
@@ -3539,6 +3511,7 @@ mod tests {
         assert_eq!(bank.face_tint_at(&lava, Face::Top, 0, (0, 60, 0)), [1.0; 3]);
     }
 
+    #[test]
     fn fluid_top_and_side_use_distinct_original_still_and_flow_sprites() {
         let mut bank = TextureBank::default();
         let tiles = Arc::make_mut(&mut bank.tiles);
@@ -3555,6 +3528,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn minecraft_animation_metadata_uses_custom_order_and_tick_lengths() {
         let frames = vec![
             solid([255, 0, 0, 255]),
@@ -3583,6 +3557,7 @@ mod tests {
         .is_err());
     }
 
+    #[test]
     fn animated_atlas_updates_gpu_and_canvas_source_from_one_tick() {
         let mut bank = TextureBank::default();
         let a = solid([3, 14, 159, 255]);
@@ -3612,6 +3587,7 @@ mod tests {
         assert!(Arc::ptr_eq(&bank.animations, &next.animations));
     }
 
+    #[test]
     fn meta_file_order_is_independent_of_image_loading() {
         let mut bank = TextureBank::default();
         let id = "minecraft:lava_still".to_string();
@@ -3636,6 +3612,7 @@ mod tests {
         assert_eq!(bank.tiles[&id].rgba, [6, 12, 18, 255]);
     }
 
+    #[test]
     fn static_source_frame_obeys_mcmeta_nonzero_first_index() {
         let mut bank = TextureBank::default();
         let id = "minecraft:water_still".to_owned();
@@ -3671,6 +3648,7 @@ mod tests {
         assert!(bank.advance_animation(1).is_none());
     }
 
+    #[test]
     fn cutout_atlas_avoids_black_filter_fringe_without_changing_alpha() {
         let mut tiles = BTreeMap::new();
         tiles.insert(
@@ -3696,6 +3674,7 @@ mod tests {
         assert_eq!(page.rgba[(fy * page.width as usize + fx) * 4 + 3], 0);
     }
 
+    #[test]
     fn model_face_without_texture_cannot_borrow_another_named_side() {
         let bank = TextureBank::default();
         let state = state("minecraft:stone", vec![]);
@@ -3709,6 +3688,7 @@ mod tests {
             .is_none());
     }
 
+    #[test]
     fn missing_named_block_renders_checker_atlas_and_missing_json_face_stays_absent() {
         use crate::isometric::Face;
         let mut bank = TextureBank::default();
@@ -3791,6 +3771,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn missing_texture_is_opaque_minecraft_purple_black_checker() {
         let tile = missing_texture();
         assert_eq!(tile.alpha_mode(), AlphaMode::Opaque);
@@ -3800,6 +3781,7 @@ mod tests {
         assert_eq!(tile.pixel(0.9, 0.9), [248, 0, 248, 255]);
     }
 
+    #[test]
     fn original_glass_cutout_and_translucent_stained_glass_remain_distinct() {
         use mcedit2_world::surface::VoxelMaterial;
         let clear = state("minecraft:glass", vec![]);
@@ -3819,6 +3801,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn leaves_cutout_is_not_forced_into_transparent_blending() {
         use mcedit2_world::surface::VoxelMaterial;
         let state = State {
@@ -3831,6 +3814,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn modern_texture_and_metadata_paths_take_priority_regardless_of_order() {
         let mut bank = TextureBank::default();
         let id = "minecraft:stone";
@@ -3846,6 +3830,7 @@ mod tests {
         assert!(!bank.accept_metadata_path(id, "assets/minecraft/textures/blocks/stone.png.mcmeta"));
     }
 
+    #[test]
     fn modern_and_pre_flattening_vanilla_block_paths_share_identity() {
         assert_eq!(
             texture_id("assets/minecraft/textures/block/stone.png"),
@@ -3861,6 +3846,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn atlas_packs_sorted_ids_without_cross_tile_color_bleed() {
         let mut tiles = BTreeMap::new();
         tiles.insert("a:first".into(), solid([255, 0, 0, 255]));
@@ -3882,6 +3868,7 @@ mod tests {
         assert_eq!(sample(&atlas.white), vec![255, 255, 255, 255]);
     }
 
+    #[test]
     fn atlas_alpha_sampling_retains_transparent_holes() {
         let mut bank = TextureBank::default();
         Arc::make_mut(&mut bank.tiles).insert(
@@ -3907,6 +3894,7 @@ mod tests {
         assert_eq!(bank.atlas_pixel([f32::NAN, 0.2], 0), None);
     }
 
+    #[test]
     fn alpha_modes_distinguish_cutout_from_true_translucency() {
         assert_eq!(
             AlphaMode::from_pixels(&[1, 2, 3, 255, 0, 0, 0, 255]),
@@ -3923,6 +3911,7 @@ mod tests {
         assert_eq!(AlphaMode::from_pixels(&[0, 0, 0, 0]), AlphaMode::Cutout);
     }
 
+    #[test]
     fn one_pass_gpu_face_style_preserves_cutout_and_uv_coordinates() {
         let mut bank = TextureBank::default();
         Arc::make_mut(&mut bank.tiles).insert(
@@ -3955,6 +3944,7 @@ mod tests {
         assert_eq!(uv[0], first.start);
     }
 
+    #[test]
     fn uvlock_handles_corner_reflection_as_well_as_rotation() {
         let slot = AtlasUv {
             start: [0.2, 0.3],
@@ -3969,6 +3959,7 @@ mod tests {
         assert!(mirrored.iter().flatten().all(|x| x.is_finite()));
     }
 
+    #[test]
     fn per_face_uv_crop_and_rotation_stay_inside_atlas_slot() {
         let slot = AtlasUv {
             start: [0.2, 0.3],
@@ -3982,6 +3973,7 @@ mod tests {
         assert!((straight[2][0] - 0.35).abs() < 1e-6);
     }
 
+    #[test]
     fn variable_resolution_paging_preserves_hd_source_tiles() {
         let mut tiles = BTreeMap::new();
         for i in 0..15_000 {
@@ -4012,6 +4004,7 @@ mod tests {
         assert_eq!(color(last), vec![199, 7, 19, 255]);
     }
 
+    #[test]
     fn animation_updates_only_its_layer_and_preserves_uv() {
         let mut tiles = BTreeMap::new();
         for i in 0..15_000 {
@@ -4037,6 +4030,7 @@ mod tests {
         assert!(!Arc::ptr_eq(&atlas.pages[changed], &updated.pages[changed]));
     }
 
+    #[test]
     fn mixed_resolution_atlas_preserves_hd_and_small_sprites() {
         let mut sprites = BTreeMap::new();
         for i in 0..1000 {
@@ -4072,6 +4066,7 @@ mod tests {
         assert_eq!(sample(hd), 207);
     }
 
+    #[test]
     fn sorted_large_sprite_keeps_stable_texture_id_mapping() {
         let mut tiles = BTreeMap::new();
         for i in 0..256 {
@@ -4109,6 +4104,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn sparse_hd_pack_chooses_source_resolution() {
         let mut tiles = BTreeMap::new();
         tiles.insert(
@@ -4124,6 +4120,7 @@ mod tests {
         assert_eq!(atlas.page_count(), 1);
     }
 
+    #[test]
     fn invalid_png_header_rejected_before_allocating_pixels() {
         assert!(decode_png(b"not a png").is_err());
         let mut bytes = vec![0u8; 32];
@@ -4133,6 +4130,7 @@ mod tests {
         assert!(decode_png(&bytes).unwrap_err().contains("dimensions"));
     }
 
+    #[test]
     fn material_map_d_combines_luminance_and_png_alpha_per_pixel() {
         let diffuse = Tile {
             width: 2,
@@ -4151,6 +4149,7 @@ mod tests {
         assert_eq!(output.rgba[7], 32);
     }
 
+    #[test]
     fn opacity_material_texture_ids_cannot_escape_pack_namespace() {
         assert_eq!(
             material_texture_id("model:example:block/widget", "example:item/mask"),
@@ -4166,25 +4165,7 @@ mod tests {
         );
     }
 
-    fn gltf_images_in_model_root_have_stable_noncolliding_atlas_id() {
-        assert_eq!(
-            texture_id("assets/create.addon/models/panel.png"),
-            Some("create.addon:__gltf/panel".into())
-        );
-        assert_eq!(
-            texture_id("assets/create.addon/models/block/panel.png"),
-            Some("create.addon:__gltf/block/panel".into())
-        );
-        assert_eq!(
-            texture_id("assets/create.addon/textures/block/panel.png"),
-            Some("create.addon:panel".into())
-        );
-        assert_eq!(
-            texture_id("assets/create.addon/textures/panel.png"),
-            Some("create.addon:panel".into())
-        );
-    }
-
+    #[test]
     fn all_model_texture_families_are_namespaced_and_collision_free() {
         assert_eq!(
             texture_id("assets/create.addon/textures/item/machine/gizmo.png"),
@@ -4216,6 +4197,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn dotted_modded_namespace_and_texture_filename_load_without_loss() {
         assert_eq!(
             texture_id("assets/create.addon/textures/block/machine/gear.v2.png"),
@@ -4235,6 +4217,8 @@ mod tests {
             assert_eq!(texture_id(filename), None, "{filename}");
         }
     }
+    #[test]
+    #[cfg(unix)]
     #[cfg(unix)]
 
     fn external_assets_directory_symlink_is_not_traversed() {
@@ -4250,6 +4234,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[test]
     fn path_parser_is_namespaced_and_does_not_accept_traversal() {
         assert_eq!(
             texture_id("assets/minecraft/textures/block/stone.png"),
@@ -4266,6 +4251,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn exact_face_rule_and_mod_namespace() {
         let mut bank = TextureBank::default();
         Arc::make_mut(&mut bank.tiles).insert("minecraft:oak_log".into(), solid([17, 0, 0, 255]));
@@ -4285,6 +4271,7 @@ mod tests {
             .is_none());
     }
 
+    #[test]
     fn nearest_sampler_clamps_and_preserves_alpha() {
         let tile = Tile {
             width: 2,
@@ -4295,52 +4282,14 @@ mod tests {
         assert_eq!(tile.pixel(9.0, 9.0), [10, 11, 12, 0]);
     }
 
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Materials {
-            numeric_biome_colors::validate_numeric_pipeline();
-            biome_colors::validate_world_color_pipeline();
-            declared_alpha_types_preserve_coverage_and_blended_tripwire();
-            vanilla_colormap_samples_registered_climate_and_skips_unknown_mods();
-            grass_and_water_tint_use_original_biome_name();
-            vanilla_vegetation_without_json_parent_uses_only_real_sprite_tints();
-            water_tint_respects_available_original_sprite_and_missing_checker();
-            fluid_top_and_side_use_distinct_original_still_and_flow_sprites();
-            minecraft_animation_metadata_uses_custom_order_and_tick_lengths();
-            animated_atlas_updates_gpu_and_canvas_source_from_one_tick();
-            meta_file_order_is_independent_of_image_loading();
-            static_source_frame_obeys_mcmeta_nonzero_first_index();
-            cutout_atlas_avoids_black_filter_fringe_without_changing_alpha();
-            model_face_without_texture_cannot_borrow_another_named_side();
-            missing_named_block_renders_checker_atlas_and_missing_json_face_stays_absent();
-            missing_texture_is_opaque_minecraft_purple_black_checker();
-            original_glass_cutout_and_translucent_stained_glass_remain_distinct();
-            leaves_cutout_is_not_forced_into_transparent_blending();
-            modern_texture_and_metadata_paths_take_priority_regardless_of_order();
-            modern_and_pre_flattening_vanilla_block_paths_share_identity();
-            atlas_packs_sorted_ids_without_cross_tile_color_bleed();
-            atlas_alpha_sampling_retains_transparent_holes();
-            alpha_modes_distinguish_cutout_from_true_translucency();
-            one_pass_gpu_face_style_preserves_cutout_and_uv_coordinates();
-            uvlock_handles_corner_reflection_as_well_as_rotation();
-            per_face_uv_crop_and_rotation_stay_inside_atlas_slot();
-            variable_resolution_paging_preserves_hd_source_tiles();
-            animation_updates_only_its_layer_and_preserves_uv();
-            mixed_resolution_atlas_preserves_hd_and_small_sprites();
-            sorted_large_sprite_keeps_stable_texture_id_mapping();
-            sparse_hd_pack_chooses_source_resolution();
-            invalid_png_header_rejected_before_allocating_pixels();
-            material_map_d_combines_luminance_and_png_alpha_per_pixel();
-            opacity_material_texture_ids_cannot_escape_pack_namespace();
-            gltf_images_in_model_root_have_stable_noncolliding_atlas_id();
-            all_model_texture_families_are_namespaced_and_collision_free();
-            dotted_modded_namespace_and_texture_filename_load_without_loss();
-            #[cfg(unix)]
-            external_assets_directory_symlink_is_not_traversed();
-            path_parser_is_namespaced_and_does_not_accept_traversal();
-            exact_face_rule_and_mod_namespace();
-            nearest_sampler_clamps_and_preserves_alpha();
-        }
+    #[test]
+    fn test_numeric_biome_colors_validate_numeric_pipeline() {
+        numeric_biome_colors::validate_numeric_pipeline();
+    }
+
+    #[test]
+    fn test_biome_colors_validate_world_color_pipeline() {
+        biome_colors::validate_world_color_pipeline();
     }
 }
 

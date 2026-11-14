@@ -475,12 +475,6 @@ pub(crate) fn object_batch<'a>(
         row![
             button(l.pick("预检 NBT 保存", "Preview NBT save"))
                 .on_press_maybe((!app.save_worker).then_some(Message::PrepareBeSave)),
-            text_input(
-                l.pick("输入 SAVE_BE_NBT 确认写盘", "Type SAVE_BE_NBT to write"),
-                &app.be_save_phrase
-            )
-            .on_input(Message::BeSavePhrase)
-            .width(Length::Fill),
             button(l.pick("确认保存 NBT", "Confirm NBT save")).on_press(Message::ConfirmBeSave),
         ]
         .spacing(8),

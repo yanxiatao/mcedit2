@@ -262,11 +262,6 @@ pub(super) fn discover(
 }
 
 #[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::textures::{java_obj_tests::Fixture, LoadControl, TextureBank};
@@ -321,6 +316,7 @@ mod tests {
         (fixture, launcher, game)
     }
 
+    #[test]
     fn declared_framework_is_loaded_before_mod_overlays_and_resolves_model_parent() {
         let (_fixture, launcher, game) = setup();
         let red = png([200, 20, 10, 255]);
@@ -380,6 +376,7 @@ mod tests {
         assert_eq!(bank.atlas_pixel(uv[0], page).unwrap(), [10, 200, 20, 255]);
     }
 
+    #[test]
     fn missing_exact_framework_does_not_select_another_installed_version() {
         let (_fixture, launcher, game) = setup();
         zip(
@@ -392,6 +389,7 @@ mod tests {
         assert!(error.contains(VERSION), "{error}");
     }
 
+    #[test]
     fn local_patch_and_local_library_override_global_component_metadata() {
         let (fixture, launcher, game) = setup();
         let data = serde_json::json!({"uid":"net.neoforged","version":VERSION,"libraries":[
@@ -415,6 +413,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn metadata_version_and_unsafe_artifact_paths_are_refused() {
         let (fixture, launcher, game) = setup();
         for path in [
@@ -445,6 +444,7 @@ mod tests {
         assert!(error.contains("与存档 1.20.1 不一致"), "{error}");
     }
 
+    #[test]
     fn legacy_forge_coordinates_keep_the_minecraft_prefix() {
         let entry = serde_json::json!({"name":"net.minecraftforge:forge:1.20.1-47.4.0:universal"});
         assert_eq!(
@@ -455,6 +455,9 @@ mod tests {
         );
         assert!(artifact(&entry, "net.minecraftforge", "47.3.0", "1.20.1").is_err());
     }
+
+    #[test]
+    #[ignore = "requires local GPU / installed Minecraft resources"]
 
     fn real_framework_assets_restore_native_obj_and_pneumatic_models() {
         let world = mcedit2_world::inspect_world(PathBuf::from(
@@ -554,20 +557,5 @@ mod tests {
                 },
             ],
         );
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Sources {
-            declared_framework_is_loaded_before_mod_overlays_and_resolves_model_parent();
-            missing_exact_framework_does_not_select_another_installed_version();
-            local_patch_and_local_library_override_global_component_metadata();
-            metadata_version_and_unsafe_artifact_paths_are_refused();
-            legacy_forge_coordinates_keep_the_minecraft_prefix();
-        }
-
-        if category == crate::test_categories::Category::Framework {
-            real_framework_assets_restore_native_obj_and_pneumatic_models();
-        }
     }
 }

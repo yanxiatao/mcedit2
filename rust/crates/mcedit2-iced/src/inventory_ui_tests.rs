@@ -20,6 +20,7 @@ fn nbt(app: &mut App, action: nbt_editor::Action) {
     let epoch = app.nbt_document_id();
     let _ = crate::update(app, Message::Nbt(epoch, action));
 }
+#[test]
 fn inventory_file_pipeline() {
     let blank = Document::new(crate::metadata_fixture::nbt(Vec::new())).unwrap();
     let mut state = State::default();
@@ -244,16 +245,13 @@ fn inventory_file_pipeline() {
         assert!(b.update(&changed, Action::Copy(b.token()), true).is_err());
     }
 }
-pub(super) fn run(category: crate::test_categories::Category) {
-    if category == crate::test_categories::Category::Navigation {
-        crate::inventory_grid::verify();
-    }
-    if category == crate::test_categories::Category::Background {
-        inventory_file_pipeline();
-        complete_presets_pipeline();
-    }
+
+#[test]
+fn test_crate_inventory_grid_verify() {
+    crate::inventory_grid::verify();
 }
 
+#[test]
 fn complete_presets_pipeline() {
     for version in [1343, 3465, 3955] {
         let fixture = Fixture::new(version);

@@ -87,7 +87,6 @@ fn commit(app: &mut App) {
     );
 }
 fn save(app: &mut App) {
-    app.mixed_phrase = "SAVE_BE_NBT".into();
     let _ = background(app, Message::MixedPrepare);
     assert!(
         app.worlds[0]
@@ -105,6 +104,7 @@ fn save(app: &mut App) {
         app.mixed_status
     );
 }
+#[test]
 fn inspector_edit_preview_and_persistence() {
     for version in [3465, 3955] {
         let mut fixture = Fixture::new(version);
@@ -288,6 +288,7 @@ fn inspector_edit_preview_and_persistence() {
         assert!(!app.object_inspector.reviewing());
     }
 }
+#[test]
 fn entity_tools_and_cross_region_save() {
     for version in [1343, 3465, 3955] {
         let mut fixture = Fixture::new(version);
@@ -402,64 +403,56 @@ fn entity_tools_and_cross_region_save() {
         );
     }
 }
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    if category == crate::test_categories::Category::Background {
-        inventory_editor_preview_and_save();
-        all_container_transactions();
-        special_forms_editor_and_save();
-        inspector_edit_preview_and_persistence();
-        entity_tools_and_cross_region_save();
-        chunk_properties_tree_and_save();
-        created_legacy_chunk_background_save();
-    }
-    if category == crate::test_categories::Category::Navigation {
-        chunk_outline_and_view_picking();
-        command_form_navigation();
-        let mut fixture = Fixture::new(3955);
-        crate::object_fixture::populate(&mut fixture);
-        let mut app = metadata_tests::app(&fixture);
-        select(&mut app, (0, 0), Kind::Entity);
-        open(&mut app);
-        let _ = object_inspector::view(&app);
+
+#[test]
+fn navigation_behavior() {
+    chunk_outline_and_view_picking();
+    command_form_navigation();
+    let mut fixture = Fixture::new(3955);
+    crate::object_fixture::populate(&mut fixture);
+    let mut app = metadata_tests::app(&fixture);
+    select(&mut app, (0, 0), Kind::Entity);
+    open(&mut app);
+    let _ = object_inspector::view(&app);
+    let _ = crate::view(&app);
+    scalar(&mut app, "/Health", 5, "20");
+    let revision = app.sessions[&(0, 0)].revision();
+    let bytes = draft(&app).document().bytes().to_vec();
+    for page in [
+        object_inspector::WorkspacePage::Entities,
+        object_inspector::WorkspacePage::Batch,
+        object_inspector::WorkspacePage::Snapshots,
+        object_inspector::WorkspacePage::Object,
+    ] {
+        object(&mut app, Action::WorkspacePage(page));
         let _ = crate::view(&app);
-        scalar(&mut app, "/Health", 5, "20");
-        let revision = app.sessions[&(0, 0)].revision();
-        let bytes = draft(&app).document().bytes().to_vec();
-        for page in [
-            object_inspector::WorkspacePage::Entities,
-            object_inspector::WorkspacePage::Batch,
-            object_inspector::WorkspacePage::Snapshots,
-            object_inspector::WorkspacePage::Object,
-        ] {
-            object(&mut app, Action::WorkspacePage(page));
-            let _ = crate::view(&app);
-            assert_eq!(app.object_inspector.workspace_page, page);
-            assert!(app.object_inspector.has_document(app.current_key()));
-            assert_eq!(app.object_inspector.unsaved_world(), Some(0));
-            assert_eq!(draft(&app).document().bytes(), bytes);
-            assert!(Arc::ptr_eq(&revision, &app.sessions[&(0, 0)].revision()));
-            assert_eq!(app.sessions[&(0, 0)].undo_depth(), 0);
-        }
-        object(&mut app, Action::Open);
-        object(&mut app, Action::OpenChunk);
+        assert_eq!(app.object_inspector.workspace_page, page);
+        assert!(app.object_inspector.has_document(app.current_key()));
+        assert_eq!(app.object_inspector.unsaved_world(), Some(0));
         assert_eq!(draft(&app).document().bytes(), bytes);
-        prepare(&mut app);
-        let _ = object_inspector::review(&app);
+        assert!(Arc::ptr_eq(&revision, &app.sessions[&(0, 0)].revision()));
+        assert_eq!(app.sessions[&(0, 0)].undo_depth(), 0);
+    }
+    object(&mut app, Action::Open);
+    object(&mut app, Action::OpenChunk);
+    assert_eq!(draft(&app).document().bytes(), bytes);
+    prepare(&mut app);
+    let _ = object_inspector::review(&app);
+    let _ = crate::view(&app);
+    object(&mut app, Action::Close);
+    object(&mut app, Action::ChunkCoordinates("0,0".into()));
+    let _ = background(&mut app, Message::ObjectInspector(Action::OpenChunk));
+    assert_eq!(app.advanced_section, crate::AdvancedSection::Chunks);
+    for page in [
+        object_inspector::ChunkPage::Properties,
+        object_inspector::ChunkPage::Nbt,
+    ] {
+        object(&mut app, Action::ChunkPage(page));
         let _ = crate::view(&app);
-        object(&mut app, Action::Close);
-        object(&mut app, Action::ChunkCoordinates("0,0".into()));
-        let _ = background(&mut app, Message::ObjectInspector(Action::OpenChunk));
-        assert_eq!(app.advanced_section, crate::AdvancedSection::Chunks);
-        for page in [
-            object_inspector::ChunkPage::Properties,
-            object_inspector::ChunkPage::Nbt,
-        ] {
-            object(&mut app, Action::ChunkPage(page));
-            let _ = crate::view(&app);
-        }
     }
 }
 
+#[test]
 fn chunk_properties_tree_and_save() {
     for version in [1343, 3465, 3955] {
         let mut fixture = Fixture::new(version);
@@ -791,6 +784,7 @@ fn chunk_outline_and_view_picking() {
     assert!(object_inspector::selected_column(&app).is_none());
 }
 
+#[test]
 fn created_legacy_chunk_background_save() {
     use mcedit2_world::{
         chunk_creation::{BiomeSource, ChunkCreationProfile},
@@ -931,6 +925,7 @@ fn created_legacy_chunk_background_save() {
     }
 }
 
+#[test]
 fn inventory_editor_preview_and_save() {
     use crate::inventory_ui::{self, Action as ItemAction, Field as ItemField};
     use mcedit2_world::inventory::{Layout, Snapshot};
@@ -1078,6 +1073,7 @@ fn inventory_editor_preview_and_save() {
     }
 }
 
+#[test]
 fn special_forms_editor_and_save() {
     use crate::block_forms::Action as Form;
     use mcedit2_world::{
@@ -1387,6 +1383,7 @@ fn command_form_navigation() {
     let _ = object_inspector::view(&app);
     assert_eq!(draft(&app).document().undo_depth(), 0);
 }
+#[test]
 fn all_container_transactions() {
     use crate::inventory_ui::{self, Action as ItemAction, Field as ItemField};
     use mcedit2_world::{container_data, inventory::Snapshot};

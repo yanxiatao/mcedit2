@@ -24,8 +24,6 @@ const PHASES: [&str; 3] = [
     ".mcedit2-mixed.finishing.json",
     ".mcedit2-mixed.rolling-back.json",
 ];
-const MAX: u64 = 256 * 1024 * 1024;
-const MAX_WORKING_BYTES: usize = 1024 * 1024 * 1024;
 /// 同一恢复入口显示真实日志与不可变备份，不能根据文件数量猜测事务类型。
 #[derive(Debug, Clone)]
 pub struct PendingSummary {
@@ -53,8 +51,14 @@ impl PendingSummary {
 }
 /// 提交前从实际记录提取独立 NBT 文件的保存身份；不推测界面当前候选列表。
 pub fn nbt_identities(world: &WorldSummary) -> Result<Vec<nbt_file::SaveIdentity>, WorldError> {
+    nbt_identities_with_budget(world, crate::editing::EditWorkBudget::default())
+}
+pub fn nbt_identities_with_budget(
+    world: &WorldSummary,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<Vec<nbt_file::SaveIdentity>, WorldError> {
     let root = fs::canonicalize(&world.root)?;
-    let (journal, _) = load(world, &root)?;
+    let (journal, _) = load(world, &root, budget)?;
     let token = journal_token(&journal)?;
     let digest = hash(&token);
     let mut artifacts = PHASES
@@ -87,6 +91,12 @@ pub fn nbt_identities(world: &WorldSummary) -> Result<Vec<nbt_file::SaveIdentity
         .collect::<Result<Vec<_>, WorldError>>()?)
 }
 pub fn pending_summary(world: &WorldSummary) -> Result<Option<PendingSummary>, WorldError> {
+    pending_summary_with_budget(world, crate::editing::EditWorkBudget::default())
+}
+pub fn pending_summary_with_budget(
+    world: &WorldSummary,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<Option<PendingSummary>, WorldError> {
     let root = fs::canonicalize(&world.root)?;
     let mut present = false;
     for phase in PHASES {
@@ -99,7 +109,7 @@ pub fn pending_summary(world: &WorldSummary) -> Result<Option<PendingSummary>, W
     if !present {
         return Ok(None);
     }
-    let (journal, phase) = load(world, &root)?;
+    let (journal, phase) = load(world, &root, budget)?;
     let mut backups = Vec::new();
     for entry in &journal.entries {
         if !entry.original_sha.is_empty() {
@@ -249,14 +259,22 @@ fn directory_owner(root: &Path, dir: &Path) -> PathBuf {
 fn journal_token(j: &Journal) -> Result<Vec<u8>, WorldError> {
     Ok(hash(&serde_json::to_vec(j).map_err(|e| err(e.to_string()))?).into_bytes())
 }
-fn read(path: &Path) -> Result<Vec<u8>, WorldError> {
+fn read(path: &Path, budget: crate::editing::EditWorkBudget) -> Result<Vec<u8>, WorldError> {
     let meta = fs::symlink_metadata(path)?;
-    if !meta.file_type().is_file() || meta.file_type().is_symlink() || meta.len() > MAX {
-        return Err(err(format!("事务文件非法或超 256 MiB：{}", path.display())));
+    if !meta.file_type().is_file()
+        || meta.file_type().is_symlink()
+        || meta.len() > budget.bytes() as u64
+    {
+        return Err(err(format!(
+            "事务文件非法或超过当前预算：{}",
+            path.display()
+        )));
     }
     let mut out = Vec::new();
-    fs::File::open(path)?.take(MAX + 1).read_to_end(&mut out)?;
-    if out.len() as u64 > MAX {
+    fs::File::open(path)?
+        .take(budget.bytes() as u64 + 1)
+        .read_to_end(&mut out)?;
+    if out.len() as u64 > budget.bytes() as u64 {
         return Err(err("事务文件读取超限"));
     }
     Ok(out)
@@ -552,6 +570,7 @@ struct Journal {
 /// 重建事务开始时的只读世界。只覆盖经事务证明校验的目标，其他内容仍读取磁盘。
 /// 构造和使用必须位于持有世界写锁的预检或恢复期间。
 pub(crate) struct SourceView<'a> {
+    budget: crate::editing::EditWorkBudget,
     root: PathBuf,
     files: BTreeMap<PathBuf, Option<&'a [u8]>>,
     artifacts: BTreeSet<PathBuf>,
@@ -564,6 +583,7 @@ impl<'a> SourceView<'a> {
         root: &Path,
         j: &Journal,
         originals: &'a [Option<Vec<u8>>],
+        budget: crate::editing::EditWorkBudget,
     ) -> Result<Self, WorldError> {
         if j.entries.len() != originals.len() {
             return Err(err("原始视图文件数量不匹配"));
@@ -614,7 +634,7 @@ impl<'a> SourceView<'a> {
         }
         for dir in &absent_dirs {
             if dir.exists() {
-                if read(&directory_sentinel(dir))? != journal_token(j)? {
+                if read(&directory_sentinel(dir), budget)? != journal_token(j)? {
                     return Err(err("事务目录所有权标记缺失或变化"));
                 }
                 for entry in fs::read_dir(dir)? {
@@ -630,6 +650,7 @@ impl<'a> SourceView<'a> {
             files,
             artifacts,
             absent_dirs,
+            budget,
         })
     }
     fn layout(&self) -> crate::history_source::Layout<'_> {
@@ -704,16 +725,23 @@ impl crate::entity_editing::IdentitySource for SourceView<'_> {
         self.layout().is_directory(path, &self.files)
     }
     fn read(&self, path: &Path) -> Result<Option<Vec<u8>>, WorldError> {
+        self.read_limited(path, self.budget.bytes() as u64)
+    }
+    fn read_limited(&self, path: &Path, limit: u64) -> Result<Option<Vec<u8>>, WorldError> {
+        let limit = limit.min(self.budget.bytes() as u64);
         let layout = self.layout();
         let path = layout.checked(path)?;
         if layout.hidden(&path) {
             return Ok(None);
         }
         if let Some(original) = self.files.get(&path) {
+            if original.is_some_and(|bytes| bytes.len() as u64 > limit) {
+                return Err(err("事务来源超过读取预算"));
+            }
             return Ok(original.map(|bytes| bytes.to_vec()));
         }
         match fs::symlink_metadata(&path) {
-            Ok(_) => Ok(Some(read(&path)?)),
+            Ok(_) => Ok(Some(crate::read_limited_file(&path, limit)?)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error.into()),
         }
@@ -1050,6 +1078,7 @@ fn verify_files(
     j: &Journal,
     originals: &[Option<Vec<u8>>],
     images: &[&[u8]],
+    budget: crate::editing::EditWorkBudget,
 ) -> Result<crate::history_source::Archive, WorldError> {
     if j.entries.len() != originals.len() || j.entries.len() != images.len() {
         return Err(err("混合组证明数量不一致"));
@@ -1154,7 +1183,7 @@ fn verify_files(
             return Err(err("MCC 文件缺少对应 Region 证明"));
         }
     }
-    let source_view = SourceView::from_verified(world, root, j, originals)?;
+    let source_view = SourceView::from_verified(world, root, j, originals, budget)?;
     let mut shared_groups = BTreeSet::new();
     let mut shared_clone = None;
     for entry in &j.entries {
@@ -1195,7 +1224,14 @@ fn verify_files(
                     }
                 }
             }
-            crate::shared_chunk_save::verify(world, proof, &parts, &sidecars, &source_view)?;
+            crate::shared_chunk_save::verify_with_budget(
+                world,
+                proof,
+                &parts,
+                &sidecars,
+                &source_view,
+                budget,
+            )?;
         }
     }
     for entry in &j.entries {
@@ -1504,7 +1540,7 @@ fn verify_files(
             world,
             &proof.dimension,
             &std::collections::BTreeMap::new(),
-            512 * 1024 * 1024,
+            budget.bytes(),
             || false,
         )?)
     } else {
@@ -1542,6 +1578,7 @@ fn verify_files(
                 } else {
                     None
                 },
+                budget,
             )?;
         }
     }
@@ -1637,7 +1674,7 @@ fn verify_files(
                 }
             }
             snapshot_identities_added |=
-                crate::chunk_snapshot::verify(world, proof, &parts, &source_view)?;
+                crate::chunk_snapshot::verify(world, proof, &parts, &source_view, budget)?;
         }
     }
     if snapshot_identities_added {
@@ -1649,19 +1686,19 @@ fn verify_files(
     }
     source_view.archive(world, j)
 }
-fn load(world: &WorldSummary, root: &Path) -> Result<(Journal, usize), WorldError> {
+fn load(
+    world: &WorldSummary,
+    root: &Path,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<(Journal, usize), WorldError> {
     let mut active = None;
     for (phase, n) in PHASES.iter().enumerate() {
         match fs::symlink_metadata(root.join(n)) {
             Ok(m) => {
-                if active.is_some()
-                    || !m.file_type().is_file()
-                    || m.file_type().is_symlink()
-                    || m.len() > 64 * 1024 * 1024
-                {
+                if active.is_some() || !m.file_type().is_file() || m.file_type().is_symlink() {
                     return Err(err("混合组日志重复或无效"));
                 }
-                let b = read(&root.join(n))?;
+                let b = read(&root.join(n), budget)?;
                 let j: Journal =
                     serde_json::from_slice(&b).map_err(|e| err(format!("混合组日志无效：{e}")))?;
                 active = Some((j, phase));
@@ -1733,6 +1770,21 @@ pub fn prepare(
     read_only: bool,
     confirmation: &str,
 ) -> Result<usize, WorldError> {
+    prepare_with_budget(
+        world,
+        candidates,
+        read_only,
+        confirmation,
+        crate::editing::EditWorkBudget::default(),
+    )
+}
+pub fn prepare_with_budget(
+    world: &WorldSummary,
+    candidates: &[MixedCandidate],
+    read_only: bool,
+    confirmation: &str,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<usize, WorldError> {
     if read_only {
         return Err(err("只读模式禁止混合保存组"));
     }
@@ -1768,7 +1820,7 @@ pub fn prepare(
     let combined_maps = if map_actions.is_empty() {
         None
     } else {
-        Some(crate::map_edit::compose(world, &map_actions, MAX_WORKING_BYTES).map_err(err)?)
+        Some(crate::map_edit::compose(world, &map_actions, budget.bytes()).map_err(err)?)
     };
     let mut maps_added = false;
     let mut needed_dirs = BTreeSet::new();
@@ -1851,7 +1903,7 @@ pub fn prepare(
                 .checked_add(original.as_ref().map_or(0, Vec::len))
                 .and_then(|bytes| bytes.checked_add(image.len()))
                 .ok_or_else(|| err("地图历史事务工作集溢出"))?;
-            if total > MAX_WORKING_BYTES {
+            if total > budget.bytes() {
                 return Err(err("地图历史事务超过内存预算"));
             }
             let entry = Entry {
@@ -1884,7 +1936,7 @@ pub fn prepare(
                 let limit = match (&candidate.proof.storage, &part.role) {
                     (crate::chunk_snapshot::Storage::Alpha { .. }, _)
                     | (_, crate::chunk_snapshot::Role::External { .. }) => 32 * 1024 * 1024,
-                    _ => MAX as usize,
+                    _ => budget.bytes() as u64 as usize,
                 };
                 let original = crate::history_source::read_file(&path, limit, |_| Ok(()))?;
                 let image = part.image.as_deref().unwrap_or(&deleted_image);
@@ -1892,7 +1944,7 @@ pub fn prepare(
                     .checked_add(original.as_ref().map_or(0, Vec::len))
                     .and_then(|bytes| bytes.checked_add(image.len()))
                     .ok_or_else(|| err("快照事务工作集溢出"))?;
-                if total > MAX_WORKING_BYTES {
+                if total > budget.bytes() {
                     return Err(err("快照事务超过内存预算"));
                 }
                 let entry = Entry {
@@ -1930,7 +1982,7 @@ pub fn prepare(
                     return Err(err("旧版光照 Region 重复或路径无效"));
                 }
                 single_inactive(&path)?;
-                let old = read(&path)?;
+                let old = read(&path, budget)?;
                 if hash(&old) != part.original_sha {
                     return Err(err("旧版光照 Region 来源变化"));
                 }
@@ -1953,7 +2005,7 @@ pub fn prepare(
                     .checked_add(old.len())
                     .and_then(|v| v.checked_add(part.image.len()))
                     .ok_or_else(|| err("旧版光照组大小溢出"))?;
-                if total > MAX_WORKING_BYTES {
+                if total > budget.bytes() {
                     return Err(err("旧版光照组超过内存预算"));
                 }
                 entries.push(e);
@@ -2015,7 +2067,7 @@ pub fn prepare(
                 }
                 single_inactive(&path)?;
                 let old = match fs::symlink_metadata(&path) {
-                    Ok(_) => Some(read(&path)?),
+                    Ok(_) => Some(read(&path, budget)?),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
                     Err(e) => return Err(e.into()),
                 };
@@ -2069,7 +2121,7 @@ pub fn prepare(
                         if c.root != root || c.path != path {
                             return Err(err("地图计数来源无效"));
                         }
-                        let old = read(&path)?;
+                        let old = read(&path, budget)?;
                         if hash(&old) != c.source_sha {
                             return Err(err("地图计数来源变化"));
                         }
@@ -2113,7 +2165,7 @@ pub fn prepare(
                 originals.push(old);
                 images.push(bytes);
             }
-            if total > MAX_WORKING_BYTES {
+            if total > budget.bytes() {
                 return Err(err("地图组超过内存预算"));
             }
             continue;
@@ -2125,7 +2177,7 @@ pub fn prepare(
             }
             single_inactive(&path)?;
             let old = match fs::symlink_metadata(&path) {
-                Ok(_) => Some(read(&path)?),
+                Ok(_) => Some(read(&path, budget)?),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
                 Err(e) => return Err(e.into()),
             };
@@ -2163,7 +2215,7 @@ pub fn prepare(
                 .checked_add(c.image.len())
                 .and_then(|v| v.checked_add(old.as_ref().map_or(0, Vec::len)))
                 .ok_or_else(|| err("创建 Region 内存溢出"))?;
-            if total > MAX_WORKING_BYTES {
+            if total > budget.bytes() {
                 return Err(err("创建 Region 超过内存预算"));
             }
             entries.push(e);
@@ -2177,7 +2229,7 @@ pub fn prepare(
                 }
                 single_inactive(&expected)?;
                 let old = match fs::symlink_metadata(&expected) {
-                    Ok(_) => Some(read(&expected)?),
+                    Ok(_) => Some(read(&expected, budget)?),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
                     Err(e) => return Err(e.into()),
                 };
@@ -2212,7 +2264,7 @@ pub fn prepare(
                     .checked_add(side.image.len())
                     .and_then(|v| v.checked_add(old.as_ref().map_or(0, Vec::len)))
                     .ok_or_else(|| err("MCC 内存溢出"))?;
-                if total > MAX_WORKING_BYTES {
+                if total > budget.bytes() {
                     return Err(err("MCC 超过内存预算"));
                 }
                 entries.push(e);
@@ -2235,7 +2287,7 @@ pub fn prepare(
                     return Err(err("区块删除 Region 来源不匹配或重复"));
                 }
                 single_inactive(&path)?;
-                let old = read(&path)?;
+                let old = read(&path, budget)?;
                 let source = id
                     .sha
                     .as_ref()
@@ -2262,7 +2314,7 @@ pub fn prepare(
                     .checked_add(old.len())
                     .and_then(|v| v.checked_add(part.image.len()))
                     .ok_or_else(|| err("区块删除内存溢出"))?;
-                if total > MAX_WORKING_BYTES {
+                if total > budget.bytes() {
                     return Err(err("区块删除超过内存预算"));
                 }
                 entries.push(e);
@@ -2276,7 +2328,7 @@ pub fn prepare(
                     return Err(err("区块删除 MCC 来源不匹配或重复"));
                 }
                 single_inactive(&path)?;
-                let old = read(&path)?;
+                let old = read(&path, budget)?;
                 if hash(&old) != id.sha {
                     return Err(err("区块删除 MCC 来源变化"));
                 }
@@ -2306,7 +2358,7 @@ pub fn prepare(
                 total = total
                     .checked_add(old.len())
                     .ok_or_else(|| err("区块删除内存溢出"))?;
-                if total > MAX_WORKING_BYTES {
+                if total > budget.bytes() {
                     return Err(err("区块删除超过内存预算"));
                 }
                 entries.push(e);
@@ -2324,7 +2376,7 @@ pub fn prepare(
                 }
                 single_inactive(&path)?;
                 let original = match fs::symlink_metadata(&path) {
-                    Ok(_) => Some(read(&path)?),
+                    Ok(_) => Some(read(&path, budget)?),
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
                     Err(error) => return Err(error.into()),
                 };
@@ -2347,7 +2399,7 @@ pub fn prepare(
                 total = total
                     .saturating_add(original.as_ref().map_or(0, Vec::len))
                     .saturating_add(part.image.len());
-                if total > MAX_WORKING_BYTES {
+                if total > budget.bytes() {
                     return Err(err("共享区块组超过内存预算"));
                 }
                 entries.push(entry);
@@ -2365,7 +2417,7 @@ pub fn prepare(
                 }
                 single_inactive(&path)?;
                 let original = match fs::symlink_metadata(&path) {
-                    Ok(_) => Some(read(&path)?),
+                    Ok(_) => Some(read(&path, budget)?),
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
                     Err(error) => return Err(error.into()),
                 };
@@ -2388,7 +2440,7 @@ pub fn prepare(
                 total = total
                     .saturating_add(original.as_ref().map_or(0, Vec::len))
                     .saturating_add(part.image.len());
-                if total > MAX_WORKING_BYTES {
+                if total > budget.bytes() {
                     return Err(err("共享 MCC 组超过内存预算"));
                 }
                 entries.push(entry);
@@ -2405,7 +2457,7 @@ pub fn prepare(
                 }
                 single_inactive(&path)?;
                 let original = match fs::symlink_metadata(&path) {
-                    Ok(_) => Some(read(&path)?),
+                    Ok(_) => Some(read(&path, budget)?),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
                     Err(e) => return Err(e.into()),
                 };
@@ -2430,8 +2482,8 @@ pub fn prepare(
                     .checked_add(part.image.len())
                     .and_then(|v| v.checked_add(original.as_ref().map_or(0, Vec::len)))
                     .ok_or_else(|| err("混合组大小溢出"))?;
-                if total > MAX_WORKING_BYTES {
-                    return Err(err("实体批次源与候选超过 1 GiB 内存预算"));
+                if total > budget.bytes() {
+                    return Err(err("实体批次源与候选超过当前内存预算"));
                 }
                 entries.push(e);
                 originals.push(original);
@@ -2450,7 +2502,7 @@ pub fn prepare(
                 }
                 single_inactive(&path)?;
                 let original = match fs::symlink_metadata(&path) {
-                    Ok(_) => Some(read(&path)?),
+                    Ok(_) => Some(read(&path, budget)?),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
                     Err(e) => return Err(e.into()),
                 };
@@ -2475,8 +2527,8 @@ pub fn prepare(
                     .checked_add(part.image.len())
                     .and_then(|v| v.checked_add(original.as_ref().map_or(0, Vec::len)))
                     .ok_or_else(|| err("实体 MCC 大小溢出"))?;
-                if total > MAX_WORKING_BYTES {
-                    return Err(err("实体 MCC 超过 1 GiB 内存预算"));
+                if total > budget.bytes() {
+                    return Err(err("实体 MCC 超过当前内存预算"));
                 }
                 entries.push(e);
                 originals.push(original);
@@ -2496,7 +2548,7 @@ pub fn prepare(
                 return Err(err("MCC Region 来源不匹配或重复"));
             }
             single_inactive(&path)?;
-            let original = read(&path)?;
+            let original = read(&path, budget)?;
             if hash(&original) != bundle.original_sha {
                 return Err(err("MCC Region 源已变化"));
             }
@@ -2519,8 +2571,8 @@ pub fn prepare(
                 .checked_add(bundle.image.len())
                 .and_then(|v| v.checked_add(original.len()))
                 .ok_or_else(|| err("混合组大小溢出"))?;
-            if total > MAX_WORKING_BYTES {
-                return Err(err("MCC 批次源与候选超过 1 GiB 内存预算"));
+            if total > budget.bytes() {
+                return Err(err("MCC 批次源与候选超过当前内存预算"));
             }
             entries.push(e);
             originals.push(Some(original));
@@ -2533,7 +2585,7 @@ pub fn prepare(
                 }
                 single_inactive(&path)?;
                 let old = match fs::symlink_metadata(&path) {
-                    Ok(_) => Some(read(&path)?),
+                    Ok(_) => Some(read(&path, budget)?),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
                     Err(e) => return Err(e.into()),
                 };
@@ -2560,8 +2612,8 @@ pub fn prepare(
                     .checked_add(f.image.len())
                     .and_then(|v| v.checked_add(old.as_ref().map_or(0, Vec::len)))
                     .ok_or_else(|| err("混合组大小溢出"))?;
-                if total > MAX_WORKING_BYTES {
-                    return Err(err("MCC 批次源与候选超过 1 GiB 内存预算"));
+                if total > budget.bytes() {
+                    return Err(err("MCC 批次源与候选超过当前内存预算"));
                 }
                 entries.push(e);
                 originals.push(old);
@@ -2674,16 +2726,16 @@ pub fn prepare(
             return Err(err("混合组包含重复文件"));
         }
         single_inactive(&path)?;
-        if image.len() as u64 > MAX {
+        if image.len() as u64 > budget.bytes() as u64 {
             return Err(err("单个候选超过大小预算"));
         }
-        let original = read(&path)?;
+        let original = read(&path, budget)?;
         total = total
             .checked_add(image.len())
             .and_then(|v| v.checked_add(original.len()))
             .ok_or_else(|| err("混合组大小溢出"))?;
-        if total > MAX_WORKING_BYTES {
-            return Err(err("混合组源与候选合计超过 1 GiB 内存预算"));
+        if total > budget.bytes() {
+            return Err(err("混合组源与候选合计超过当前内存预算"));
         }
         let e = Entry {
             path: path
@@ -2703,7 +2755,7 @@ pub fn prepare(
         originals.push(Some(original));
         images.push(image);
     }
-    if total > MAX_WORKING_BYTES {
+    if total > budget.bytes() {
         return Err(err("展开后混合组超过内存预算"));
     }
     let j = Journal {
@@ -2713,11 +2765,9 @@ pub fn prepare(
         legacy_groups,
         created_dirs,
     };
-    verify_files(world, &root, &j, &originals, &images)?;
+    verify_files(world, &root, &j, &originals, &images, budget)?;
     let bytes = serde_json::to_vec(&j).map_err(|e| err(e.to_string()))?;
-    if bytes.len() > 64 * 1024 * 1024 {
-        return Err(err("混合组证明日志过大"));
-    }
+    budget.check(bytes.len())?;
     let marker = root.join(PHASES[0]);
     create(&marker, &bytes)?;
     parent_sync(&marker)?;
@@ -2731,7 +2781,7 @@ pub fn prepare(
     for ((e, original), image) in j.entries.iter().zip(originals).zip(images) {
         let path = target(world, &root, e)?;
         if let Some(original) = original {
-            if hash(&read(&path)?) != e.original_sha {
+            if hash(&read(&path, budget)?) != e.original_sha {
                 return Err(err("混合组准备时源文件变化；日志保留"));
             }
             crate::transaction_artifacts::store(&backup(&path, &e.original_sha)?, &original)?;
@@ -2747,7 +2797,14 @@ pub fn prepare(
 }
 /// 显式选择提交方向；崩溃后重复调用会从已安装文件继续并重验证明。
 pub fn finish(world: &WorldSummary, read_only: bool) -> Result<usize, WorldError> {
-    finish_inner(world, read_only, None).map(|(count, _)| count)
+    finish_with_budget(world, read_only, crate::editing::EditWorkBudget::default())
+}
+pub fn finish_with_budget(
+    world: &WorldSummary,
+    read_only: bool,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<usize, WorldError> {
+    finish_inner(world, read_only, None, budget).map(|(count, _)| count)
 }
 /// 从已展示的真实恢复记录继续，持有世界写锁后核对记录身份与阶段。
 pub fn finish_reviewed(
@@ -2755,7 +2812,20 @@ pub fn finish_reviewed(
     read_only: bool,
     reviewed: &PendingSummary,
 ) -> Result<usize, WorldError> {
-    finish_inner(world, read_only, Some(reviewed)).map(|(count, _)| count)
+    finish_reviewed_with_budget(
+        world,
+        read_only,
+        reviewed,
+        crate::editing::EditWorkBudget::default(),
+    )
+}
+pub fn finish_reviewed_with_budget(
+    world: &WorldSummary,
+    read_only: bool,
+    reviewed: &PendingSummary,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<usize, WorldError> {
+    finish_inner(world, read_only, Some(reviewed), budget).map(|(count, _)| count)
 }
 /// 成功提交后返回同一次真实事务的历史来源；失败不发布保存基线。
 pub fn finish_with_history(
@@ -2763,7 +2833,20 @@ pub fn finish_with_history(
     read_only: bool,
     reviewed: Option<&PendingSummary>,
 ) -> Result<(usize, crate::history_source::Archive), WorldError> {
-    finish_inner(world, read_only, reviewed)
+    finish_with_history_with_budget(
+        world,
+        read_only,
+        reviewed,
+        crate::editing::EditWorkBudget::default(),
+    )
+}
+pub fn finish_with_history_with_budget(
+    world: &WorldSummary,
+    read_only: bool,
+    reviewed: Option<&PendingSummary>,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<(usize, crate::history_source::Archive), WorldError> {
+    finish_inner(world, read_only, reviewed, budget)
 }
 fn require_reviewed(
     reviewed: Option<&PendingSummary>,
@@ -2784,6 +2867,7 @@ fn finish_inner(
     world: &WorldSummary,
     read_only: bool,
     reviewed: Option<&PendingSummary>,
+    budget: crate::editing::EditWorkBudget,
 ) -> Result<(usize, crate::history_source::Archive), WorldError> {
     if read_only {
         return Err(err("只读模式禁止提交混合组"));
@@ -2791,7 +2875,7 @@ fn finish_inner(
     let _guard = crate::world_write_lock::acquire(&world.root, read_only)?;
     let root = fs::canonicalize(&world.root)?;
     other_inactive(&root)?;
-    let (j, phase) = load(world, &root)?;
+    let (j, phase) = load(world, &root, budget)?;
     require_reviewed(reviewed, &root, &j, phase)?;
     if phase == 2 {
         return Err(err("混合组已选择回滚方向"));
@@ -2804,10 +2888,10 @@ fn finish_inner(
         let old = if e.original_sha.is_empty() {
             None
         } else {
-            Some(read(&backup(&p, &e.original_sha)?)?)
+            Some(read(&backup(&p, &e.original_sha)?, budget)?)
         };
         let current = match fs::symlink_metadata(&p) {
-            Ok(_) => Some(read(&p)?),
+            Ok(_) => Some(read(&p, budget)?),
             Err(x) if x.kind() == std::io::ErrorKind::NotFound => None,
             Err(x) => return Err(x.into()),
         };
@@ -2817,7 +2901,7 @@ fn finish_inner(
             if current_sha.as_deref() == Some(e.original_sha.as_str()) {
                 crate::transaction_artifacts::verify_hash(&archived, &e.original_sha)?;
             } else if current_sha.is_none() {
-                if hash(&read(&archived)?) != e.original_sha {
+                if hash(&read(&archived, budget)?) != e.original_sha {
                     return Err(err("删除归档摘要不匹配"));
                 }
             } else {
@@ -2830,7 +2914,7 @@ fn finish_inner(
             }
             if e.original_sha.is_empty()
                 && stage(&p)?.exists()
-                && hash(&read(&stage(&p)?)?) != e.candidate_sha
+                && hash(&read(&stage(&p)?, budget)?) != e.candidate_sha
             {
                 return Err(err("新文件暂存摘要变化"));
             }
@@ -2838,7 +2922,7 @@ fn finish_inner(
         } else if current_sha.as_deref()
             == (!e.original_sha.is_empty()).then_some(e.original_sha.as_str())
         {
-            read(&stage(&p)?)?
+            read(&stage(&p)?, budget)?
         } else {
             return Err(err("混合组源文件或存在性被外部修改"));
         };
@@ -2846,14 +2930,14 @@ fn finish_inner(
             .checked_add(candidate.len())
             .and_then(|v| v.checked_add(old.as_ref().map_or(0, Vec::len)))
             .ok_or_else(|| err("混合组恢复内存预算溢出"))?;
-        if total > MAX_WORKING_BYTES {
-            return Err(err("混合组恢复源与候选超过 1 GiB 内存预算"));
+        if total > budget.bytes() {
+            return Err(err("混合组恢复源与候选超过当前内存预算"));
         }
         originals.push(old);
         images.push(candidate);
     }
     let image_slices = images.iter().map(Vec::as_slice).collect::<Vec<_>>();
-    let history = verify_files(world, &root, &j, &originals, &image_slices)?;
+    let history = verify_files(world, &root, &j, &originals, &image_slices, budget)?;
     let done = root.join(format!(
         ".mcedit2-mixed.{}.committed.json",
         hash(&serde_json::to_vec(&j).map_err(|e| err(e.to_string()))?)
@@ -2869,7 +2953,7 @@ fn finish_inner(
     for e in &j.entries {
         let p = target(world, &root, e)?;
         let current = match fs::symlink_metadata(&p) {
-            Ok(_) => Some(read(&p)?),
+            Ok(_) => Some(read(&p, budget)?),
             Err(x) if x.kind() == std::io::ErrorKind::NotFound => None,
             Err(x) => return Err(x.into()),
         };
@@ -2880,7 +2964,7 @@ fn finish_inner(
                 crate::transaction_artifacts::archive(&p, &archived)?;
                 parent_sync(&p)?;
             } else if sha.is_none() {
-                if hash(&read(&archived)?) != e.original_sha {
+                if hash(&read(&archived, budget)?) != e.original_sha {
                     return Err(err("删除归档不匹配"));
                 }
             } else {
@@ -2888,7 +2972,7 @@ fn finish_inner(
             }
         } else if e.original_sha.is_empty() {
             if sha.is_none() {
-                if hash(&read(&stage(&p)?)?) != e.candidate_sha {
+                if hash(&read(&stage(&p)?, budget)?) != e.candidate_sha {
                     return Err(err("新文件暂存变化"));
                 }
                 fs::hard_link(stage(&p)?, &p)
@@ -2899,15 +2983,15 @@ fn finish_inner(
             }
             let s = stage(&p)?;
             if s.exists() {
-                if hash(&read(&s)?) != e.candidate_sha {
+                if hash(&read(&s, budget)?) != e.candidate_sha {
                     return Err(err("新文件暂存变化"));
                 }
                 crate::transaction_artifacts::archive(&s, &abandoned(&p, &e.candidate_sha)?)?;
                 parent_sync(&p)?;
             }
         } else if sha.as_deref() == Some(e.original_sha.as_str()) {
-            let old = read(&backup(&p, &e.original_sha)?)?;
-            let next = read(&stage(&p)?)?;
+            let old = read(&backup(&p, &e.original_sha)?, budget)?;
+            let next = read(&stage(&p)?, budget)?;
             if hash(&old) != e.original_sha || hash(&next) != e.candidate_sha {
                 return Err(err("混合组提交时摘要变化"));
             }
@@ -2921,7 +3005,7 @@ fn finish_inner(
     parent_sync(&root.join(PHASES[1]))?;
     for dir in &j.created_dirs {
         let sentinel = directory_sentinel(&root.join(dir));
-        if read(&sentinel)? != journal_token(&j)? {
+        if read(&sentinel, budget)? != journal_token(&j)? {
             return Err(err("提交后事务目录标记变化"));
         }
         fs::remove_file(&sentinel)?;
@@ -2931,7 +3015,14 @@ fn finish_inner(
 }
 /// 仅在尚未选择提交方向时回滚准备阶段；源未改变，保留备份与已验证的暂存。
 pub fn rollback(world: &WorldSummary, read_only: bool) -> Result<usize, WorldError> {
-    rollback_inner(world, read_only, None)
+    rollback_with_budget(world, read_only, crate::editing::EditWorkBudget::default())
+}
+pub fn rollback_with_budget(
+    world: &WorldSummary,
+    read_only: bool,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<usize, WorldError> {
+    rollback_inner(world, read_only, None, budget)
 }
 /// 只回滚当前已展示的记录；更换事务或开始其他方向后正常报告冲突。
 pub fn rollback_reviewed(
@@ -2939,12 +3030,26 @@ pub fn rollback_reviewed(
     read_only: bool,
     reviewed: &PendingSummary,
 ) -> Result<usize, WorldError> {
-    rollback_inner(world, read_only, Some(reviewed))
+    rollback_reviewed_with_budget(
+        world,
+        read_only,
+        reviewed,
+        crate::editing::EditWorkBudget::default(),
+    )
+}
+pub fn rollback_reviewed_with_budget(
+    world: &WorldSummary,
+    read_only: bool,
+    reviewed: &PendingSummary,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<usize, WorldError> {
+    rollback_inner(world, read_only, Some(reviewed), budget)
 }
 fn rollback_inner(
     world: &WorldSummary,
     read_only: bool,
     reviewed: Option<&PendingSummary>,
+    budget: crate::editing::EditWorkBudget,
 ) -> Result<usize, WorldError> {
     if read_only {
         return Err(err("只读模式禁止回滚混合组"));
@@ -2952,7 +3057,7 @@ fn rollback_inner(
     let _guard = crate::world_write_lock::acquire(&world.root, read_only)?;
     let root = fs::canonicalize(&world.root)?;
     other_inactive(&root)?;
-    let (j, phase) = load(world, &root)?;
+    let (j, phase) = load(world, &root, budget)?;
     require_reviewed(reviewed, &root, &j, phase)?;
     if phase == 1 {
         return Err(err("混合组已选择提交方向，须继续提交"));
@@ -2963,7 +3068,7 @@ fn rollback_inner(
             absent(&p)?;
             None
         } else {
-            let old = read(&p)?;
+            let old = read(&p, budget)?;
             if hash(&old) != e.original_sha {
                 return Err(err("回滚前源文件已变化"));
             }
@@ -2971,7 +3076,7 @@ fn rollback_inner(
         };
         if !e.original_sha.is_empty() {
             let b = backup(&p, &e.original_sha)?;
-            if b.exists() && hash(&read(&b)?) != e.original_sha {
+            if b.exists() && hash(&read(&b, budget)?) != e.original_sha {
                 return Err(err("混合组备份不完整或摘要不匹配"));
             }
         }
@@ -2979,7 +3084,7 @@ fn rollback_inner(
         let a = abandoned(&p, &e.candidate_sha)?;
         for staged in [&s, &a] {
             if staged.exists() {
-                let bytes = read(staged)?;
+                let bytes = read(staged, budget)?;
                 if hash(&bytes) != e.candidate_sha {
                     return Err(err("混合组暂存摘要不匹配"));
                 }
@@ -3032,7 +3137,7 @@ fn rollback_inner(
                 && p.parent()
                     .is_some_and(|d| j.created_dirs.iter().any(|v| root.join(v) == d))
             {
-                if hash(&read(&s)?) != e.candidate_sha {
+                if hash(&read(&s, budget)?) != e.candidate_sha {
                     return Err(err("新目录暂存摘要变化"));
                 }
                 fs::remove_file(s)?;
@@ -3055,11 +3160,11 @@ fn rollback_inner(
                 }
                 let sentinel = directory_sentinel(&p);
                 if owner.exists() {
-                    if read(&owner)? != journal_token(&j)? || sentinel.exists() {
+                    if read(&owner, budget)? != journal_token(&j)? || sentinel.exists() {
                         return Err(err("事务目录所有权标记冲突"));
                     }
                 } else {
-                    if read(&sentinel)? != journal_token(&j)? {
+                    if read(&sentinel, budget)? != journal_token(&j)? {
                         return Err(err("事务目录所有权标记缺失或变化"));
                     }
                     absent(&owner)?;
@@ -3073,7 +3178,7 @@ fn rollback_inner(
             Err(e) => return Err(e.into()),
         }
         if owner.exists() {
-            if read(&owner)? != journal_token(&j)? {
+            if read(&owner, budget)? != journal_token(&j)? {
                 return Err(err("事务目录标记变化"));
             }
             fs::remove_file(&owner)?;

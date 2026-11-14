@@ -892,10 +892,6 @@ impl canvas::Program<Message> for TopDown {
         }
     }
 }
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
 
 #[cfg(test)]
 mod tests {
@@ -935,6 +931,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn signed_world_border_projected_coordinates_roundtrip() {
         let s = scene();
         let size = Size::new(800.0, 440.0);
@@ -943,6 +940,7 @@ mod tests {
         assert_eq!(p.cell(q), Some((-16, 29_999_980)));
     }
 
+    #[test]
     fn far_map_footprints_stay_world_aligned() {
         let mut s = scene();
         s.width = 128;
@@ -955,6 +953,7 @@ mod tests {
         assert!(((end.y - start.y) - p.scale * 16.0).abs() < 0.01);
     }
 
+    #[test]
     fn exact_picks_never_promote_sparse_far_samples() {
         let mut s = scene();
         let mut lower = s.voxels[0].clone();
@@ -1001,6 +1000,7 @@ mod tests {
         assert!(far_view.pick(Point::new(400.0, 220.0), size).is_none());
     }
 
+    #[test]
     fn anchored_zoom_and_pan_keep_the_same_original_top_down_pick_at_world_border() {
         use crate::view_navigation::{Action, Viewport};
         let mut view = TopDown {
@@ -1053,15 +1053,5 @@ mod tests {
             view.pick(anchor + delta, size),
             Some((original.x, original.y, original.z))
         );
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Navigation {
-            signed_world_border_projected_coordinates_roundtrip();
-            far_map_footprints_stay_world_aligned();
-            exact_picks_never_promote_sparse_far_samples();
-            anchored_zoom_and_pan_keep_the_same_original_top_down_pick_at_world_border();
-        }
     }
 }

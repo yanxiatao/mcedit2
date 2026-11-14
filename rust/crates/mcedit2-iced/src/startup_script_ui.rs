@@ -441,7 +441,7 @@ pub(crate) fn maintain(app: &mut App) -> Task<Message> {
     Task::none()
 }
 fn next_save(app: &mut App) -> Result<Task<Message>, String> {
-    let request = loop {
+    let mut request = loop {
         let Some(request) = app.startup_script.queue.pop_front() else {
             if let Some(outcome) = &app.startup_script.outcome {
                 outcome.store(1, Ordering::Release);
@@ -482,6 +482,10 @@ fn next_save(app: &mut App) -> Result<Task<Message>, String> {
         || app.save_planning
     {
         return Err("已有保存任务，脚本保存尚未执行；请在保存页面处理当前内容".into());
+    }
+    let save_budget = app.block_edit.budget.parse()?;
+    for session in &mut request.sessions {
+        session.set_work_budget(save_budget);
     }
     let index = world(app, &request.root)?;
     if crate::workspace_tabs::world_readonly(app, index) {
@@ -527,7 +531,8 @@ fn next_save(app: &mut App) -> Result<Task<Message>, String> {
             let world = request.sessions[0].original_world().clone();
             let result = (|| {
                 if let Some(pending) =
-                    mixed_transaction::pending_summary(&world).map_err(|error| error.to_string())?
+                    mixed_transaction::pending_summary_with_budget(&world, save_budget)
+                        .map_err(|error| error.to_string())?
                 {
                     return Err(format!(
                         "已有保存事务 {}，阶段 {:?}；请先明确完成或回滚",
@@ -552,16 +557,22 @@ fn next_save(app: &mut App) -> Result<Task<Message>, String> {
                 if candidates.is_empty() {
                     return Ok(0);
                 }
-                mixed_transaction::prepare(&world, &candidates, false, "SAVE")
-                    .map_err(|error| error.to_string())?;
-                let pending = mixed_transaction::pending_summary(&world)
+                mixed_transaction::prepare_with_budget(
+                    &world,
+                    &candidates,
+                    false,
+                    "SAVE",
+                    save_budget,
+                )
+                .map_err(|error| error.to_string())?;
+                let pending = mixed_transaction::pending_summary_with_budget(&world, save_budget)
                     .map_err(|error| error.to_string())?
                     .ok_or("脚本保存准备后缺少事务记录")?;
-                mixed_transaction::finish_reviewed(&world, false, &pending)
+                mixed_transaction::finish_reviewed_with_budget(&world, false, &pending, save_budget)
                     .map_err(|error| error.to_string())
             })();
-            let pending =
-                mixed_transaction::pending_summary(&world).map_err(|error| error.to_string());
+            let pending = mixed_transaction::pending_summary_with_budget(&world, save_budget)
+                .map_err(|error| error.to_string());
             Ok(Saved {
                 request,
                 result,

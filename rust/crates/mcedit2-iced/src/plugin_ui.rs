@@ -2804,14 +2804,10 @@ pub(crate) fn view<'a>(
 }
 
 #[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
     fn changing_options_cancels_pending_result_and_preserves_loaded_commands() {
         let mut app = App::default();
         app.plugins.busy = true;
@@ -2824,6 +2820,7 @@ mod tests {
         assert_eq!(app.plugins.values["count"], "5");
     }
 
+    #[test]
     fn typed_options_validate_integer_boolean_and_choices() {
         let mut panel = Panel::default();
         panel.commands.push(PluginCommand {
@@ -2849,6 +2846,7 @@ mod tests {
         assert!(panel.options().is_err());
     }
 
+    #[test]
     fn large_declarative_background_preview_and_budget_cancel() {
         use crate::picking_integration_tests::edit_task_output;
         let (disk, mut app, original) = crate::block_edit::large_world_fixture();
@@ -2922,6 +2920,7 @@ mod tests {
     }
 
     /// 输入为已完成的协议事件；后台必须实际生成原生差异及确认后的会话。
+    #[test]
     fn large_python_result_routes_to_native_difference_and_generator() {
         use crate::picking_integration_tests::edit_task_output;
         let (disk, mut app, original) = crate::block_edit::large_world_fixture();
@@ -3034,17 +3033,5 @@ mod tests {
             std::fs::read(disk.path.join("region/r.0.0.mcr")).unwrap(),
             original
         );
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Background {
-            large_declarative_background_preview_and_budget_cancel();
-            large_python_result_routes_to_native_difference_and_generator();
-        }
-        if category == crate::test_categories::Category::Navigation {
-            changing_options_cancels_pending_result_and_preserves_loaded_commands();
-            typed_options_validate_integer_boolean_and_choices();
-        }
     }
 }

@@ -203,14 +203,10 @@ impl ModelBank {
 }
 
 #[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
     fn authored_filesystem_references_become_resource_ids_without_filesystem_access() {
         assert_eq!(
             texture(r"C:\Original Folder\assets\demo\textures\item\panel.png"),
@@ -228,12 +224,5 @@ mod tests {
         );
         assert!(texture("../private.png").is_none());
         assert!(texture("https://example.invalid/image.png").is_none());
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Models {
-            authored_filesystem_references_become_resource_ids_without_filesystem_access();
-        }
     }
 }

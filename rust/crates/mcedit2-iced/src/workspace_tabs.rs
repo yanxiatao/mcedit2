@@ -10,13 +10,15 @@ mod modal;
 #[cfg(test)]
 #[path = "workspace_tabs_tests.rs"]
 mod tests;
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    match category {
-        crate::test_categories::Category::Navigation => tests::navigation(),
-        crate::test_categories::Category::Background => tests::files_and_keyboard_ownership(),
-        _ => (),
-    }
+
+#[test]
+fn navigation_behavior() {
+    tests::navigation();
+}
+
+#[test]
+fn background_behavior() {
+    tests::files_and_keyboard_ownership();
 }
 
 #[derive(Clone, Copy)]

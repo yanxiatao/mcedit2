@@ -8,7 +8,7 @@
 
 GUI 启动参数可按顺序指定世界和五种结构文件；普通 NBT 放在所属世界参数之后。结构使用独立标签、资源 / 数据包、三维 / 四视图及编辑历史。新增路径尚未编译和测试，完整迁移后统一验证。
 
-当前本机编译、测试与桌面启动结果见[中文重写进度记录](PROGRESS.md)。截至 2026-10-27，工作区已合并为 25 个类别测试入口：默认 22 类通过，3 类本机环境验收默认忽略，GPU 与本机实例类别另已显式通过。测试维护与命令见[按类别测试说明](TESTING.md)。完整功能迁移与真实世界验收仍有缺口。下方各阶段历史说明应结合该记录阅读。
+当前本机编译、测试与桌面启动结果见[中文重写进度记录](PROGRESS.md)。测试现已改为标准 Rust harness，按行为独立执行；历史的 25 类计数仅属于早期记录。当前命令与设备检查要求见[测试说明](TESTING.md)。完整功能迁移与真实世界验收仍有缺口。下方各阶段历史说明应结合该记录阅读。
 
 开发、测试和本机运行统一使用 `target/debug/mcedit2.exe`。不加参数打开 GUI；`mcedit2 --inspect <世界路径>` 在终端检查存档；插件由同一个程序的内部 `--plugin-host` 模式隔离执行，不再需要独立 CLI / Python 可执行文件。工作区固定同一套 dev 配置，整批实现完成后集中测试，只有明确发布时才构建 release。
 
@@ -100,7 +100,7 @@ deterministic even if the OS returns entries in a different order.
 From `rust/`:
 
 ```sh
-cargo test --workspace # 仅用于确需全量验收的集成阶段，日常选择受影响类别
+cargo test --locked --workspace # 可按模块或行为名称过滤
 cargo run -p mcedit2-iced
 cargo run -p mcedit2-iced -- --inspect "/path/to/extracted/world"
 ```
@@ -518,146 +518,24 @@ render backends. Current OBJ UV values outside the sprite's [0,1] domain
 are clamped; the general repeated-UV path presently applies to Java JSON
 faces, not arbitrary OBJ triangles.
 
-## Static resource-renderer adapters (non-executable)
+## Static resource-renderer adapters
 
-This branch now has three generic static mesh data paths: existing JSON
-model elements, source-declared OBJ + same-pack MTL materials, and embedded
-glTF 2.0 / GLB mesh primitives. glTF buffers must be bundled into the GLB or
-base64 data URI; remote and relative external buffers are not fetched.
-Supported meshes use finite POSITION / TEXCOORD_0 coordinates and bounded
-triangle budgets. OBJ/MTL handles static diffuse RGB, opacity (d/Tr),
-material names and same-pack same-stem map_Kd mapping; a map_d alpha-map
-identifier is validated but per-pixel map_d compositing is not implemented.
-
-All OBJ/glTF source triangles pass through the same bounded atlas-safe
-integer-period UV clipping: crossing tile boundaries creates interpolated
-triangles that remain inside their material's own GPU atlas sprite slot,
-without enabling global sampler wrapping. MTL opacity is sent as a Blend
-material in the existing GPU transparency pipeline.
-
-Any custom Mod renderer can opt into a **declarative** static fallback via
-its JSON block model, without a built-in per-block registry. For example:
+Production resource discovery supports Java JSON models and declared OBJ/MTL assets. An explicit `mcedit2:static_renderer` adapter can bind an OBJ model without executing Mod code:
 
 ```json
 {
   "loader": "othermod:custom_client_renderer",
   "mcedit2:static_renderer": {
-    "format": "glb",
-    "model": "othermod:models/custom/structure.glb",
+    "format": "obj",
+    "model": "othermod:models/custom/structure.obj",
     "textures": {"particle": "othermod:item/structure"}
   }
 }
 ```
 
-The adapter is resolved only from supplied JSON and exact resource asset
-identities. It does not execute Mod code, infer opaque NBT-driven rendering,
-or promise compatibility with arbitrary custom client-only algorithms.
-Remaining gaps include full glTF scene node hierarchy, external buffer
-resolution, PBR/normal/metallic material shading, independent MTL map_d
-opacity images, arbitrary non-triangulated polygons and dynamic geometry.
-This pass deliberately does not add animation.
+OBJ triangles share the atlas-safe UV clipping, transparency, source picking and resource-budget paths. MTL diffuse color, opacity and pack-local opacity maps use the same production pipeline. Geometry is resolved from explicit assets; unknown executable renderers report diagnostics. The test-only glTF/GLB experiment and its unreachable model branches have been removed.
 
-## glTF 2.0 static scene hierarchy and pack-local buffers
-
-The static glTF/GLB loader traverses the **selected scene's actual root
-nodes**, composes parent/child TRS or column-major matrix transforms, and
-renders only reachable mesh instances. It rejects cycles, excessively deep
-trees, invalid node references and nonfinite/out-of-range geometry. glTF
-bufferViews may reference up to 32 declared buffers. Embedded GLB BIN and
-base64 buffers remain supported; external `.bin` references resolve strictly
-within the same loaded resource-pack model directory, from directory, ZIP,
-or JAR content. Resource member order is immaterial: source binaries are
-read-only cached and glTF meshes are assembled only after all layers load.
-Paths with traversal, absolute roots, backslashes or URI schemes are refused;
-no network or arbitrary filesystem reads are performed. Combined buffer
-memory is bounded and unresolved model references produce warnings, not
-world-save changes. Scene hierarchy, buffer bounds, traversal, and unordered
-ZIP references have Rust regression tests. Skinning and animation are
-intentionally excluded from this static renderer.
-
-## OBJ/MTL opacity atlas and static material parameters
-
-OBJ Wavefront `map_d` is now applied as a **real per-pixel opacity map**
-instead of only being recorded as a parsed filename. After all resource
-layers and any source animation frames have been resolved, valid
-`map_Kd`/ `map_d` pairs are combined into immutable RGBA sprites before
-GPU atlas packing: grayscale mask luminance or explicit PNG Alpha scales
-the original diffuse Alpha channel. Different texture dimensions are sampled
-in normalized local texture coordinates. Synthesized sprites share the
-ordinary transparent/cutout material path and total atlas memory budget.
-Unresolved masks produce warnings and leave the original material intact.
-No source PNG, save NBT or Mod executable is changed.
-
-The OBJ MTL metadata reader now validates diffuse, ambient, specular and
-emissive colors (`Kd/Ka/Ks/Ke`), `d/Tr`, `Ns`, `Ni`, `illum`, and
-the common `Pm/Pr` metallic/roughness extensions. glTF/GLB material
-metadata reads `baseColorFactor`, alpha mode/cutoff, double-sided,
-metallic/roughness factors, and emissive factors. Base-color RGBA affects
-the existing static GPU vertex tint. **True PBR illumination is not
-complete**: image-based lighting, tangent-space normal maps, metallic-
-roughness texture sampling, and correct per-material alpha cutoff are
-not yet implemented in wgpu. Reading these metadata fields is not
-equivalent to full PBR shading. Animations and Mod client renderer hooks
-remain deliberately out of scope.
-
-## Minecraft-like fullbright spectator material rendering
-
-The perspective 3D spectator shader treats original block/model textures
-and declared static base-color factors as **fully illuminated**. It does not
-darken nearby or distant surfaces based on world sky/block light, time of
-day, camera direction, metallic roughness, or simulated ambient occlusion;
-the GPU depth buffer and transparent face ordering still operate normally.
-The goal is vanilla-style recognizable block/resource textures with flight
-navigation, not an independent PBR lighting engine.
-
-The common GPU material-mode flags now preserve standard glTF
-`OPAQUE` (ignore sampled Alpha), `MASK` (per-material `alphaCutoff`),
-`BLEND` (sort and alpha-compose) and `doubleSided` (selective backface
-discard) without changing the geometry or atlas layout of existing
-Minecraft/OBJ faces. Ordinary cutout geometry retains the 0.5 cutoff.
-Material alpha metadata comes from resource-provided glTF/GLB JSON, not
-block ID guesses. Dedicated Rust tests check encoded modes, cutoff values
-and correct GPU sort classification with embedded material flags.
-
-This is intentionally **fullbright**, so glTF metallic/roughness,
-normal maps, BRDF reflections and physical light transport do not alter
-the voxel display. These properties remain readable source metadata, not
-a claim of full PBR appearance. No Mod-specific renderer is added here.
-
-## Automatic glTF base-color sprite binding and source-verified LOD reuse
-
-Static glTF 2.0 / GLB materials with ordinary
-`pbrMetallicRoughness.baseColorTexture.index` now resolve their source
-`textures[index].source -> images[source].uri` references without Java-side
-manual `textures` entries. Unnamed materials get stable index-based source
-identities instead of all collapsing to `particle`. Image URIs resolve
-relative to their originating glTF path **inside the same resource-pack
-namespace**, with bounded canonical `..` handling and strict rejection of
-network/absolute/escaping paths. Textures in `assets/<ns>/models/**.png`
-receive noncolliding `<ns>:__gltf/...` atlas keys; references into the
-ordinary `textures/` tree reuse existing Java texture IDs. Explicit
-resource-model material mappings remain higher priority. This first
-automatic image path handles pack-local external PNG URIs; embedded
-`image.bufferView`, base64 image data URIs, alternate texture-coordinate
-sets and glTF sampler filters are **not yet** bound automatically.
-
-For camera-driven terrain streaming, a cached higher-fidelity original
-source chunk now supersedes its coarser sampled visual patch whenever the
-complete exact representation fits the current mesh budget. Conversely,
-while an exact request is still reading, a cached lower-fidelity source
-patch remains visible as a temporary bridge. Each source chunk contributes
-only one chosen patch to a rendered frame, and patches overlapping the
-exact near-source viewport remain excluded. This does not synthesize
-missing source chunks, add any editable LOD data or imply full exact
-128-chunk-radius rendering. The far horizon remains a sampled,
-non-editable visualization; source chunk completeness is recorded.
-
-Regression coverage includes safe glTF image URI traversal, material
-name collision avoidance, pack-to-atlas glTF image auto-binding with
-two distinct static scene nodes and spectator vertices, and source
-chunk LOD transition preferences/voxel budgets. The latest GitHub
-workspace still requires dedicated full-head Cargo and real-save GPU
-visual testing before declaring rendering equivalence.
+The last complete streamed mesh retains its matching atlas and source origin until the next complete result is ready. Cached high-detail chunks can replace sampled far patches; far LOD remains a non-editable visualization. This frame handoff preserves source identity rather than inventing missing terrain.
 
 ## Fullbright spectator flicker and missing-texture diagnostics
 

@@ -217,7 +217,14 @@ pub(super) fn run() {
         Ok(())
     })
     .unwrap();
-    assert!(App::boot(launch::Arguments::default(), true).is_err());
+    let (mut app, task) = App::boot(launch::Arguments::default(), true).unwrap();
+    assert!(app
+        .messages
+        .iter()
+        .any(|message| message.contains("desktop")));
+    remember(&mut app);
+    drop(task);
+    drop(app);
     assert_eq!(launch::read_rust_prefs().unwrap()["desktop"]["version"], 2);
     launch::update_rust_prefs(|values| {
         values.insert("desktop".into(), serde_json::to_value(expected).unwrap());

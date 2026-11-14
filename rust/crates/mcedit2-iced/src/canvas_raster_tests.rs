@@ -64,6 +64,7 @@ fn pixel(raster: &Raster, x: u32, y: u32) -> [u8; 4] {
         .unwrap()
 }
 
+#[test]
 fn canvas_preserves_all_source_texels_when_visible_face_count_exceeds_old_sampling_threshold() {
     let pixels = image::RgbaImage::from_fn(16, 16, |x, y| {
         image::Rgba([x as u8 * 15, y as u8 * 15, (x ^ y) as u8 * 15, 255])
@@ -109,6 +110,7 @@ fn canvas_preserves_all_source_texels_when_visible_face_count_exceeds_old_sampli
     assert_eq!(actual.rgba, expected.rgba);
 }
 
+#[test]
 fn transparent_quad_shared_diagonal_is_blended_once_and_image_alpha_is_straight() {
     let raster = raster(&quad([1., 0., 0., 0.5], 0.5, 2), 16);
     assert!(
@@ -121,6 +123,7 @@ fn transparent_quad_shared_diagonal_is_blended_once_and_image_alpha_is_straight(
     assert!(pixels.chunks_exact(4).all(|p| p == [255, 0, 0, 128]));
 }
 
+#[test]
 fn per_pixel_depth_handles_intersections_opaque_occlusion_and_transparency() {
     let mut vertices = quad([0., 0., 1., 1.], 0.5, 0).to_vec();
     let mut sloped = quad([1., 0., 0., 1.], 0.5, 0);
@@ -142,6 +145,7 @@ fn per_pixel_depth_handles_intersections_opaque_occlusion_and_transparency() {
     );
 }
 
+#[test]
 fn constant_cutoff_and_far_depth_do_not_develop_interpolation_holes() {
     for size in [7, 17, 31] {
         for depth in [0., 0.5, 1.] {
@@ -154,6 +158,7 @@ fn constant_cutoff_and_far_depth_do_not_develop_interpolation_holes() {
     }
 }
 
+#[test]
 fn filtering_cutoff_authored_opaque_and_single_sided_flags_use_actual_pixels() {
     let f = fixture(
         2,
@@ -219,6 +224,7 @@ fn filtering_cutoff_authored_opaque_and_single_sided_flags_use_actual_pixels() {
     }
 }
 
+#[test]
 fn cancelled_invalid_and_resized_canvas_frames_never_publish_partial_images() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let calls = AtomicUsize::new(0);
@@ -287,6 +293,7 @@ fn cancelled_invalid_and_resized_canvas_frames_never_publish_partial_images() {
     assert_ne!(a.id(), c.id());
 }
 
+#[test]
 fn canvas_worker_schedules_redraw_and_commits_a_complete_frame_without_mouse_input() {
     use iced::{widget::canvas, Rectangle};
     let f = crate::textures::java_obj_tests::fixture();
@@ -330,6 +337,7 @@ fn canvas_worker_schedules_redraw_and_commits_a_complete_frame_without_mouse_inp
     }
 }
 
+#[test]
 fn filtered_and_repeated_texture_picking_matches_the_visible_source() {
     use crate::{isometric::IsometricSurface, textures::java_obj_tests};
     use iced::Point;
@@ -383,18 +391,4 @@ fn filtered_and_repeated_texture_picking_matches_the_visible_source() {
             .0,
         (0, 0, 0)
     );
-}
-
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    if category == crate::test_categories::Category::Rendering {
-        canvas_preserves_all_source_texels_when_visible_face_count_exceeds_old_sampling_threshold();
-        transparent_quad_shared_diagonal_is_blended_once_and_image_alpha_is_straight();
-        per_pixel_depth_handles_intersections_opaque_occlusion_and_transparency();
-        constant_cutoff_and_far_depth_do_not_develop_interpolation_holes();
-        filtering_cutoff_authored_opaque_and_single_sided_flags_use_actual_pixels();
-        cancelled_invalid_and_resized_canvas_frames_never_publish_partial_images();
-        canvas_worker_schedules_redraw_and_commits_a_complete_frame_without_mouse_input();
-        filtered_and_repeated_texture_picking_matches_the_visible_source();
-    }
 }

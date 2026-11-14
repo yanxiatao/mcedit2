@@ -18,9 +18,7 @@ use std::{
 type Coord = (i32, i32);
 const SECTOR: usize = 4096;
 const HEADER: usize = 8192;
-const MAX_IMAGE: usize = 256 * 1024 * 1024;
 const MAX_MCC: usize = 32 * 1024 * 1024;
-const MAX_WORK: usize = 1024 * 1024 * 1024;
 #[path = "chunk_snapshot_history.rs"]
 mod history;
 pub(crate) use history::ArchivedRegion;
@@ -30,13 +28,7 @@ fn invalid(message: impl Into<String>) -> WorldError {
 fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
-fn charge(total: &mut usize, bytes: usize) -> Result<(), WorldError> {
-    charge_budget(
-        total,
-        bytes,
-        crate::editing::EditWorkBudget::from_bytes(MAX_WORK)?,
-    )
-}
+
 fn charge_budget(
     total: &mut usize,
     bytes: usize,
@@ -45,9 +37,6 @@ fn charge_budget(
     *total = total
         .checked_add(bytes)
         .ok_or_else(|| invalid("区块快照工作集溢出"))?;
-    if *total > MAX_WORK {
-        return Err(invalid("区块快照工作集超过 1 GiB"));
-    }
     budget.check(*total)
 }
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -629,7 +618,7 @@ fn build_region(
                 .len()
                 .checked_add(sectors * SECTOR)
                 .ok_or_else(|| invalid("快照 Region 大小溢出"))?;
-            if start > 0x00ff_ffff || sectors == 0 || sectors > 255 || next_size > MAX_IMAGE {
+            if start > 0x00ff_ffff || sectors == 0 || sectors > 255 {
                 return Err(invalid("快照 Region 超过格式或文件预算"));
             }
             charge_budget(&mut temporary, sectors * SECTOR, budget)?;
@@ -681,25 +670,6 @@ fn build_region(
 }
 
 /// 地形、独立实体与 POI 共用完整槽位恢复；调用方提供领域快照，不接受任意文件路径。
-pub(crate) fn prepare_region(
-    world: &WorldSummary,
-    dimension: &str,
-    storage: Storage,
-    targets: BTreeMap<Coord, Option<Vec<u8>>>,
-    nbt: bool,
-    timestamp: u32,
-) -> Result<Option<Candidate>, WorldError> {
-    prepare_region_with_budget(
-        world,
-        dimension,
-        storage,
-        targets,
-        nbt,
-        timestamp,
-        0,
-        crate::editing::EditWorkBudget::from_bytes(MAX_WORK)?,
-    )
-}
 /// 调用方已持有的历史与候选也属于同一任务预算，不为每个 Region 重置总额。
 pub(crate) fn prepare_region_with_budget(
     world: &WorldSummary,
@@ -762,8 +732,8 @@ pub(crate) fn prepare_region_with_history_versions(
     chunks: &BTreeSet<Coord>,
     versions: &BTreeMap<Coord, history_source::FileVersion>,
     mut cancelled: impl FnMut() -> bool,
+    budget: crate::editing::EditWorkBudget,
 ) -> Result<Option<Candidate>, WorldError> {
-    let budget = crate::editing::EditWorkBudget::from_bytes(MAX_WORK)?;
     let mut retained = targets.values().flatten().try_fold(0usize, |sum, raw| {
         sum.checked_add(raw.len())
             .ok_or_else(|| invalid("历史格式写入工作集溢出"))
@@ -849,6 +819,7 @@ pub(crate) fn prepare_poi_lifecycle(
     origin: &history_source::Archive,
     timestamp: u32,
     cancelled: impl FnMut() -> bool,
+    budget: crate::editing::EditWorkBudget,
 ) -> Result<Option<Candidate>, WorldError> {
     let storage = Storage::Poi { region };
     let path = storage_path(world, dimension, &storage, &Role::Main)?;
@@ -858,7 +829,6 @@ pub(crate) fn prepare_poi_lifecycle(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    let budget = crate::editing::EditWorkBudget::from_bytes(MAX_WORK)?;
     let mut targets = deleted
         .iter()
         .map(|chunk| (*chunk, None))
@@ -943,7 +913,7 @@ fn prepare_region_inner(
         history,
     };
     let path = expected_path(world, &proof, &Role::Main)?;
-    let original = history_source::read_file(&path, MAX_IMAGE, |bytes| {
+    let original = history_source::read_file(&path, budget.bytes(), |bytes| {
         charge_budget(&mut used, bytes, budget)
     })?;
     let mut old_external = BTreeMap::<Coord, Option<String>>::new();
@@ -1072,6 +1042,7 @@ pub(crate) fn verify(
     proof: &Proof,
     parts: &[(Role, Option<&[u8]>, Option<&[u8]>)],
     source: &impl crate::entity_editing::IdentitySource,
+    budget: crate::editing::EditWorkBudget,
 ) -> Result<bool, WorldError> {
     proof.validate()?;
     for dependency in &proof.sources {
@@ -1113,8 +1084,8 @@ pub(crate) fn verify(
         {
             return Err(invalid("快照文件来源、候选或角色不一致"));
         }
-        charge(&mut used, before.map_or(0, <[u8]>::len))?;
-        charge(&mut used, after.map_or(0, <[u8]>::len))?;
+        charge_budget(&mut used, before.map_or(0, <[u8]>::len), budget)?;
+        charge_budget(&mut used, after.map_or(0, <[u8]>::len), budget)?;
     }
     let (original, image) = files[&Role::Main];
     if let Storage::Alpha { chunk } = &proof.storage {
@@ -1158,7 +1129,7 @@ pub(crate) fn verify(
                 if hash(&raw) != *expected {
                     return Err(invalid("快照目标 NBT 摘要不一致"));
                 }
-                charge(&mut used, raw.len())?;
+                charge_budget(&mut used, raw.len(), budget)?;
                 Some(raw)
             }
         };
@@ -1167,10 +1138,10 @@ pub(crate) fn verify(
     let encodings = proof
         .history
         .as_ref()
-        .map(|history| history.verify_targets(world, proof, &targets, used, source))
+        .map(|history| history.verify_targets(world, proof, &targets, used, source, budget))
         .transpose()?;
     if let Some(encodings) = &encodings {
-        charge(&mut used, history::encoded_bytes(encodings)?)?;
+        charge_budget(&mut used, history::encoded_bytes(encodings)?, budget)?;
     }
     let rebuilt = build_region(
         world,
@@ -1185,7 +1156,7 @@ pub(crate) fn verify(
         },
         encodings.as_ref(),
         used,
-        crate::editing::EditWorkBudget::from_bytes(MAX_WORK)?,
+        budget,
     )?;
     if rebuilt.image.as_slice() != image || rebuilt.chunks != proof.chunks {
         return Err(invalid("快照完整镜像与重建结果不一致"));

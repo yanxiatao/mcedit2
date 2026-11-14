@@ -271,11 +271,6 @@ fn rotation(value: &Value) -> Result<Affine, String> {
 }
 
 #[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     fn parse(s: &str) -> Affine {
@@ -287,6 +282,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn matrix_trsr_origins_quaternion_and_axis_orders_match() {
         close(
             parse(r#"{"translation":[1,2,3]}"#).point([0.; 3]),
@@ -327,6 +323,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn inverse_round_trips_affine_points_and_rejects_singular_matrices() {
         let m = parse(r#"{"matrix":[[-2,0.25,0,1],[0,0.5,0.125,-2],[0,0,3,4]]}"#);
         let inverse = m.inverse().unwrap();
@@ -344,6 +341,7 @@ mod tests {
         .is_err());
     }
 
+    #[test]
     fn invalid_transforms_fail_before_geometry_is_created() {
         for s in [
             r#"{"matrix":[],"scale":2}"#,
@@ -358,15 +356,6 @@ mod tests {
                 Affine::parse(&serde_json::from_str(s).unwrap()).is_err(),
                 "{s}"
             );
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Models {
-            matrix_trsr_origins_quaternion_and_axis_orders_match();
-            inverse_round_trips_affine_points_and_rejects_singular_matrices();
-            invalid_transforms_fail_before_geometry_is_created();
         }
     }
 }

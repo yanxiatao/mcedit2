@@ -1,9 +1,5 @@
 //! 已应用的源窗口独立于自由飞行近景和输入草稿；切换投影不重新选择源数据。
 use super::*;
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
 
 #[cfg(test)]
 #[path = "scene_selection_tests.rs"]

@@ -137,10 +137,6 @@ pub(super) fn decode_mcregion(root: &Tag<'_>, level: &Tag<'_>) -> Result<Chunk> 
         block_entities: original_block_entities(level, false)?,
     })
 }
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
 
 #[cfg(test)]
 mod tests {
@@ -171,6 +167,7 @@ mod tests {
         )
     }
 
+    #[test]
     fn original_anvil_numeric_meta_and_add_are_not_lost() {
         let (mut blocks, mut data, mut add) = (vec![0; 4096], vec![0; 2048], vec![0; 2048]);
         let n = (2 * 16 + 3) * 16 + 4;
@@ -196,6 +193,7 @@ mod tests {
         assert_eq!(input, untouched);
     }
 
+    #[test]
     fn mcregion_128_high_arrays_reorder_without_writing() {
         let (mut blocks, mut data) = (vec![0; 32768], vec![0; 16384]);
         let (x, z, y) = (3, 7, 100);
@@ -216,6 +214,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn original_numeric_anvil_can_insert_missing_high_id_add_without_rewriting_opaque_nbt() {
         let blocks = vec![1u8; 4096];
         let data = vec![0u8; 2048];
@@ -261,6 +260,7 @@ mod tests {
         assert!(original.len() < result.len()); // only Add TAG was inserted
     }
 
+    #[test]
     fn original_mcregion_byte_patch_preserves_neighbors_and_rejects_12bit_ids() {
         let original = old_chunk(vec![
             ba("Blocks", &vec![1u8; 32768]),
@@ -305,22 +305,12 @@ mod tests {
         );
     }
 
+    #[test]
     fn missing_or_truncated_original_arrays_are_refused() {
         assert!(decode_sections(&old_chunk(vec![
             ba("Blocks", &[0; 100]),
             ba("Data", &[0; 16384])
         ]))
         .is_err());
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Formats {
-            original_anvil_numeric_meta_and_add_are_not_lost();
-            mcregion_128_high_arrays_reorder_without_writing();
-            original_numeric_anvil_can_insert_missing_high_id_add_without_rewriting_opaque_nbt();
-            original_mcregion_byte_patch_preserves_neighbors_and_rejects_12bit_ids();
-            missing_or_truncated_original_arrays_are_refused();
-        }
     }
 }

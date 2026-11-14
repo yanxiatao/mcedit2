@@ -1185,11 +1185,8 @@ pub(crate) fn update(app: &mut App, action: Action) -> Task<Message> {
     Task::none()
 }
 
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    if category != crate::test_categories::Category::Background {
-        return;
-    }
+#[test]
+fn background_behavior() {
     preview_handoff();
     use crate::{
         metadata_fixture::Fixture,
@@ -1244,7 +1241,6 @@ pub(crate) fn run_test_category(category: crate::test_categories::Category) {
     assert_eq!(ids(&app.map_editor, &a.root), vec![0, 1]);
     let _ = crate::update(&mut app, Message::Select(0));
     app.nbt_editable = true;
-    app.mixed_phrase = "SAVE".into();
     let _ = background(&mut app, Message::MixedPrepare);
     assert!(a.root.join(".mcedit2-mixed.pending.json").is_file());
     let task = background(&mut app, Message::MixedFinish);
@@ -1256,7 +1252,6 @@ pub(crate) fn run_test_category(category: crate::test_categories::Category) {
     assert_eq!(ids(&app.map_editor, &b.root), vec![0]);
     let _ = crate::update(&mut app, Message::Select(1));
     app.nbt_editable = true;
-    app.mixed_phrase = "SAVE".into();
     let _ = background(&mut app, Message::MixedPrepare);
     let task = background(&mut app, Message::MixedFinish);
     let _ = deliver(&mut app, task);

@@ -217,11 +217,8 @@ pub(crate) fn controls(app: &App) -> Element<'_, Message> {
         .into()
 }
 
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    if category != crate::test_categories::Category::Background {
-        return;
-    }
+#[test]
+fn background_behavior() {
     use crate::{
         metadata_fixture::Fixture,
         metadata_tests::{background, deliver},

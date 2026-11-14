@@ -2598,19 +2598,43 @@ pub(crate) mod tests;
 #[cfg(test)]
 #[path = "entity_versions_tests.rs"]
 mod version_tests;
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-    if category == crate::test_categories::Category::SpecialModels {
-        banner_registry_tests::complete();
-        piston_tests::complete();
-    }
-    if category == crate::test_categories::Category::Rendering {
-        painting_tests::complete();
-        hanging_tests::complete();
-        frame_tests::complete();
-        item_world_tests::complete();
-        map_tests::complete();
-        version_tests::run();
-    }
+
+#[test]
+fn test_banner_registry_tests_complete() {
+    banner_registry_tests::complete();
+}
+
+#[test]
+fn test_piston_tests_complete() {
+    piston_tests::complete();
+}
+
+#[test]
+fn test_painting_tests_complete() {
+    painting_tests::complete();
+}
+
+#[test]
+fn test_hanging_tests_complete() {
+    hanging_tests::complete();
+}
+
+#[test]
+fn test_frame_tests_complete() {
+    frame_tests::complete();
+}
+
+#[test]
+fn test_item_world_tests_complete() {
+    item_world_tests::complete();
+}
+
+#[test]
+fn test_map_tests_complete() {
+    map_tests::complete();
+}
+
+#[test]
+fn test_version_tests_run() {
+    version_tests::run();
 }

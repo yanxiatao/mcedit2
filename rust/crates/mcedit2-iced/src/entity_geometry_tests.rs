@@ -114,6 +114,7 @@ pub(super) fn snapshot(markers: Vec<Marker>) -> Arc<Snapshot> {
         None,
     ))
 }
+#[test]
 fn npc_state_assembly() {
     let (fixture, bank) = assets();
     let hat_id = "minecraft:entity/villager/profession/farmer";
@@ -406,6 +407,7 @@ fn npc_state_assembly() {
         .iter()
         .all(|q| q.mode == crate::material_mode::ORDERED_OPAQUE));
 }
+#[test]
 fn npc_java_render_reference() {
     #[derive(serde::Deserialize)]
     struct References {
@@ -510,6 +512,7 @@ pub(crate) fn scene(
     };
     scene
 }
+#[test]
 fn geometry_materials_and_read_only_selection() {
     let (_fixture, bank) = assets();
     let mut markers = Vec::new();
@@ -685,6 +688,7 @@ fn geometry_materials_and_read_only_selection() {
     ));
     assert!(app.scene_layers.selected.is_none());
 }
+#[test]
 fn generation_cancel_and_atlas_handoff() {
     let (_fixture, bank) = assets();
     let source = source("minecraft:creeper", [0.5, 0., 3.5]);
@@ -873,6 +877,7 @@ pub(crate) fn installed(bank: &TextureBank, world: &mcedit2_world::WorldSummary)
     eprintln!("实际存档静态实体与方块实体模型：{report}");
 }
 
+#[test]
 fn profile_pixels_and_source_cache_lifecycle() {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use mcedit2_world::skull::{Kind as SkullKind, Profile, Property, Source};
@@ -1315,19 +1320,4 @@ fn incremental_source_scene(
     compare(&changed, &build(make(joint_sources), &heads, None));
     // 历史帧的像素与页映射不受新场景回收或错误材质替换影响。
     compare(&loaded, &build(make(sources), &original_heads, None));
-}
-
-pub(super) fn run_test_category(category: crate::test_categories::Category) {
-    match category {
-        crate::test_categories::Category::Rendering => {
-            geometry_materials_and_read_only_selection();
-            npc_state_assembly();
-            npc_java_render_reference();
-        }
-        crate::test_categories::Category::Background => {
-            generation_cancel_and_atlas_handoff();
-            profile_pixels_and_source_cache_lifecycle();
-        }
-        _ => {}
-    }
 }

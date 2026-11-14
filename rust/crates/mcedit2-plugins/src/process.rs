@@ -59,6 +59,8 @@ pub fn run(
     let mut job = Some(super::process_owner::Job::new()?);
     let budget = limits.transfer_budget;
     let mut command = Command::new(executable);
+    #[cfg(unix)]
+    super::process_group::configure(&mut command);
     command
         .arg("--plugin-host")
         .env("MCEDIT2_PLUGIN_TRANSFER_BUDGET", budget.to_string())
@@ -74,6 +76,8 @@ pub fn run(
     let mut child = command
         .spawn()
         .map_err(|e| format!("无法启动 RustPython 插件进程 {}：{e}", executable.display()))?;
+    #[cfg(unix)]
+    let mut group = super::process_group::Group::new(child.id());
     #[cfg(windows)]
     job.as_ref()
         .expect("插件进程归属已创建")
@@ -95,6 +99,8 @@ pub fn run(
                 "插件运行超时，进程已终止"
             };
             let killed = child.kill();
+            #[cfg(unix)]
+            group.terminate()?;
             #[cfg(windows)]
             drop(job.take());
             let waited = child.wait();
@@ -114,6 +120,8 @@ pub fn run(
             Ok(Some(status)) => break status,
             Ok(None) => std::thread::sleep(Duration::from_millis(10)),
             Err(error) => {
+                #[cfg(unix)]
+                group.terminate()?;
                 #[cfg(windows)]
                 drop(job.take());
                 if let Err(kill_error) = child.kill() {
@@ -135,6 +143,9 @@ pub fn run(
             }
         }
     };
+    // A successful host can leave descendants holding its stdout/stderr too.
+    #[cfg(unix)]
+    group.terminate()?;
     #[cfg(windows)]
     drop(job.take());
     let written = writer.join().map_err(|_| "插件输入线程异常")?;

@@ -430,15 +430,10 @@ impl MeshBounds {
 }
 
 #[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-    crate::section_culling::run_test_category(category);
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
     fn orthographic_planes_use_fixed_screen_extent_and_include_pan() {
         let mut cam = camera();
         cam.position[3] = 1.;
@@ -473,6 +468,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn culls_each_outside_plane_and_retains_crossing_bounds() {
         let cam = camera();
         for (minimum, maximum) in [
@@ -499,6 +495,7 @@ mod tests {
         .visible(&cam));
     }
 
+    #[test]
     fn camera_rotation_and_translation_reveal_retained_source_bounds() {
         let bounds = MeshBounds {
             minimum: [-1.0, -1.0, -10.0],
@@ -565,15 +562,6 @@ mod tests {
                     }
                 }
             }
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Rendering {
-            orthographic_planes_use_fixed_screen_extent_and_include_pan();
-            culls_each_outside_plane_and_retains_crossing_bounds();
-            camera_rotation_and_translation_reveal_retained_source_bounds();
         }
     }
 }

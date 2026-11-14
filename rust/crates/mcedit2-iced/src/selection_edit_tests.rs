@@ -21,6 +21,7 @@ fn assert_bounds(app: &App, lo: [i32; 3], hi: [i32; 3]) {
     );
     assert_eq!(app.selection_box(), Some(bounds(app)));
 }
+#[test]
 fn coordinates_and_lifecycle() {
     let mut f = Fixture::new(3955);
     crate::object_fixture::populate(&mut f);
@@ -182,6 +183,7 @@ fn coordinates_and_lifecycle() {
     assert_bounds(&app, [2, 4, 6], [3, 5, 7]);
     assert_eq!(f.file("region/r.0.0.mca"), original);
 }
+#[test]
 fn actual_edit_and_clipboard() {
     use crate::{
         metadata_tests::{background, deliver},
@@ -245,20 +247,8 @@ fn actual_edit_and_clipboard() {
     assert!(app.selection_edit.slots.is_empty());
     assert!(app.edit_area.is_empty() && app.selection_box().is_none());
 }
-pub(super) fn run(category: crate::test_categories::Category) {
-    match category {
-        crate::test_categories::Category::Navigation => {
-            coordinates_and_lifecycle();
-            shapes_and_history();
-        }
-        crate::test_categories::Category::Background => {
-            actual_edit_and_clipboard();
-            shaped_native_fill();
-        }
-        _ => (),
-    }
-}
 
+#[test]
 fn shapes_and_history() {
     let mut fixture = Fixture::new(3955);
     crate::object_fixture::populate(&mut fixture);
@@ -301,6 +291,7 @@ fn shapes_and_history() {
     action(&mut app, Action::Corners);
     assert_bounds(&app, [16, -64, -32], [47, 319, -1]);
 }
+#[test]
 fn shaped_native_fill() {
     let mut fixture = Fixture::new(3955);
     crate::object_fixture::populate(&mut fixture);

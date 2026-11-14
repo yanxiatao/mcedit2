@@ -253,7 +253,7 @@ impl ArchivedFile {
         };
         let location = match &self.location {
             FileLocation::Backup { path } => relative(path) && path != &self.target,
-            FileLocation::World { length } => *length <= 256 * 1024 * 1024,
+            FileLocation::World { .. } => true,
         };
         if !relative(&self.target)
             || !location
@@ -299,7 +299,7 @@ impl ArchivedFile {
                 }
                 reserve(*length)?;
                 let bytes = source
-                    .read(expected)?
+                    .read_limited(expected, limit as u64)?
                     .ok_or_else(|| invalid("历史世界文件来源已缺失"))?;
                 if bytes.len() != *length {
                     return Err(invalid("历史世界文件来源大小改变"));
@@ -372,7 +372,14 @@ impl VersionView<'_> {
 }
 impl IdentitySource for VersionView<'_> {
     fn read(&self, path: &Path) -> Result<Option<Vec<u8>>, WorldError> {
-        self.read_reserved(path, 256 * 1024 * 1024, |_| Ok(()))
+        self.read_limited(
+            path,
+            crate::editing::EditWorkBudget::default().bytes() as u64,
+        )
+    }
+    fn read_limited(&self, path: &Path, limit: u64) -> Result<Option<Vec<u8>>, WorldError> {
+        let limit = usize::try_from(limit).map_err(|_| invalid("历史读取预算超出地址范围"))?;
+        self.read_reserved(path, limit, |_| Ok(()))
     }
     fn is_directory(&self, path: &Path) -> Result<bool, WorldError> {
         let path = self.checked(path)?;
@@ -1160,8 +1167,8 @@ impl Archive {
     /// 规划下一次写入时核对真实磁盘头；历史来源从不冒充当前文件的写入依据。
     pub fn verify_current(&self) -> Result<(), WorldError> {
         for (path, expected) in &self.0.heads {
-            let actual = read_file(path, 256 * 1024 * 1024, |_| Ok(()))?;
-            if actual.as_deref().map(hash).as_ref() != expected.as_ref() {
+            let actual = file_sha(path)?;
+            if actual.as_ref() != expected.as_ref() {
                 return Err(invalid(format!(
                     "保存后的世界文件已独立改变：{}",
                     path.display()
@@ -1175,6 +1182,12 @@ impl Archive {
 /// 会话领域扫描共用同一来源选择；没有保存历史时读取真实磁盘。
 pub(crate) struct View<'a>(pub Option<&'a Archive>);
 impl IdentitySource for View<'_> {
+    fn read_limited(&self, path: &Path, limit: u64) -> Result<Option<Vec<u8>>, WorldError> {
+        match self.0 {
+            Some(origin) => origin.read_limited(path, limit),
+            None => DiskIdentitySource.read_limited(path, limit),
+        }
+    }
     fn is_directory(&self, path: &Path) -> Result<bool, WorldError> {
         match self.0 {
             Some(origin) => origin.is_directory(path),
@@ -1190,7 +1203,7 @@ impl IdentitySource for View<'_> {
     fn read(&self, path: &Path) -> Result<Option<Vec<u8>>, WorldError> {
         match self.0 {
             Some(origin) => origin.read(path),
-            None => read_file(path, 256 * 1024 * 1024, |_| Ok(())),
+            None => DiskIdentitySource.read(path),
         }
     }
 }
@@ -1225,7 +1238,14 @@ impl IdentitySource for Archive {
         }))
     }
     fn read(&self, path: &Path) -> Result<Option<Vec<u8>>, WorldError> {
-        self.read_reserved(path, 256 * 1024 * 1024, |_| Ok(()))
+        self.read_limited(
+            path,
+            crate::editing::EditWorkBudget::default().bytes() as u64,
+        )
+    }
+    fn read_limited(&self, path: &Path, limit: u64) -> Result<Option<Vec<u8>>, WorldError> {
+        let limit = usize::try_from(limit).map_err(|_| invalid("历史读取预算超出地址范围"))?;
+        self.read_reserved(path, limit, |_| Ok(()))
     }
 }
 impl Archive {
@@ -1235,4 +1255,27 @@ impl Archive {
     fn original_directory_members(&self, path: &Path) -> Result<Option<Vec<String>>, WorldError> {
         self.layout().directory_members(path, &self.0.files)
     }
+}
+
+/// 核对磁盘头只需要摘要，流式读取不为大型 Region 分配完整镜像。
+fn file_sha(path: &Path) -> Result<Option<String>, WorldError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(invalid("历史磁盘头必须是普通文件"));
+    }
+    let mut file = fs::File::open(path)?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 65536];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    Ok(Some(format!("{:x}", digest.finalize())))
 }

@@ -41,6 +41,7 @@ fn color(bank: &TextureBank, id: &str) -> [u8; 4] {
 }
 const STONE: &str = "assets/minecraft/textures/block/stone.png";
 
+#[test]
 fn native_animation_and_resource_boundaries_keep_pixels_and_source_identity() {
     let fixture = Fixture::new();
     let base = fixture.path("source");
@@ -143,6 +144,7 @@ fn native_animation_and_resource_boundaries_keep_pixels_and_source_identity() {
     assert_eq!(std::fs::read(base.join(STONE)).unwrap(), image);
 }
 
+#[test]
 fn java_composite_children_keep_texture_uv_geometry_and_declared_alpha() {
     use crate::isometric::Face;
     let fixture = Fixture::new();
@@ -246,6 +248,7 @@ fn java_composite_children_keep_texture_uv_geometry_and_declared_alpha() {
     assert!(right.iter().all(|v| v.xyz[0] >= 0. && v.xyz[0] <= 0.5));
 }
 
+#[test]
 fn vertical_static_png_preserves_every_row_in_directory_zip_and_atlas() {
     let fixture = Fixture::new();
     let directory = fixture.path("vertical_static");
@@ -279,6 +282,7 @@ fn vertical_static_png_preserves_every_row_in_directory_zip_and_atlas() {
     }
 }
 
+#[test]
 fn vertical_static_overlay_replaces_animated_strip_without_inheriting_metadata() {
     let fixture = Fixture::new();
     let base = fixture.path("animated_base");
@@ -301,6 +305,7 @@ fn vertical_static_overlay_replaces_animated_strip_without_inheriting_metadata()
     assert_eq!(bank.animation_count(), 0);
 }
 
+#[test]
 fn zip_overlay_preserves_lower_models_and_sprites_without_stale_animation() {
     let temp = Fixture::new();
     let base = temp.path("base");
@@ -354,6 +359,7 @@ fn zip_overlay_preserves_lower_models_and_sprites_without_stale_animation() {
     // Functional overlay precedence is already verified above.
 }
 
+#[test]
 fn metadata_only_overlay_changes_schedule_without_replacing_png() {
     let temp = Fixture::new();
     let base = temp.path("base");
@@ -375,6 +381,7 @@ fn metadata_only_overlay_changes_schedule_without_replacing_png() {
     assert!(TextureBank::open_stack(&[base, temp.path("missing.zip")]).is_err());
 }
 
+#[test]
 fn corrupt_modern_png_does_not_shadow_valid_legacy_texture_in_either_zip_order() {
     for modern_first in [true, false] {
         let temp = Fixture::new();
@@ -403,6 +410,7 @@ fn corrupt_modern_png_does_not_shadow_valid_legacy_texture_in_either_zip_order()
     }
 }
 
+#[test]
 fn valid_modern_png_wins_over_legacy_regardless_of_archive_order() {
     for modern_first in [true, false] {
         let temp = Fixture::new();
@@ -430,6 +438,7 @@ fn valid_modern_png_wins_over_legacy_regardless_of_archive_order() {
     }
 }
 
+#[test]
 fn corrupt_upper_layer_sprite_preserves_lower_png_and_animation_metadata() {
     let temp = Fixture::new();
     let base = temp.path("base");
@@ -451,6 +460,7 @@ fn corrupt_upper_layer_sprite_preserves_lower_png_and_animation_metadata() {
     assert!(bank.warnings.iter().any(|s| s.contains("minecraft:stone")));
 }
 
+#[test]
 fn zip_and_directory_use_the_same_asset_classifier_and_overlay_rules() {
     let temp = Fixture::new();
     let folder = temp.path("pack_dir");
@@ -503,6 +513,7 @@ fn zip_and_directory_use_the_same_asset_classifier_and_overlay_rules() {
     );
 }
 
+#[test]
 fn spectator_emits_real_extended_modded_model_vertices_with_valid_atlas_uv() {
     use mcedit2_world::sections::State;
     use mcedit2_world::surface::{SurfaceView, SurfaceVoxel, VoxelMaterial, ALL_FACES};
@@ -598,6 +609,7 @@ fn spectator_emits_real_extended_modded_model_vertices_with_valid_atlas_uv() {
         .all(|v| v.uv.iter().all(|component| component.is_finite())));
 }
 
+#[test]
 fn generic_mod_model_sprites_resolve_in_both_zip_and_directory() {
     let fixture = Fixture::new();
     let directory = fixture.path("nested_model");
@@ -675,6 +687,7 @@ fn generic_mod_model_sprites_resolve_in_both_zip_and_directory() {
     }
 }
 
+#[test]
 fn original_json_repeating_uvs_emit_real_atlas_safe_spectator_faces() {
     use mcedit2_world::sections::State;
     use mcedit2_world::surface::{SurfaceView, SurfaceVoxel, VoxelMaterial, ALL_FACES};
@@ -772,6 +785,7 @@ fn original_json_repeating_uvs_emit_real_atlas_safe_spectator_faces() {
     assert!(mesh.iter().all(|v| v.atlas_page == slot.page));
 }
 
+#[test]
 fn declared_obj_loader_emits_generic_static_mesh_via_gpu_path() {
     use mcedit2_world::sections::State;
     use mcedit2_world::surface::{SurfaceView, SurfaceVoxel, VoxelMaterial, ALL_FACES};
@@ -862,7 +876,8 @@ fn declared_obj_loader_emits_generic_static_mesh_via_gpu_path() {
     assert!(vertices.iter().all(|v| v.uv.iter().all(|x| x.is_finite())));
 }
 
-fn obj_mtl_and_gltf_renderers_follow_resource_model_without_block_id_tables() {
+#[test]
+fn obj_mtl_renderers_follow_resource_model_without_block_id_tables() {
     use mcedit2_world::sections::State;
     let fixture = Fixture::new();
     let path = fixture.path("special_renderers");
@@ -911,51 +926,9 @@ fn obj_mtl_and_gltf_renderers_follow_resource_model_without_block_id_tables() {
             && uv[0] <= sprite.end[0] + 1e-6
             && uv[1] >= sprite.start[1] - 1e-6
             && uv[1] <= sprite.end[1] + 1e-6)));
-
-    // Replace the blockstate's model reference with a glTF/GLB backend.
-    let path2 = fixture.path("gltf_renderers");
-    put(
-        &path2,
-        "assets/example/textures/item/casing.png",
-        &png(&[40, 80, 120, 255], 1),
-    );
-    put(
-        &path2,
-        "assets/example/blockstates/casing.json",
-        br#"{"variants":{"":{"model":"example:block/casing"}}}"#,
-    );
-    put(&path2,"assets/example/models/block/casing.json",
-        br#"{"loader":"mcedit2:glb","model":"example:models/block/casing.glb","textures":{"particle":"example:item/casing"}}"#);
-    let mut bin = Vec::new();
-    for v in [0f32, 0., 0., 1., 0., 0., 0., 1., 0., 0., 0., 1., 0., 0., 1.] {
-        bin.extend_from_slice(&v.to_le_bytes());
-    }
-    let doc = serde_json::json!({"asset":{"version":"2.0"},"buffers":[{"byteLength":60}],
-        "bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36},
-            {"buffer":0,"byteOffset":36,"byteLength":24}],
-        "accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"},
-            {"bufferView":1,"componentType":5126,"count":3,"type":"VEC2"}],
-        "meshes":[{"primitives":[{"attributes":{"POSITION":0,"TEXCOORD_0":1}}]}]});
-    let mut json = serde_json::to_vec(&doc).unwrap();
-    while !json.len().is_multiple_of(4) {
-        json.push(b' ')
-    }
-    let size = (12 + 8 + json.len() + 8 + bin.len()) as u32;
-    let mut glb = Vec::new();
-    glb.extend_from_slice(b"glTF");
-    glb.extend_from_slice(&2u32.to_le_bytes());
-    glb.extend_from_slice(&size.to_le_bytes());
-    glb.extend_from_slice(&(json.len() as u32).to_le_bytes());
-    glb.extend_from_slice(b"JSON");
-    glb.extend_from_slice(&json);
-    glb.extend_from_slice(&(bin.len() as u32).to_le_bytes());
-    glb.extend_from_slice(b"BIN\0");
-    glb.extend_from_slice(&bin);
-    put(&path2, "assets/example/models/block/casing.glb", &glb);
-    let bank = TextureBank::open(&path2).unwrap();
-    assert_eq!(bank.static_obj_at(&state, (0, 70, 0)).unwrap().len(), 1);
 }
 
+#[test]
 fn custom_mod_loader_static_renderer_adapter_is_declarative_and_id_independent() {
     use mcedit2_world::sections::State;
     let fixture = Fixture::new();
@@ -1009,68 +982,7 @@ fn custom_mod_loader_static_renderer_adapter_is_declarative_and_id_independent()
     );
 }
 
-fn nested_gltf_scene_uses_external_buffers_in_unordered_zip_pack() {
-    let temp = Fixture::new();
-    let archive = temp.path("gltf_buffers.zip");
-    let mut positions = Vec::new();
-    for n in [0f32, 0., 0., 1., 0., 0., 0., 1., 0.] {
-        positions.extend_from_slice(&n.to_le_bytes());
-    }
-    let mut tex = Vec::new();
-    for n in [0f32, 0., 1., 0., 0., 1.] {
-        tex.extend_from_slice(&n.to_le_bytes());
-    }
-    let doc = serde_json::json!({
-        "asset":{"version":"2.0"},
-        "buffers":[{"uri":"position.bin","byteLength":36},{"uri":"uv.bin","byteLength":24}],
-        "bufferViews":[{"buffer":0,"byteLength":36},{"buffer":1,"byteLength":24}],
-        "accessors":[
-            {"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"},
-            {"bufferView":1,"componentType":5126,"count":3,"type":"VEC2"}],
-        "meshes":[{"primitives":[{"attributes":{"POSITION":0,"TEXCOORD_0":1}}]}],
-        "nodes":[{"translation":[0.25,0,0],"children":[1]},{"mesh":0,"translation":[0,0.5,0]}],
-        "scenes":[{"nodes":[0]}],"scene":0
-    });
-    let mut zip = zip::ZipWriter::new(File::create(&archive).unwrap());
-    for (name, data) in [
-        (
-            "assets/example/models/block/assembly.gltf",
-            serde_json::to_vec(&doc).unwrap(),
-        ),
-        ("assets/example/models/block/uv.bin", tex),
-        ("assets/example/models/block/position.bin", positions),
-        (
-            "assets/example/blockstates/assembly.json",
-            br#"{"variants":{"":{"model":"example:block/assembly"}}}"#.to_vec(),
-        ),
-        (
-            "assets/example/models/block/assembly.json",
-            br#"{"loader":"mcedit2:gltf","model":"example:models/block/assembly.gltf",
-                "textures":{"particle":"example:item/assembly"}}"#
-                .to_vec(),
-        ),
-        (
-            "assets/example/textures/item/assembly.png",
-            png(&[95, 175, 241, 255], 1),
-        ),
-    ] {
-        zip.start_file(name, zip::write::SimpleFileOptions::default())
-            .unwrap();
-        zip.write_all(&data).unwrap();
-    }
-    zip.finish().unwrap();
-    let bank = TextureBank::open(&archive).unwrap();
-    let state = mcedit2_world::sections::State {
-        name: "example:assembly".into(),
-        properties: vec![],
-    };
-    let selected = bank.static_obj_at(&state, (0, 70, 0)).unwrap();
-    assert_eq!(selected.len(), 1);
-    assert_eq!(selected[0].xyz[0], [-0.25, 0., -0.5]);
-    assert_eq!(selected[0].xyz[1], [0.75, 0., -0.5]);
-    assert!(!bank.warnings.iter().any(|x| x.contains("glTF")));
-}
-
+#[test]
 fn obj_material_map_d_is_baked_into_actual_atlas_sprite_alpha() {
     let f = Fixture::new();
     let dir = f.path("material_map");
@@ -1122,216 +1034,7 @@ fn obj_material_map_d_is_baked_into_actual_atlas_sprite_alpha() {
     );
 }
 
-fn fullbright_gltf_alpha_rules_flow_from_pack_material_into_gpu_mesh_mode() {
-    let fixture = Fixture::new();
-    for (index, alpha_mode, expected_kind) in [
-        (0, "OPAQUE", 0_u32),
-        (1, "MASK", 1_u32),
-        (2, "BLEND", 2_u32),
-    ] {
-        let root = fixture.path(&format!("fullbright_gltf_{index}"));
-        let mut positions = Vec::new();
-        for n in [0f32, 0., 0., 1., 0., 0., 0., 1., 0.] {
-            positions.extend_from_slice(&n.to_le_bytes());
-        }
-        let mut tex = Vec::new();
-        for n in [0f32, 0., 1., 0., 0., 1.] {
-            tex.extend_from_slice(&n.to_le_bytes());
-        }
-        let gltf = serde_json::json!({
-            "asset": {"version":"2.0"},
-            "buffers": [
-                {"uri":"positions.bin","byteLength":36},
-                {"uri":"uv.bin","byteLength":24}
-            ],
-            "bufferViews":[{"buffer":0,"byteLength":36},{"buffer":1,"byteLength":24}],
-            "accessors":[
-                {"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"},
-                {"bufferView":1,"componentType":5126,"count":3,"type":"VEC2"}
-            ],
-            "materials":[{"name":"panel","alphaMode":alpha_mode,
-                "alphaCutoff":0.75,"doubleSided":false,
-                "pbrMetallicRoughness":{"baseColorFactor":[0.2,0.4,0.6,0.25]}
-            }],
-            "meshes":[{"primitives":[{"attributes":
-                {"POSITION":0,"TEXCOORD_0":1},"material":0}]}]
-        });
-        put(
-            &root,
-            "assets/example/models/block/panel.gltf",
-            &serde_json::to_vec(&gltf).unwrap(),
-        );
-        put(
-            &root,
-            "assets/example/models/block/positions.bin",
-            &positions,
-        );
-        put(&root, "assets/example/models/block/uv.bin", &tex);
-        put(
-            &root,
-            "assets/example/textures/item/panel.png",
-            &png(&[100, 170, 200, 80], 1),
-        );
-        put(
-            &root,
-            "assets/example/blockstates/panel.json",
-            br#"{"variants":{"":{"model":"example:block/panel"}}}"#,
-        );
-        put(
-            &root,
-            "assets/example/models/block/panel.json",
-            br#"{"loader":"mcedit2:gltf","model":"example:models/block/panel.gltf",
-                "textures":{"panel":"example:item/panel"}}"#,
-        );
-        let bank = TextureBank::open(&root).unwrap();
-        let state = mcedit2_world::sections::State {
-            name: "example:panel".into(),
-            properties: vec![],
-        };
-        let faces = bank.static_obj_at(&state, (0, 70, 0)).unwrap();
-        assert_eq!(faces.len(), 1);
-        assert_eq!(faces[0].mode & 3, expected_kind);
-        assert_ne!(
-            faces[0].mode & 4,
-            0,
-            "Single-sided glTF material must discard backfaces"
-        );
-        assert_eq!(faces[0].rgba, [[0.2, 0.4, 0.6, 0.25]; 3]);
-        match expected_kind {
-            0 => assert_ne!(faces[0].mode & 8, 0),
-            1 => {
-                assert_ne!(faces[0].mode & 16, 0);
-                assert_eq!((faces[0].mode >> 8) & 255, 191);
-            }
-            _ => assert_eq!(faces[0].mode & 8, 0),
-        }
-    }
-}
-
-fn gltf_base_color_texture_autobinds_and_spectator_instances_are_distinct() {
-    use mcedit2_world::sections::State;
-    use mcedit2_world::surface::{SurfaceView, SurfaceVoxel, VoxelMaterial, ALL_FACES};
-    use std::sync::{Arc, Mutex};
-    let fixture = Fixture::new();
-    let root = fixture.path("gltf_auto_texture");
-    let mut binary = Vec::new();
-    for value in [0f32, 0., 0., 1., 0., 0., 0., 1., 0., 0., 0., 1., 0., 0., 1.] {
-        binary.extend_from_slice(&value.to_le_bytes());
-    }
-    let doc = serde_json::json!({
-        "asset":{"version":"2.0"},
-        "buffers":[{"uri":"geometry.bin","byteLength":60}],
-        "bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36},
-                       {"buffer":0,"byteOffset":36,"byteLength":24}],
-        "accessors":[
-           {"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"},
-           {"bufferView":1,"componentType":5126,"count":3,"type":"VEC2"}],
-        // Real glTF/GLB material image references, no Java-side 'textures'.
-        "images":[{"uri":"panel.png"}],
-        "textures":[{"source":0}],
-        "materials":[{"pbrMetallicRoughness":{
-            "baseColorTexture":{"index":0},
-            "baseColorFactor":[0.75,0.5,0.25,1.0]
-        }}],
-        "meshes":[{"primitives":[{"attributes":{
-            "POSITION":0,"TEXCOORD_0":1
-        },"material":0}]}],
-        "nodes":[{"mesh":0,"translation":[0.,0.,0.]},
-                 {"mesh":0,"translation":[0.5,0.,0.]}],
-        "scenes":[{"nodes":[0,1]}],"scene":0
-    });
-    put(
-        &root,
-        "assets/example/models/block/assembly.gltf",
-        &serde_json::to_vec(&doc).unwrap(),
-    );
-    put(&root, "assets/example/models/block/geometry.bin", &binary);
-    put(
-        &root,
-        "assets/example/models/block/panel.png",
-        &png(&[20, 130, 220, 255], 1),
-    );
-    put(
-        &root,
-        "assets/example/blockstates/assembly.json",
-        br#"{"variants":{"":{"model":"example:block/assembly"}}}"#,
-    );
-    put(
-        &root,
-        "assets/example/models/block/assembly.json",
-        br#"{"loader":"mcedit2:gltf","model":"example:models/block/assembly.gltf"}"#,
-    );
-    let bank = Arc::new(TextureBank::open(&root).unwrap());
-    let state = State {
-        name: "example:assembly".into(),
-        properties: vec![],
-    };
-    assert_eq!(
-        color(&bank, "example:__gltf/block/panel"),
-        [20, 130, 220, 255]
-    );
-    let selected = bank.models.obj_at(&state, (0, 70, 0)).unwrap();
-    assert_eq!(selected.len(), 2);
-    assert!(selected
-        .iter()
-        .all(|t| t.texture == "example:__gltf/block/panel"));
-    assert_ne!(selected[0].xyz[0], selected[1].xyz[0]);
-    let surfaces = bank.static_obj_at(&state, (0, 70, 0)).unwrap();
-    assert_eq!(surfaces.len(), 2);
-    let page = bank.atlas().unwrap().entries["example:__gltf/block/panel"].page;
-    assert!(surfaces.iter().all(|tri| tri.page == page));
-    let scene = crate::spectator::SpectatorScene {
-        entity_frame: None,
-        entity_enabled: false,
-        entity_cache: Default::default(),
-        surface: Arc::new(SurfaceView {
-            biomes: Default::default(),
-            x: 0,
-            z: 0,
-            y_min: 64,
-            y_max: 111,
-            width: 16,
-            depth: 16,
-            voxels: vec![SurfaceVoxel::new(
-                [0, 70, 0],
-                mcedit2_world::surface::VoxelData {
-                    span: 1,
-                    fluid: None,
-                    state: state.into(),
-                    biome: None,
-                    staged: false,
-                    original_block_entity: false,
-                    faces: ALL_FACES,
-                    kind: VoxelMaterial::Solid,
-                    light: Default::default(),
-                },
-            )],
-            source_tiles: vec![],
-            source_chunks: 1,
-            missing_columns: 0,
-        }),
-        texture_bank: Some(bank),
-        show_textures: true,
-        block_layers: Default::default(),
-        camera: crate::spectator::Camera::default(),
-        quality: crate::gpu_mesh::Quality::Balanced,
-        cache: Arc::new(Mutex::new(None)),
-        pending: Arc::new(Mutex::new(false)),
-        presented: Default::default(),
-        presented_view: Default::default(),
-        fallback: None,
-        snapshot: None,
-        chunk_cache: Arc::new(Mutex::new(
-            crate::chunk_mesh_cache::ChunkMeshCache::default(),
-        )),
-        lighting: crate::lighting::Table::unlit(),
-    };
-    let vertices = crate::spectator::build(&scene);
-    assert_eq!(vertices.len(), 12);
-    assert!(vertices.iter().all(|v| v.atlas_page == page));
-    assert!(vertices.iter().all(|v| v.uv.iter().all(|x| x.is_finite())));
-}
-
+#[test]
 fn core_java_resource_reader_does_not_import_custom_mod_renderers() {
     let fixture = Fixture::new();
     let directory = fixture.path("standard_only");
@@ -1373,10 +1076,6 @@ fn core_java_resource_reader_does_not_import_custom_mod_renderers() {
             b"newmtl custom\n".to_vec(),
         ),
         (
-            "assets/example/models/block/custom.gltf",
-            br#"{"asset":{"version":"2.0"}}"#.to_vec(),
-        ),
-        (
             "assets/example/models/block/custom.bin",
             b"not a vanilla resource".to_vec(),
         ),
@@ -1407,12 +1106,6 @@ fn core_java_resource_reader_does_not_import_custom_mod_renderers() {
             });
         assert_eq!(bank.model_count(), 4);
         assert_eq!(color(&bank, "example:casing"), [12, 110, 208, 255]);
-        // Sidecar images under models/ are only used by non-vanilla formats.
-        assert!(!bank
-            .atlas()
-            .unwrap()
-            .entries
-            .contains_key("example:__gltf/block/sidecar"));
         let (uv, _, page) = bank
             .atlas_face_style_at(&casing, crate::isometric::Face::Top, 0, (0, 64, 0))
             .unwrap();
@@ -1445,34 +1138,7 @@ fn core_java_resource_reader_does_not_import_custom_mod_renderers() {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    if category == crate::test_categories::Category::Materials {
-        native_animation_and_resource_boundaries_keep_pixels_and_source_identity();
-        numeric_biome_profiles_follow_real_resource_overlays_and_structure_preview();
-        java_composite_children_keep_texture_uv_geometry_and_declared_alpha();
-        vertical_static_png_preserves_every_row_in_directory_zip_and_atlas();
-        vertical_static_overlay_replaces_animated_strip_without_inheriting_metadata();
-        zip_overlay_preserves_lower_models_and_sprites_without_stale_animation();
-        metadata_only_overlay_changes_schedule_without_replacing_png();
-        corrupt_modern_png_does_not_shadow_valid_legacy_texture_in_either_zip_order();
-        valid_modern_png_wins_over_legacy_regardless_of_archive_order();
-        corrupt_upper_layer_sprite_preserves_lower_png_and_animation_metadata();
-        zip_and_directory_use_the_same_asset_classifier_and_overlay_rules();
-        spectator_emits_real_extended_modded_model_vertices_with_valid_atlas_uv();
-        generic_mod_model_sprites_resolve_in_both_zip_and_directory();
-        original_json_repeating_uvs_emit_real_atlas_safe_spectator_faces();
-        declared_obj_loader_emits_generic_static_mesh_via_gpu_path();
-        obj_mtl_and_gltf_renderers_follow_resource_model_without_block_id_tables();
-        custom_mod_loader_static_renderer_adapter_is_declarative_and_id_independent();
-        nested_gltf_scene_uses_external_buffers_in_unordered_zip_pack();
-        obj_material_map_d_is_baked_into_actual_atlas_sprite_alpha();
-        fullbright_gltf_alpha_rules_flow_from_pack_material_into_gpu_mesh_mode();
-        gltf_base_color_texture_autobinds_and_spectator_instances_are_distinct();
-        core_java_resource_reader_does_not_import_custom_mod_renderers();
-    }
-}
-
+#[test]
 fn numeric_biome_profiles_follow_real_resource_overlays_and_structure_preview() {
     use mcedit2_world::{
         clipboard::CaptureOptions,

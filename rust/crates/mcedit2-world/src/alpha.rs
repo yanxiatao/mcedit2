@@ -319,10 +319,6 @@ pub(crate) fn prepare_candidate_with_history(
         proof,
     })
 }
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
 
 #[cfg(test)]
 mod tests {
@@ -347,12 +343,14 @@ mod tests {
         tag(7, name, &bytes)
     }
 
+    #[test]
     fn canonical_alpha_hash_for_negative_chunk_coordinates() {
         let path = alpha_chunk_path(Path::new("world"), -13, 44);
         assert_eq!(path, PathBuf::from("world/1f/18/c.-d.18.dat"));
         assert_eq!(parse_signed36("-zik0zj"), Some(-2147483647));
     }
 
+    #[test]
     fn gzip_original_alpha_chunk_reads_and_refuses_wrong_internal_position() {
         let root = std::env::temp_dir().join(format!("mcedit2-alpha-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
@@ -376,13 +374,5 @@ mod tests {
         assert_eq!(loaded.sections.len(), 8);
         assert!(read_alpha_chunk(&root, -12, 44).unwrap().is_none());
         fs::remove_dir_all(root).unwrap();
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Formats {
-            canonical_alpha_hash_for_negative_chunk_coordinates();
-            gzip_original_alpha_chunk_reads_and_refuses_wrong_internal_position();
-        }
     }
 }

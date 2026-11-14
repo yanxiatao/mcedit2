@@ -14,7 +14,6 @@ use std::{
     path::PathBuf,
 };
 type Coord = (i32, i32);
-const BUDGET: usize = 1024 * 1024 * 1024;
 fn err(text: impl Into<String>) -> WorldError {
     WorldError::Invalid(text.into())
 }
@@ -415,6 +414,7 @@ fn image(
     originals: &BTreeMap<Coord, Vec<u8>>,
     external: &BTreeMap<Coord, Vec<u8>>,
     after: &BTreeMap<Coord, Vec<u8>>,
+    budget: crate::editing::EditWorkBudget,
 ) -> Result<(Option<Vec<u8>>, Vec<SidecarPart>), WorldError> {
     if proof.storage == Storage::Alpha {
         let before = before.ok_or_else(|| err("Alpha 联合保存缺少原始文件"))?;
@@ -504,7 +504,7 @@ fn image(
         let start = output.len() / 4096;
         if sectors == 0
             || start > 0x00ff_ffff
-            || output.len().saturating_add(sectors * 4096) > 256 * 1024 * 1024
+            || output.len().saturating_add(sectors * 4096) > budget.bytes()
         {
             return Err(err("共享区块镜像超过 Region 格式或内存预算"));
         }
@@ -530,6 +530,7 @@ fn sources(
     world: &WorldSummary,
     proof: &Proof,
     source: &impl IdentitySource,
+    budget: crate::editing::EditWorkBudget,
 ) -> Result<
     (
         BTreeMap<Coord, Option<Vec<u8>>>,
@@ -559,13 +560,16 @@ fn sources(
         if !required.contains(&record.coords) || regions.contains_key(&record.coords) {
             return Err(err("共享区块 Region 无关或重复"));
         }
-        let bytes = source.read(&expected_path(world, proof, record.coords)?)?;
+        let bytes = source.read_limited(
+            &expected_path(world, proof, record.coords)?,
+            budget.bytes() as u64,
+        )?;
         if bytes.as_ref().map(|bytes| hash(bytes)) != record.sha {
             return Err(err("共享 Region 来源摘要变化"));
         }
         used = used.saturating_add(bytes.as_ref().map_or(0, Vec::len));
-        if used > BUDGET {
-            return Err(err("共享 Region 来源超过 1 GiB 预算"));
+        if used > budget.bytes() {
+            return Err(err("共享 Region 来源超过当前预算"));
         }
         regions.insert(record.coords, bytes);
     }
@@ -588,14 +592,14 @@ fn sources(
             record.chunk.1,
         )?;
         let bytes = source
-            .read(&path)?
+            .read_limited(&path, budget.bytes() as u64)?
             .ok_or_else(|| err("共享 MCC 来源消失"))?;
         if hash(&bytes) != record.sha {
             return Err(err("共享 MCC 来源摘要变化"));
         }
         used = used.saturating_add(bytes.len());
-        if used > BUDGET {
-            return Err(err("共享 MCC 来源超过 1 GiB 预算"));
+        if used > budget.bytes() {
+            return Err(err("共享 MCC 来源超过当前预算"));
         }
         external.insert(record.chunk, bytes);
     }
@@ -626,7 +630,7 @@ fn sources(
                 chunk.0,
                 chunk.1,
             )?;
-            if source.read(&side)?.is_some() {
+            if source.read_limited(&side, budget.bytes() as u64)?.is_some() {
                 return Err(err("共享创建目标已有孤立 MCC"));
             }
             crate::chunk_creation::empty_chunk(&creation.profile, chunk)?
@@ -640,8 +644,8 @@ fn sources(
             )?
         };
         used = used.saturating_add(raw.len());
-        if used > BUDGET {
-            return Err(err("共享区块来源超过 1 GiB 预算"));
+        if used > budget.bytes() {
+            return Err(err("共享区块来源超过当前预算"));
         }
         originals.insert(chunk, raw);
     }
@@ -652,6 +656,7 @@ fn entity_results(
     proof: &Proof,
     source: &impl IdentitySource,
     originals: &BTreeMap<Coord, Vec<u8>>,
+    budget: crate::editing::EditWorkBudget,
 ) -> Result<BTreeMap<Coord, Vec<u8>>, WorldError> {
     let Some(entities) = &proof.entities else {
         return Ok(BTreeMap::new());
@@ -675,7 +680,7 @@ fn entity_results(
             world,
             &proof.dimension,
             &BTreeMap::new(),
-            512 * 1024 * 1024,
+            budget.bytes(),
             || false,
         )?;
         for creation in creations(proof) {
@@ -690,24 +695,26 @@ fn entity_results(
                     before: None,
                     after: Some(raw),
                 }],
-                512 * 1024 * 1024,
+                budget.bytes(),
             )?;
         }
         Some(identities)
     } else {
         None
     };
-    entity_batch::replay_with_storage(entities, input, identities.as_ref(), false)
+    entity_batch::replay_with_storage(entities, input, identities.as_ref(), false, budget)
 }
 /// 日志恢复和首次准备共用同一验证，不接受没有领域证明的字段差异。
-pub(crate) fn verify(
+
+pub(crate) fn verify_with_budget(
     world: &WorldSummary,
     proof: &Proof,
     parts: &[(Coord, Option<&[u8]>, &[u8])],
     sidecars: &[(Coord, Option<&[u8]>, &[u8])],
     source: &impl IdentitySource,
+    budget: crate::editing::EditWorkBudget,
 ) -> Result<(), WorldError> {
-    let (regions, originals, external) = sources(world, proof, source)?;
+    let (regions, originals, external) = sources(world, proof, source, budget)?;
     let mut supplied_external = external.clone();
     let mut written_external = BTreeMap::new();
     for (chunk, before, after) in sidecars {
@@ -722,7 +729,7 @@ pub(crate) fn verify(
     if sidecars.len() != proof.external_writes.len() {
         return Err(err("共享 MCC 写入数量不符"));
     }
-    let entities = entity_results(world, proof, source, &originals)?;
+    let entities = entity_results(world, proof, source, &originals, budget)?;
     let mut supplied = BTreeMap::new();
     let mut allocated = sidecars.iter().fold(0usize, |used, (_, _, after)| {
         used.saturating_add(after.len())
@@ -734,8 +741,8 @@ pub(crate) fn verify(
             return Err(err("共享 Region 条目来源不符或重复"));
         }
         allocated = allocated.saturating_add(after.len());
-        if allocated > BUDGET {
-            return Err(err("共享 Region 候选超过 1 GiB 预算"));
+        if allocated > budget.bytes() {
+            return Err(err("共享 Region 候选超过当前预算"));
         }
     }
     let mut light_inputs = if let Some(light) = &proof.light {
@@ -821,8 +828,8 @@ pub(crate) fn verify(
             return Err(err("共享区块实体与地形组合重放不一致"));
         }
         allocated = allocated.saturating_add(actual.len());
-        if allocated > BUDGET {
-            return Err(err("共享区块重放超过 1 GiB 预算"));
+        if allocated > budget.bytes() {
+            return Err(err("共享区块重放超过当前预算"));
         }
         finals.insert(*chunk, actual);
     }
@@ -856,6 +863,7 @@ pub(crate) fn verify(
             &originals,
             &external,
             &finals,
+            budget,
         )?;
         match (expected, supplied.get(coords)) {
             (Some(expected), Some(actual)) if expected.as_slice() == *actual => written += 1,
@@ -878,6 +886,7 @@ fn prepare_common(
     world: &WorldSummary,
     mut proof: Proof,
     base: BTreeMap<Coord, Vec<u8>>,
+    budget: crate::editing::EditWorkBudget,
 ) -> Result<Candidate, WorldError> {
     let source = DiskIdentitySource;
     let chunks = needed(&proof)?;
@@ -889,7 +898,7 @@ fn prepare_common(
         if proof.storage == Storage::Alpha {
             let path = crate::alpha::existing_chunk_path(world, &proof.dimension, coords)?;
             let bytes = source
-                .read(&path)?
+                .read_limited(&path, budget.bytes() as u64)?
                 .ok_or_else(|| err("Alpha 来源文件不存在"))?;
             proof.regions.push(RegionSource {
                 coords,
@@ -906,7 +915,7 @@ fn prepare_common(
                 .iter()
                 .any(|creation| region(creation.chunk) == coords),
         )?;
-        let bytes = source.read(&path)?;
+        let bytes = source.read_limited(&path, budget.bytes() as u64)?;
         proof.regions.push(RegionSource {
             coords,
             extension,
@@ -931,7 +940,9 @@ fn prepare_common(
             .is_some()
             {
                 let path = crate::region_external::sidecar_path(&path, chunk.0, chunk.1)?;
-                let bytes = source.read(&path)?.ok_or_else(|| err("共享来源缺少 MCC"))?;
+                let bytes = source
+                    .read_limited(&path, budget.bytes() as u64)?
+                    .ok_or_else(|| err("共享来源缺少 MCC"))?;
                 proof.external_sources.push(MccSource {
                     chunk: *chunk,
                     sha: hash(&bytes),
@@ -939,11 +950,11 @@ fn prepare_common(
             }
         }
     }
-    let (regions, originals, external) = sources(world, &proof, &source)?;
+    let (regions, originals, external) = sources(world, &proof, &source, budget)?;
     if base.keys().any(|chunk| !originals.contains_key(chunk)) {
         return Err(err("共享地形阶段不在来源清单"));
     }
-    let entities = entity_results(world, &proof, &source, &originals)?;
+    let entities = entity_results(world, &proof, &source, &originals, budget)?;
     let mut after = originals.clone();
     for (chunk, raw) in base {
         after.insert(chunk, raw);
@@ -968,6 +979,7 @@ fn prepare_common(
             &originals,
             &external,
             &after,
+            budget,
         )?;
         if let Some(image) = image {
             used = used.saturating_add(image.len());
@@ -994,8 +1006,8 @@ fn prepare_common(
             });
             sidecars.push(file);
         }
-        if used > BUDGET {
-            return Err(err("共享保存候选超过 1 GiB 预算"));
+        if used > budget.bytes() {
+            return Err(err("共享保存候选超过当前预算"));
         }
     }
     let refs = parts
@@ -1018,14 +1030,15 @@ fn prepare_common(
             )
         })
         .collect::<Vec<_>>();
-    verify(world, &proof, &refs, &file_refs, &source)?;
+    verify_with_budget(world, &proof, &refs, &file_refs, &source, budget)?;
     Ok(Candidate {
         proof,
         parts,
         sidecars,
     })
 }
-pub(crate) fn prepare_native(
+
+pub(crate) fn prepare_native_with_budget(
     world: &WorldSummary,
     dimension: &str,
     chunks: Vec<NativeChunkCandidate>,
@@ -1033,6 +1046,7 @@ pub(crate) fn prepare_native(
     biomes: Vec<crate::biome_editing::Proof>,
     entities: Vec<EntityProof>,
     timestamp: u32,
+    budget: crate::editing::EditWorkBudget,
 ) -> Result<Candidate, WorldError> {
     let terrain = chunks
         .iter()
@@ -1073,15 +1087,17 @@ pub(crate) fn prepare_native(
         }),
         timestamp,
     };
-    prepare_common(world, proof, base)
+    prepare_common(world, proof, base, budget)
 }
-pub(crate) fn prepare_light(
+
+pub(crate) fn prepare_light_with_budget(
     world: &WorldSummary,
     light: BatchCandidate,
     be_history: Vec<BeProof>,
     be_chunks: &BTreeMap<Coord, Vec<u8>>,
     entities: Vec<EntityProof>,
     timestamp: u32,
+    budget: crate::editing::EditWorkBudget,
 ) -> Result<Candidate, WorldError> {
     let mut base = BTreeMap::new();
     for region in &light.regions {
@@ -1097,10 +1113,12 @@ pub(crate) fn prepare_light(
         be_chunks,
         entities,
         timestamp,
+        budget,
     )
 }
 /// 新槽保留磁盘 None；已有槽补段保留真实源摘要，只重建明确创建的基底。
-pub(crate) fn prepare_creation_light(
+
+pub(crate) fn prepare_creation_light_with_budget(
     world: &WorldSummary,
     light: RelightProof,
     blocks: &BTreeMap<Coord, Vec<u8>>,
@@ -1109,6 +1127,7 @@ pub(crate) fn prepare_creation_light(
     entities: Vec<EntityProof>,
     timestamp: u32,
     mut cancelled: impl FnMut() -> bool,
+    budget: crate::editing::EditWorkBudget,
 ) -> Result<Candidate, WorldError> {
     let sources = legacy_lighting::read_sources(&DiskIdentitySource, world, &light)?;
     let triples = sources
@@ -1139,7 +1158,7 @@ pub(crate) fn prepare_creation_light(
         return Err(err("新槽光照候选已取消"));
     }
     prepare_light_payloads(
-        world, light, base, be_history, be_chunks, entities, timestamp,
+        world, light, base, be_history, be_chunks, entities, timestamp, budget,
     )
 }
 fn prepare_light_payloads(
@@ -1150,6 +1169,7 @@ fn prepare_light_payloads(
     be_chunks: &BTreeMap<Coord, Vec<u8>>,
     entities: Vec<EntityProof>,
     timestamp: u32,
+    budget: crate::editing::EditWorkBudget,
 ) -> Result<Candidate, WorldError> {
     let dimension = light.dimension.clone();
     let mut light_sources = legacy_lighting::read_sources(&DiskIdentitySource, world, &light)?
@@ -1228,5 +1248,5 @@ fn prepare_light_payloads(
         }),
         timestamp,
     };
-    prepare_common(world, proof, base)
+    prepare_common(world, proof, base, budget)
 }

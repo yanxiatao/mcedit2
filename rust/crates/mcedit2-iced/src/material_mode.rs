@@ -173,14 +173,7 @@ pub(crate) fn covered_alpha_f32(mode: u32, alpha: f32) -> Option<f32> {
     covered_alpha_precision(mode, alpha as f64, true).map(|v| v as f32)
 }
 /// 加色层以实际 RGB 贡献参与拾取，黑色无贡献区域不创造命中面。
-pub(crate) fn covered_color(mode: u32, rgba: [f64; 4]) -> bool {
-    if mode & ADDITIVE != 0 {
-        rgba[..3].iter().any(|value| *value > 0.)
-            && (mode & (32 | CUSTOM_ALPHA_CUTOFF) == 0 || covered_alpha(mode, rgba[3]).is_some())
-    } else {
-        covered_alpha(mode, rgba[3]).is_some()
-    }
-}
+
 pub(crate) fn covered_color_f32(mode: u32, rgba: [f32; 4]) -> bool {
     if mode & ADDITIVE != 0 {
         rgba[..3].iter().any(|value| *value > 0.)
@@ -223,19 +216,19 @@ pub(crate) fn kind(value: u32) -> u32 {
 /// class. Vanilla and ordinary OBJ source materials remain unchanged.
 pub(crate) fn encode(
     inferred: u32,
-    gltf_mode: Option<&str>,
-    gltf_cutoff: f32,
+    alpha_mode: Option<&str>,
+    alpha_cutoff: f32,
     double_sided: bool,
 ) -> u32 {
-    let Some(mode) = gltf_mode else {
+    let Some(mode) = alpha_mode else {
         return inferred;
     };
     let face = if double_sided { 0 } else { SINGLE_SIDED };
     match mode {
         "OPAQUE" => face | FORCE_OPAQUE_ALPHA,
         "MASK" => {
-            let cutoff = if gltf_cutoff.is_finite() {
-                gltf_cutoff.clamp(0.0, 1.0)
+            let cutoff = if alpha_cutoff.is_finite() {
+                alpha_cutoff.clamp(0.0, 1.0)
             } else {
                 0.5
             };
@@ -251,14 +244,10 @@ pub(crate) fn encode(
 }
 
 #[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
     fn shared_coverage_matches_shader_thresholds_and_authored_alpha() {
         let solid = encode(2, Some("OPAQUE"), 0.5, false);
         assert_eq!(covered_alpha(solid, 0.0), Some(1.0));
@@ -275,6 +264,7 @@ mod tests {
         assert_eq!(covered_alpha(2, f64::NAN), None);
     }
 
+    #[test]
     fn explicit_modes_override_inferred_texture_transparency() {
         let solid = encode(2, Some("OPAQUE"), 0.5, false);
         assert_eq!(kind(solid), 0);
@@ -284,7 +274,8 @@ mod tests {
         assert_eq!(encode(2, None, 0.1, false), 2);
     }
 
-    fn gltf_mask_cutoff_and_two_sided_flags_are_preserved() {
+    #[test]
+    fn material_mask_cutoff_and_two_sided_flags_are_preserved() {
         let mask = encode(0, Some("MASK"), 0.75, false);
         assert_eq!(kind(mask), 1);
         assert_eq!(mask & SINGLE_SIDED, SINGLE_SIDED);
@@ -294,14 +285,5 @@ mod tests {
             (encode(0, Some("MASK"), 0.0, true) >> CUTOFF_SHIFT) & 255,
             0
         );
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Materials {
-            shared_coverage_matches_shader_thresholds_and_authored_alpha();
-            explicit_modes_override_inferred_texture_transparency();
-            gltf_mask_cutoff_and_two_sided_flags_are_preserved();
-        }
     }
 }

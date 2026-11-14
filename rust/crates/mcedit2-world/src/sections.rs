@@ -275,9 +275,6 @@ impl<'a> Reader<'a> {
     }
 }
 pub(crate) fn parse_root(data: &[u8]) -> Result<Tag<'_>> {
-    if data.len() > 64 * 1024 * 1024 {
-        return Err(error("NBT exceeds 64 MiB"));
-    }
     let mut r = Reader { buf: data, at: 0 };
     if r.byte()? != 10 {
         return Err(error("Original root is not a Compound"));
@@ -1829,11 +1826,6 @@ pub(crate) fn patch_numeric_with_authorized_be(
 }
 
 #[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     fn named(kind: u8, name: &str, payload: &[u8]) -> Vec<u8> {
@@ -1893,6 +1885,7 @@ mod tests {
         )
     }
 
+    #[test]
     fn modern_chunk_decoding_preserves_biome_for_read_only_surface_queries() {
         let mut block_palette = vec![10];
         block_palette.extend(1i32.to_be_bytes());
@@ -1931,6 +1924,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn modern_biome_quart_palette_reads_signed_height_and_xz() {
         let mut palette = vec![8];
         palette.extend(2i32.to_be_bytes());
@@ -1964,6 +1958,7 @@ mod tests {
         assert_eq!(section.biome(0, 16, 0), None);
     }
 
+    #[test]
     fn in_memory_palette_patch_changes_only_existing_packed_words() {
         let source = modern_chunk(-4, &vec![0; 256]);
         let original_len = source.len();
@@ -2033,6 +2028,7 @@ mod tests {
         assert!(differences > 0 && differences <= 8);
     }
 
+    #[test]
     fn palette_patch_refuses_new_state_and_duplicate_or_wrong_source() {
         let source = modern_chunk(-4, &vec![0; 256]);
         let stone = State {
@@ -2090,6 +2086,7 @@ mod tests {
         .is_err());
     }
 
+    #[test]
     fn grow_modern_palette_and_preserve_all_untouched_originals() {
         let old = modern_chunk(-4, &vec![0; 256]);
         let original = decode_sections(&old).unwrap();
@@ -2149,6 +2146,7 @@ mod tests {
         )
     }
 
+    #[test]
     fn grow_one_state_without_data_and_keep_modded_nbt_bytes() {
         let old = single_state_modern_no_data();
         let root = parse_root(&old).unwrap();
@@ -2231,6 +2229,7 @@ mod tests {
             .any(|x| x == b"exact bytes retained"));
     }
 
+    #[test]
     fn palette_growth_rejects_duplicate_target_and_original_mismatch() {
         let old = single_state_modern_no_data();
         let stone = State {
@@ -2301,6 +2300,7 @@ mod tests {
         )
     }
 
+    #[test]
     fn legacy_named_palette_grows_from_four_to_five_bits_with_crossing_words() {
         let old = sixteen_palette_old_named(1631); // Java 1.13.x
         let changed = patch_named_growing_palette(
@@ -2340,6 +2340,7 @@ mod tests {
             .any(|x| x == b"original opaque NBT"));
     }
 
+    #[test]
     fn ambiguous_legacy_version_rejects_palette_bit_growth() {
         let old = sixteen_palette_old_named(2400); // unsupported transition version
         assert!(patch_named_growing_palette(
@@ -2361,6 +2362,7 @@ mod tests {
         .is_err());
     }
 
+    #[test]
     fn latest_snapshot_26_4_snapshot_5_5125_reuses_structural_layout_without_guessing() {
         let words = vec![0u64; 256];
         let mut original = modern_chunk(-4, &words);
@@ -2376,6 +2378,7 @@ mod tests {
         assert_eq!(result.block(0, -64, 0).unwrap().name, "minecraft:stone");
     }
 
+    #[test]
     fn minecraft_26_3_padded_and_negative_y() {
         let mut data = vec![0u64; 256];
         let n = 306usize;
@@ -2391,6 +2394,7 @@ mod tests {
         assert_eq!(raw, original);
     }
 
+    #[test]
     fn sorted_signed_section_lookup_is_exact_and_never_infers_absent_y() {
         let state = |name: &str| State {
             name: name.into(),
@@ -2427,6 +2431,7 @@ mod tests {
         assert!(chunk.block(16, 0, 0).is_none());
     }
 
+    #[test]
     fn contiguous_and_padded_five_bit_encoding() {
         let mut contiguous = vec![0u64; 320];
         let mut padded = vec![0u64; 342];
@@ -2436,6 +2441,7 @@ mod tests {
         assert_eq!(unpack(17, &padded).unwrap()[12], 1);
     }
 
+    #[test]
     fn reject_unknown_palette_and_invalid_index() {
         assert!(unpack(0, &[]).is_err());
         assert!(unpack(2, &[]).is_err());
@@ -2443,25 +2449,5 @@ mod tests {
         words[0] = 2;
         assert!(unpack(2, &words).is_err());
         assert!(decode_sections(&modern_chunk(-4, &[0; 15])).is_err());
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Formats {
-            modern_chunk_decoding_preserves_biome_for_read_only_surface_queries();
-            modern_biome_quart_palette_reads_signed_height_and_xz();
-            in_memory_palette_patch_changes_only_existing_packed_words();
-            palette_patch_refuses_new_state_and_duplicate_or_wrong_source();
-            grow_modern_palette_and_preserve_all_untouched_originals();
-            grow_one_state_without_data_and_keep_modded_nbt_bytes();
-            palette_growth_rejects_duplicate_target_and_original_mismatch();
-            legacy_named_palette_grows_from_four_to_five_bits_with_crossing_words();
-            ambiguous_legacy_version_rejects_palette_bit_growth();
-            latest_snapshot_26_4_snapshot_5_5125_reuses_structural_layout_without_guessing();
-            minecraft_26_3_padded_and_negative_y();
-            sorted_signed_section_lookup_is_exact_and_never_infers_absent_y();
-            contiguous_and_padded_five_bit_encoding();
-            reject_unknown_palette_and_invalid_index();
-        }
     }
 }

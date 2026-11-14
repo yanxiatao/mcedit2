@@ -199,14 +199,11 @@ fn source_pick_name_switches_language_immediately_and_preserves_original_state()
     );
 }
 
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    if category == crate::test_categories::Category::Names {
-        directory_and_zip_language_layers_override_only_matching_keys_and_locales();
-        malformed_language_overlay_is_diagnosed_without_partially_overwriting_names();
-        rich_text_entries_preserve_plain_names_and_unresolved_overrides_do_not_resurrect_old_values(
-        );
-        client_language_reads_only_the_asset_index_named_by_its_version_metadata();
-        source_pick_name_switches_language_immediately_and_preserves_original_state();
-    }
+#[test]
+fn names_behavior() {
+    directory_and_zip_language_layers_override_only_matching_keys_and_locales();
+    malformed_language_overlay_is_diagnosed_without_partially_overwriting_names();
+    rich_text_entries_preserve_plain_names_and_unresolved_overrides_do_not_resurrect_old_values();
+    client_language_reads_only_the_asset_index_named_by_its_version_metadata();
+    source_pick_name_switches_language_immediately_and_preserves_original_state();
 }

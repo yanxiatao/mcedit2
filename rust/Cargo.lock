@@ -2254,9 +2254,9 @@ checksum = "32f454fd6831a29c0e827ed075bca2a15be201bd57f4168f0fd1041124eab17e"
 
 [[package]]
 name = "libc"
-version = "0.2.191"
+version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
+checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libffi"
@@ -2612,6 +2612,7 @@ dependencies = [
 name = "mcedit2-plugins"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "log",
  "mcedit2-world",
  "serde",
@@ -2624,6 +2625,7 @@ dependencies = [
 name = "mcedit2-python"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "mcedit2-plugins",
  "mcedit2-world",
  "rustpython-pylib",

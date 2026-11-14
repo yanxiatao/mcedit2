@@ -1241,7 +1241,3 @@ impl App {
 #[cfg(test)]
 #[path = "scene_layer_tests.rs"]
 pub(crate) mod tests;
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}

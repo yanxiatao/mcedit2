@@ -13,6 +13,7 @@ fn redraw(scene: &GpuScene, size: Size) -> Option<shader::Action<Message>> {
     )
 }
 
+#[test]
 fn shader_requests_redraw_while_isometric_worker_runs_then_stops_when_complete() {
     let fixture = crate::textures::java_obj_tests::fixture();
     let mut view = crate::textures::java_obj_tests::isometric_scene(fixture.open());
@@ -53,6 +54,7 @@ fn shader_requests_redraw_while_isometric_worker_runs_then_stops_when_complete()
     }
 }
 
+#[test]
 fn shader_requests_redraw_until_perspective_source_mesh_is_presentable() {
     let fixture = crate::textures::java_obj_tests::fixture();
     let view = crate::textures::java_obj_tests::scene(fixture.open());
@@ -111,6 +113,7 @@ fn shader_requests_redraw_until_perspective_source_mesh_is_presentable() {
     }
 }
 
+#[test]
 fn incomplete_stream_snapshot_resumes_after_cancellation_despite_an_old_complete_cache() {
     let (app, mut view, mesh, _) = crate::picking_integration_tests::fixture();
     let world = app.worlds[0].clone();
@@ -165,14 +168,5 @@ fn incomplete_stream_snapshot_resumes_after_cancellation_despite_an_old_complete
             "部分发布的流式网格没有恢复"
         );
         std::thread::sleep(std::time::Duration::from_millis(2));
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    if category == crate::test_categories::Category::Background {
-        shader_requests_redraw_while_isometric_worker_runs_then_stops_when_complete();
-        shader_requests_redraw_until_perspective_source_mesh_is_presentable();
-        incomplete_stream_snapshot_resumes_after_cancellation_despite_an_old_complete_cache();
     }
 }

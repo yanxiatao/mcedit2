@@ -375,6 +375,7 @@ fn name(value: &str) -> Result<(), String> {
 }
 #[derive(Default)]
 struct Pending {
+    blocked: std::collections::BTreeSet<String>,
     entries: BTreeMap<Key, (u64, Entry)>,
     brush: Option<serde_json::Value>,
     selection: Option<serde_json::Value>,
@@ -461,12 +462,39 @@ impl Writer {
                         .into_values()
                         .collect::<Vec<_>>();
                     entries.sort_by_key(|(sequence, _)| *sequence);
+                    if pending.blocked.contains("views") {
+                        entries.clear();
+                    }
+                    if pending.blocked.contains("brush") {
+                        pending.brush = None;
+                    }
+                    if pending.blocked.contains("selection") {
+                        pending.selection = None;
+                    }
+                    if pending.blocked.contains("desktop") {
+                        pending.desktop = None;
+                    }
+                    if pending.blocked.contains("nbt_search") {
+                        pending.search = None;
+                    }
+                    if pending.blocked.contains("block_definitions") {
+                        pending.block_definitions = None;
+                    }
                     let brush = pending.brush.take();
                     let selection = pending.selection.take();
                     let desktop = pending.desktop.take();
                     let search = pending.search.take();
                     let block_definitions = pending.block_definitions.take();
                     drop(pending);
+                    if entries.is_empty()
+                        && brush.is_none()
+                        && selection.is_none()
+                        && desktop.is_none()
+                        && search.is_none()
+                        && block_definitions.is_none()
+                    {
+                        continue;
+                    }
                     let result = launch::update_rust_prefs(|values| {
                         if !entries.is_empty() {
                             let mut library = Library::read(values)?;
@@ -576,6 +604,7 @@ pub(crate) struct State {
     pub(crate) bookmark_name: String,
     pub(crate) status: String,
     persistence_error: Option<String>,
+    pub(crate) load_errors: Vec<String>,
 }
 impl State {
     pub(crate) fn queue_block_definitions(&self, value: serde_json::Value) -> Result<(), String> {
@@ -645,19 +674,52 @@ impl State {
             .submit_desktop(value);
         Ok(())
     }
+    /// Invalid optional settings disable persistence of that section only;
+    /// preserve its original bytes and report the error to the user.
+    pub(crate) fn optional<T: Default>(&mut self, section: &str, result: Result<T, String>) -> T {
+        match result {
+            Ok(value) => value,
+            Err(error) => {
+                let message = format!("{section} 设置未加载：{error}。本次仅使用会话设置，原配置保留；可修复配置或使用 -resetPrefs。");
+                log::error!("[preferences] {message}");
+                self.load_errors.push(message);
+                if let Some(writer) = &self.writer {
+                    writer
+                        .shared
+                        .0
+                        .lock()
+                        .expect("配置队列锁被毒化")
+                        .blocked
+                        .insert(section.into());
+                }
+                T::default()
+            }
+        }
+    }
     pub(crate) fn load() -> Result<(Self, crate::desktop_state::Saved), String> {
-        let values = launch::read_rust_prefs().map_err(|e| e.to_string())?;
-        let library = Library::read(&values)?;
-        let desktop = crate::desktop_state::Saved::read(&values)?;
-        let writer = Writer::new()?;
-        Ok((
-            Self {
-                library,
-                writer: Some(writer),
-                ..Default::default()
-            },
-            desktop,
-        ))
+        let mut state = Self {
+            writer: Some(Writer::new()?),
+            ..Default::default()
+        };
+        let values = match launch::read_rust_prefs() {
+            Ok(values) => values,
+            Err(error) => {
+                for section in [
+                    "views",
+                    "desktop",
+                    "brush",
+                    "selection",
+                    "nbt_search",
+                    "block_definitions",
+                ] {
+                    state.optional::<()>(section, Err(error.to_string()));
+                }
+                Default::default()
+            }
+        };
+        state.library = state.optional("views", Library::read(&values));
+        let desktop = state.optional("desktop", crate::desktop_state::Saved::read(&values));
+        Ok((state, desktop))
     }
     pub(crate) fn dimension(&self, root: &std::path::Path) -> Option<&str> {
         self.library

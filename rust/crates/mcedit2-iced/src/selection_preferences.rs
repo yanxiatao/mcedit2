@@ -115,7 +115,8 @@ pub(crate) fn restore(app: &mut App) {
             // 两种工具不能同时启用；本队列在一次写入中保存切换后的完整状态。
             if saved.mouse && crate::brush_stroke::enabled(app) {
                 let error = "选框和笔刷设置同时启用，配置工具状态冲突";
-                log::error!("[selection-preferences] {error}");
+                app.view_state
+                    .optional::<()>("selection", Err(error.into()));
                 app.selection_edit.preferences_report = error.into();
                 return;
             }
@@ -127,8 +128,11 @@ pub(crate) fn restore(app: &mut App) {
         }
         Ok(None) => (),
         Err(error) => {
-            log::error!("[selection-preferences] {error}");
+            app.view_state
+                .optional::<()>("selection", Err(error.clone()));
             app.selection_edit.preferences_report = format!("选框设置读取失败：{error}");
+            app.messages
+                .push(app.selection_edit.preferences_report.clone());
         }
     }
 }

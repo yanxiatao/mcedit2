@@ -9,6 +9,7 @@ fn view() -> View {
     }
 }
 
+#[test]
 fn source_mesh_bounds_projection_and_parallel_ray_picking_agree_at_all_aspects() {
     let (mut app, scene, mesh, request) = crate::picking_integration_tests::fixture();
     let original = request.hit.owner.unwrap();
@@ -111,6 +112,7 @@ fn source_mesh_bounds_projection_and_parallel_ray_picking_agree_at_all_aspects()
     assert_eq!(app.current_session((0, 0)).unwrap().pending_cells(), 0);
 }
 
+#[test]
 fn orthographic_uniform_preserves_f64_world_origin_pan_zoom_and_depth() {
     let bounds = Bounds {
         minimum: [29_999_980.5, -64.5, -29_999_980.5],
@@ -152,6 +154,7 @@ fn orthographic_uniform_preserves_f64_world_origin_pan_zoom_and_depth() {
     }
 }
 
+#[test]
 fn scrolled_world_orthographic_controls_pick_original_source_and_rotate_by_raw_delta() {
     let (mut app, scene, mesh, request) = crate::picking_integration_tests::fixture();
     *app.spectator_presented_view.lock().unwrap() = Some(crate::spectator::PresentedView {
@@ -359,13 +362,4 @@ fn scrolled_world_orthographic_controls_pick_original_source_and_rotate_by_raw_d
     );
     assert_eq!(app.spectator_camera, flown);
     assert_eq!(app.current_session((0, 0)).unwrap().pending_cells(), 0);
-}
-
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    if category == crate::test_categories::Category::Rendering {
-        source_mesh_bounds_projection_and_parallel_ray_picking_agree_at_all_aspects();
-        orthographic_uniform_preserves_f64_world_origin_pan_zoom_and_depth();
-        scrolled_world_orthographic_controls_pick_original_source_and_rotate_by_raw_delta();
-    }
 }

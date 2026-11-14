@@ -767,11 +767,8 @@ fn export_view(app: &App) -> Element<'_, Message> {
     ].spacing(8).into()
 }
 
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    if category != crate::test_categories::Category::Background {
-        return;
-    }
+#[test]
+fn background_behavior() {
     large_exchange_pipeline();
     use crate::picking_integration_tests::{edit_task_output, fixture};
     use mcedit2_world::{

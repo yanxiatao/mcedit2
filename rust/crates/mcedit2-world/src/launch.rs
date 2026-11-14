@@ -215,10 +215,6 @@ pub fn reset_rust_prefs() -> std::io::Result<()> {
     }
     Ok(())
 }
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
 
 #[cfg(test)]
 mod tests {
@@ -227,6 +223,7 @@ mod tests {
         parse(raw.iter().map(OsString::from)).unwrap()
     }
 
+    #[test]
     fn original_all_flags_and_two_files() {
         let v = args(&[
             "-debug",
@@ -249,6 +246,7 @@ mod tests {
         assert_eq!(v.verbosity, 2);
     }
 
+    #[test]
     fn python_eval_arguments_select_native_gui_context() {
         let v = args(&["-eval", "print(123)"]);
         assert_eq!(v.eval, Some(OsString::from("print(123)")));
@@ -260,6 +258,7 @@ mod tests {
         assert_eq!(args(&["-eval=abc"]).eval, Some(OsString::from("abc")));
     }
 
+    #[test]
     fn original_help_and_double_dash() {
         let inspect = args(&["--inspect", "-view", "含 空格/level.dat"]);
         assert!(inspect.inspect && inspect.view);
@@ -275,6 +274,7 @@ mod tests {
         assert!(!v.view);
     }
 
+    #[test]
     fn missing_python_arg_and_unknown_flag_are_visible_errors() {
         assert_eq!(
             parse(vec![OsString::from("-eval")]),
@@ -284,15 +284,5 @@ mod tests {
             parse(vec![OsString::from("-unknown")]),
             Err(Error::Unknown("-unknown".into()))
         );
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Formats {
-            original_all_flags_and_two_files();
-            python_eval_arguments_select_native_gui_context();
-            original_help_and_double_dash();
-            missing_python_arg_and_unknown_flag_are_visible_errors();
-        }
     }
 }

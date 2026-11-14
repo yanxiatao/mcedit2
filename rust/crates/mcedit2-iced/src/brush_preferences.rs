@@ -156,7 +156,7 @@ pub(crate) fn restore(app: &mut App) {
         }
         Ok(None) => {}
         Err(error) => {
-            log::error!("[brush-preferences] {error}");
+            app.view_state.optional::<()>("brush", Err(error.clone()));
             app.block_edit.brush_preferences_report = format!("笔刷设置读取失败：{error}");
             app.messages
                 .push(app.block_edit.brush_preferences_report.clone());
@@ -181,6 +181,21 @@ pub(crate) fn remember(app: &mut App) {
 
 #[cfg(test)]
 pub(super) fn run_tests() {
+    // Preferences change process-wide environment; run this case in its own
+    // harness process so other independently named tests remain parallel-safe.
+    if std::env::var_os("MCEDIT2_PREFERENCES_TEST_CHILD").is_none() {
+        let name = std::thread::current()
+            .name()
+            .expect("test harness names its threads")
+            .to_owned();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &name, "--test-threads=1"])
+            .env("MCEDIT2_PREFERENCES_TEST_CHILD", "1")
+            .status()
+            .unwrap();
+        assert!(status.success(), "isolated preferences test failed");
+        return;
+    }
     use std::{ffi::OsString, path::PathBuf};
     struct Scope {
         root: PathBuf,
@@ -324,4 +339,33 @@ pub(super) fn run_tests() {
         Action::RuleTarget(revision, 0, "minecraft:air".into()),
     );
     assert_eq!(app.block_edit.stroke.rules[0].target, "minecraft:air");
+    // A damaged optional section must neither prevent editor startup nor be
+    // overwritten by automatic preference persistence.
+    launch::update_rust_prefs(|values| {
+        values.insert("desktop".into(), serde_json::json!({"version":99}));
+        values.insert("selection".into(), serde_json::json!({"version":99}));
+        Ok(())
+    })
+    .unwrap();
+    let path = launch::rust_prefs_path().unwrap();
+    let original = std::fs::read(&path).unwrap();
+    let (mut booted, task) = App::boot(Default::default(), true).unwrap();
+    assert!(booted
+        .messages
+        .iter()
+        .any(|message| message.contains("desktop")));
+    assert!(booted
+        .block_edit
+        .brush_preferences_report
+        .contains("读取失败"));
+    assert!(booted
+        .selection_edit
+        .preferences_report
+        .contains("读取失败"));
+    remember(&mut booted);
+    crate::selection_preferences::remember(&mut booted);
+    crate::desktop_state::remember(&mut booted);
+    drop(task);
+    drop(booted);
+    assert_eq!(std::fs::read(path).unwrap(), original);
 }

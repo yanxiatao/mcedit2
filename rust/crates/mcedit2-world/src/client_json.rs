@@ -469,11 +469,8 @@ fn number(bytes: &[u8]) -> bool {
     i == bytes.len()
 }
 
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    if category != crate::test_categories::Category::Formats {
-        return;
-    }
+#[test]
+fn formats_behavior() {
     let native: Value =
         serde_json::from_str(include_str!("../tests/fixtures/java-resource-1.21.1.json")).unwrap();
     for row in native["documents"].as_array().unwrap() {

@@ -173,6 +173,8 @@ impl Worker {
         timeout: Duration,
     ) -> Result<Self, String> {
         let mut command = Command::new(executable);
+        #[cfg(unix)]
+        super::process_group::configure(&mut command);
         #[cfg(windows)]
         let job = super::process_owner::Job::new()?;
         command
@@ -190,6 +192,8 @@ impl Worker {
         let mut child = command
             .spawn()
             .map_err(|error| format!("无法启动工具宿主 {}：{error}", executable.display()))?;
+        #[cfg(unix)]
+        let group = super::process_group::Group::new(child.id());
         #[cfg(windows)]
         job.attach(&mut child)?;
         let input = child.stdin.take().expect("已请求工具输入管道");
@@ -204,6 +208,8 @@ impl Worker {
             last_bindings: None,
             generation: 0,
             process: Some(Process {
+                #[cfg(unix)]
+                group,
                 #[cfg(windows)]
                 job: Some(job),
                 child,
@@ -293,6 +299,8 @@ impl Drop for Worker {
 }
 
 struct Process {
+    #[cfg(unix)]
+    group: super::process_group::Group,
     #[cfg(windows)]
     job: Option<super::process_owner::Job>,
     child: Child,
@@ -354,6 +362,8 @@ impl Process {
         result
     }
     fn terminate(&mut self) -> Result<std::process::ExitStatus, String> {
+        #[cfg(unix)]
+        self.group.terminate()?;
         // 关闭 job 同时释放继承管道的子进程，随后才能完整回收管道线程。
         #[cfg(windows)]
         drop(self.job.take());

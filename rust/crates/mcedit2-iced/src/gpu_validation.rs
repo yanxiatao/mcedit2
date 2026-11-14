@@ -7,6 +7,9 @@ use std::time::Duration;
 const EDGE: u32 = 16;
 const ROW_BYTES: u32 = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
 
+#[test]
+#[ignore = "requires local GPU / installed Minecraft resources"]
+
 fn hardware_animated_materials_keep_geometry_and_shared_atlas() {
     let (_fixture, bank) = crate::textures::animation_tests::fixture();
     let atlas = bank.atlas().unwrap();
@@ -133,6 +136,9 @@ fn installed_bank(paths: &[std::path::PathBuf]) -> crate::textures::TextureBank 
     )
     .unwrap()
 }
+
+#[test]
+#[ignore = "requires local GPU / installed Minecraft resources"]
 
 fn hardware_world_orthographic_reuses_resident_mesh_and_matches_cpu_projection() {
     let fixture = crate::textures::java_obj_tests::fixture();
@@ -358,6 +364,9 @@ fn hardware_world_orthographic_reuses_resident_mesh_and_matches_cpu_projection()
     assert_eq!(gpu.pixels, expected_pixels);
 }
 
+#[test]
+#[ignore = "requires local GPU / installed Minecraft resources"]
+
 fn hardware_perspective_zoom_reuses_resident_source_mesh() {
     let fixture = crate::textures::java_obj_tests::fixture();
     let mut scene = crate::textures::java_obj_tests::scene(fixture.open());
@@ -449,6 +458,9 @@ fn hardware_perspective_zoom_reuses_resident_source_mesh() {
     }
 }
 
+#[test]
+#[ignore = "requires local GPU / installed Minecraft resources"]
+
 fn hardware_vanilla_special_models_real_client_pixels() {
     use mcedit2_world::editing::parse_state;
     let path = std::path::PathBuf::from(
@@ -524,6 +536,9 @@ fn hardware_vanilla_special_models_real_client_pixels() {
     assert_isometric_models_render(bank, &states);
 }
 
+#[test]
+#[ignore = "requires local GPU / installed Minecraft resources"]
+
 fn hardware_uv_lock_root_models_and_source_picking() {
     let fixture = crate::resource_models::uv_lock_tests::fixture();
     let bank = fixture.open();
@@ -531,6 +546,9 @@ fn hardware_uv_lock_root_models_and_source_picking() {
     assert_source_models_render(Arc::clone(&bank), &states);
     assert_isometric_models_render(bank, &states);
 }
+
+#[test]
+#[ignore = "requires local GPU / installed Minecraft resources"]
 
 fn hardware_canvas_raster_matches_gpu_material_and_depth_pixels() {
     use crate::canvas_raster::{
@@ -617,6 +635,9 @@ fn hardware_canvas_raster_matches_gpu_material_and_depth_pixels() {
 }
 
 /// 绘制、纹理像素差异及等轴源拾取共用验证，适用于实际客户端和诊断资源包。
+#[test]
+#[ignore = "requires local GPU / installed Minecraft resources"]
+
 fn hardware_full_instance_bed_canvas_gpu_pixels() {
     let path = std::env::var_os("MCEDIT2_TEST_WORLD").expect("设置 MCEDIT2_TEST_WORLD");
     let world = mcedit2_world::inspect_world(std::path::PathBuf::from(path)).unwrap();
@@ -968,6 +989,9 @@ fn mesh_shape(mesh: &crate::spectator::StreamMesh) -> ([f64; 6], f64) {
     (bounds, area)
 }
 
+#[test]
+#[ignore = "requires local GPU / installed Minecraft resources"]
+
 fn hardware_isometric_java_obj_materials_and_picking_pixels() {
     let fixture = crate::textures::java_obj_tests::fixture();
     let bank = fixture.open();
@@ -1068,6 +1092,9 @@ fn hardware_isometric_java_obj_materials_and_picking_pixels() {
         );
     }
 }
+
+#[test]
+#[ignore = "requires local GPU / installed Minecraft resources"]
 
 fn hardware_java_obj_composite_textures_colors_and_picking_pixels() {
     let fixture = crate::textures::java_obj_tests::fixture();
@@ -1744,6 +1771,9 @@ impl GpuProbe {
     }
 }
 
+#[test]
+#[ignore = "requires local GPU / installed Minecraft resources"]
+
 fn hardware_compact_instances_match_expanded_pixels_across_segments_and_samplers() {
     use crate::world_mesh::WorldQuad;
     let mut gpu = GpuProbe::with_limits(wgpu::Limits {
@@ -2180,6 +2210,9 @@ fn assert_pixel(actual: [u8; 4], expected: [u8; 4]) {
     );
 }
 
+#[test]
+#[ignore = "requires local GPU / installed Minecraft resources"]
+
 fn hardware_composite_root_transform_and_empty_model_pixels() {
     use crate::{
         spectator::{Camera, SpectatorScene},
@@ -2363,6 +2396,9 @@ fn hardware_composite_root_transform_and_empty_model_pixels() {
     assert_pixel(gpu.pixel_primitive(primitive(empty, other)), empty_pixel);
     std::fs::remove_file(path).unwrap();
 }
+
+#[test]
+#[ignore = "requires local GPU / installed Minecraft resources"]
 
 fn hardware_real_client_materials_reach_gpu_pixels() {
     use crate::isometric::Face;
@@ -2570,6 +2606,9 @@ fn hardware_real_client_materials_reach_gpu_pixels() {
     }
 }
 
+#[test]
+#[ignore = "requires local GPU / installed Minecraft resources"]
+
 fn hardware_depth_alpha_and_culling_pixels() {
     let mut gpu = GpuProbe::new();
     // 深度较远的蓝面不能覆盖先提交的近处绿面。
@@ -2650,6 +2689,9 @@ fn hardware_depth_alpha_and_culling_pixels() {
         .collect();
     assert_pixel(gpu.pixel(back), [0; 4]);
 }
+
+#[test]
+#[ignore = "requires local GPU / installed Minecraft resources"]
 
 fn hardware_stream_frustum_preserves_resident_mesh_on_camera_change() {
     let mut gpu = GpuProbe::new();
@@ -2819,6 +2861,9 @@ fn hardware_stream_frustum_preserves_resident_mesh_on_camera_change() {
     assert!(Arc::ptr_eq(&retained.source.members[0].source, &mixed));
 }
 
+#[test]
+#[ignore = "requires local GPU / installed Minecraft resources"]
+
 fn hardware_unused_atlas_pages_preserve_resident_geometry() {
     use crate::{spectator::StreamMesh, textures::AtlasPage};
     for mode in [0, crate::material_mode::ORDERED_OPAQUE, 2] {
@@ -2963,6 +3008,9 @@ fn hardware_unused_atlas_pages_preserve_resident_geometry() {
 }
 
 /// 一个完整交接流程同时核对分帧限额、旧材质/拾取保留、重用和源取消。
+#[test]
+#[ignore = "requires local GPU / installed Minecraft resources"]
+
 fn hardware_staged_world_handoff_keeps_pixels_atlas_and_picking_atomic() {
     super::upload::verify_ready_delivery();
     use crate::{
@@ -3791,6 +3839,8 @@ fn hardware_staged_world_handoff_keeps_pixels_atlas_and_picking_atomic() {
     assert_pixel(gpu.pixels[(200 * 100 + 100) as usize], [255, 0, 0, 255]);
 }
 
+#[test]
+#[ignore = "requires local GPU / installed Minecraft resources"]
 #[cfg(test)]
 fn hardware_static_entity_models_share_depth_alpha_atlas_and_read_only_picking() {
     let (fixture, bank) = crate::entity_geometry::tests::assets();
@@ -3927,6 +3977,9 @@ fn hardware_static_entity_models_share_depth_alpha_atlas_and_read_only_picking()
     scene.entity_enabled = true;
     assert_pixel(gpu.pixel_primitive(draw(&scene)), [255; 4]);
 }
+
+#[test]
+#[ignore = "requires local GPU / installed Minecraft resources"]
 
 fn hardware_ordered_layers_keep_page_order_and_cutout_holes() {
     use crate::textures::AtlasPage;
@@ -4099,6 +4152,9 @@ fn hardware_ordered_layers_keep_page_order_and_cutout_holes() {
 
 #[path = "gpu_greedy_tests.rs"]
 mod greedy_tests;
+#[test]
+#[ignore = "requires local GPU / installed Minecraft resources"]
+
 fn hardware_brush_cursor_isolated_pixels_and_shared_atlas() {
     use crate::brush_cursor::{CursorPipeline, CursorPrimitive};
     let (_fixture, mesh, camera) = crate::brush_cursor::tests::gpu_fixture();
@@ -4201,102 +4257,66 @@ fn hardware_brush_cursor_isolated_pixels_and_shared_atlas() {
         "关闭视图后共享 GPU 图集不得被全局缓存保活"
     );
 }
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    if category == crate::test_categories::Category::Rendering
-        && std::env::var_os("MCEDIT2_ORDERED_GPU_SMALL").is_some()
-    {
-        hardware_ordered_layers_keep_page_order_and_cutout_holes();
-        hardware_staged_world_handoff_keeps_pixels_atlas_and_picking_atomic();
-        hardware_unused_atlas_pages_preserve_resident_geometry();
+
+#[test]
+#[ignore = "requires local GPU / installed Minecraft resources"]
+fn hardware_behavior() {
+    let (_fixture, bank) = crate::entity_geometry::tests::assets();
+    let source = crate::entity_geometry::tests::source("minecraft:creeper", [0.5, 0., 3.5]);
+    let scene = crate::entity_geometry::tests::scene(bank, source);
+    let terrain = scene.cache.lock().unwrap().clone().unwrap();
+    let mesh =
+        crate::entity_geometry::compose(&terrain, scene.entity_frame.as_ref(), &scene.entity_cache);
+    let mut mixed = (*mesh).clone();
+    let mut mixed_chunks = mixed.chunks.to_vec();
+    let mut quads = mixed_chunks[0].quads().as_ref().clone();
+    let half = quads.len() / 2;
+    for quad in quads.iter_mut().skip(half) {
+        quad.mode = (quad.mode & !3) | 2;
     }
-    if matches!(
-        category,
-        crate::test_categories::Category::Rendering | crate::test_categories::Category::Hardware
-    ) && std::env::var_os("MCEDIT2_GPU_PROFILE_SMALL").is_some()
-    {
-        let (_fixture, bank) = crate::entity_geometry::tests::assets();
-        let source = crate::entity_geometry::tests::source("minecraft:creeper", [0.5, 0., 3.5]);
-        let scene = crate::entity_geometry::tests::scene(bank, source);
-        let terrain = scene.cache.lock().unwrap().clone().unwrap();
-        let mesh = crate::entity_geometry::compose(
-            &terrain,
-            scene.entity_frame.as_ref(),
-            &scene.entity_cache,
-        );
-        let mut mixed = (*mesh).clone();
-        let mut mixed_chunks = mixed.chunks.to_vec();
-        let mut quads = mixed_chunks[0].quads().as_ref().clone();
-        let half = quads.len() / 2;
-        for quad in quads.iter_mut().skip(half) {
-            quad.mode = (quad.mode & !3) | 2;
-        }
-        mixed_chunks[0] = crate::spectator::MeshChunk::new(
-            mixed_chunks[0].key,
-            mixed_chunks[0].origin,
-            Arc::new(quads),
-            Arc::clone(&mixed_chunks[0].picking),
-        );
-        mixed.chunks = mixed_chunks.into();
-        let mixed = Arc::new(mixed);
-        let result = profile_world(
-            Arc::clone(&mixed),
-            scene.camera,
-            WorldProfile {
-                y32: false,
-                material_hints: false,
-                ..Default::default()
-            },
-        );
-        let y32 = profile_world(mixed, scene.camera, WorldProfile::default());
-        assert_eq!(
-            result["pixel_hash"], y32["pixel_hash"],
-            "高度分桶改变了小场景像素"
-        );
-        eprintln!("小场景生产通道 GPU 计时：{result}");
-        assert_eq!(
-            result["timestamp_supported"], true,
-            "GPU 时间戳不可用：{result}"
-        );
-        let frames = result["frames"].as_array().unwrap();
-        assert!(frames[..6]
-            .iter()
-            .all(|frame| frame["world_pass_issued"] == false && frame["opaque_ms"].is_null()));
-        assert!(frames[6..]
-            .iter()
-            .all(|frame| frame["world_pass_issued"] == true
-                && frame["opaque_ms"].as_f64().unwrap() > 0.
-                && frame["transparent_ms"].as_f64().unwrap() > 0.
-                && frame["composite_ms"].as_f64().unwrap() > 0.));
-    }
-    if category == crate::test_categories::Category::Hardware {
-        macro_rules! run {
-            ($($check:path),+ $(,)?) => {$({
-                eprintln!("GPU 验收阶段：{}", stringify!($check));
-                $check();
-            })+};
-        }
-        run!(
-            hardware_animated_materials_keep_geometry_and_shared_atlas,
-            hardware_brush_cursor_isolated_pixels_and_shared_atlas,
-            greedy_tests::run,
-            hardware_ordered_layers_keep_page_order_and_cutout_holes,
-            hardware_static_entity_models_share_depth_alpha_atlas_and_read_only_picking,
-            hardware_staged_world_handoff_keeps_pixels_atlas_and_picking_atomic,
-            hardware_world_orthographic_reuses_resident_mesh_and_matches_cpu_projection,
-            hardware_perspective_zoom_reuses_resident_source_mesh,
-            hardware_vanilla_special_models_real_client_pixels,
-            hardware_uv_lock_root_models_and_source_picking,
-            hardware_canvas_raster_matches_gpu_material_and_depth_pixels,
-            hardware_full_instance_bed_canvas_gpu_pixels,
-            hardware_isometric_java_obj_materials_and_picking_pixels,
-            hardware_java_obj_composite_textures_colors_and_picking_pixels,
-            hardware_compact_instances_match_expanded_pixels_across_segments_and_samplers,
-            hardware_composite_root_transform_and_empty_model_pixels,
-            hardware_real_client_materials_reach_gpu_pixels,
-            hardware_depth_alpha_and_culling_pixels,
-            hardware_stream_frustum_preserves_resident_mesh_on_camera_change,
-        );
-    }
+    mixed_chunks[0] = crate::spectator::MeshChunk::new(
+        mixed_chunks[0].key,
+        mixed_chunks[0].origin,
+        Arc::new(quads),
+        Arc::clone(&mixed_chunks[0].picking),
+    );
+    mixed.chunks = mixed_chunks.into();
+    let mixed = Arc::new(mixed);
+    let result = profile_world(
+        Arc::clone(&mixed),
+        scene.camera,
+        WorldProfile {
+            y32: false,
+            material_hints: false,
+            ..Default::default()
+        },
+    );
+    let y32 = profile_world(mixed, scene.camera, WorldProfile::default());
+    assert_eq!(
+        result["pixel_hash"], y32["pixel_hash"],
+        "高度分桶改变了小场景像素"
+    );
+    eprintln!("小场景生产通道 GPU 计时：{result}");
+    assert_eq!(
+        result["timestamp_supported"], true,
+        "GPU 时间戳不可用：{result}"
+    );
+    let frames = result["frames"].as_array().unwrap();
+    assert!(frames[..6]
+        .iter()
+        .all(|frame| frame["world_pass_issued"] == false && frame["opaque_ms"].is_null()));
+    assert!(frames[6..]
+        .iter()
+        .all(|frame| frame["world_pass_issued"] == true
+            && frame["opaque_ms"].as_f64().unwrap() > 0.
+            && frame["transparent_ms"].as_f64().unwrap() > 0.
+            && frame["composite_ms"].as_f64().unwrap() > 0.));
+}
+
+#[test]
+#[ignore = "requires local GPU / installed Minecraft resources"]
+fn test_greedy_tests_run() {
+    greedy_tests::run();
 }
 
 #[cfg(test)]

@@ -516,12 +516,11 @@ impl BlockClipboard {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    if category == crate::test_categories::Category::Interchange {
-        tests::structure_transform_pipeline();
-    }
+#[test]
+fn test_tests_structure_transform_pipeline() {
+    tests::structure_transform_pipeline();
 }
+
 #[cfg(test)]
 #[path = "structure_transform_tests.rs"]
 mod tests;

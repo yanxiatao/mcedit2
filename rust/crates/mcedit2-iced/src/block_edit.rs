@@ -350,7 +350,6 @@ fn enqueue(app: &mut App, key: Key, work: Work) -> Result<(), String> {
     crate::plugin_ui::invalidate(&mut app.plugins);
     app.pending_import.cancel();
     app.save_preview = None;
-    app.save_phrase.clear();
     let source = app.current_session(key)?.clone();
     let token = Arc::new(AtomicBool::new(false));
     let progress = Arc::new(Mutex::new(EditWorkProgress {
@@ -947,11 +946,8 @@ pub(crate) fn biome_choices(app: &App) -> iced::Element<'_, Message> {
     .into()
 }
 
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    if category != crate::test_categories::Category::Background {
-        return;
-    }
+#[test]
+fn background_behavior() {
     use crate::picking_integration_tests::{edit_task_output, finish_edit_preview, fixture};
     let (mut app, scene, _, _) = fixture();
     app.manual_textures = true;

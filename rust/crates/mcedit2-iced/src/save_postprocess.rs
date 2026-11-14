@@ -269,8 +269,6 @@ pub(crate) fn update(app: &mut crate::App, action: Action) -> iced::Task<crate::
         .store(true, std::sync::atomic::Ordering::Release);
     app.save_planning = false;
     app.save_preview = None;
-    app.save_phrase.clear();
-    app.be_save_phrase.clear();
     iced::Task::none()
 }
 #[derive(Debug, Clone)]

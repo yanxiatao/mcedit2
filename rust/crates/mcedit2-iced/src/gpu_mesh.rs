@@ -301,15 +301,12 @@ pub(crate) fn build_cancellable(
     }
     (!cancelled()).then_some(out)
 }
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
     fn source_face_quad_and_texture_uv_keep_alpha() {
         let mut vertices = Vec::new();
         let points = [
@@ -346,6 +343,7 @@ mod tests {
         assert_eq!(vertices[0].world_mode, 0);
     }
 
+    #[test]
     fn borrowed_model_cache_keys_share_state_content_but_not_weighted_variants() {
         use std::collections::HashMap;
         let source = State {
@@ -367,13 +365,5 @@ mod tests {
         assert_eq!(cache.get(&model_cache_key(&source, 3)), None);
         assert_eq!(cache.get(&model_cache_key(&other_orientation, 2)), None);
         assert_eq!(cache.len(), 1);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Rendering {
-            source_face_quad_and_texture_uv_keep_alpha();
-            borrowed_model_cache_keys_share_state_content_but_not_weighted_variants();
-        }
     }
 }

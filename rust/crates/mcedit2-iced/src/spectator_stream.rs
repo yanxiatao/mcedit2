@@ -1727,10 +1727,6 @@ impl Drop for Stream {
         self.cancel_readers();
     }
 }
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
 
 #[cfg(test)]
 mod tests {
@@ -1738,6 +1734,7 @@ mod tests {
     use mcedit2_world::surface::{SurfaceVoxel, VoxelMaterial};
     use std::collections::BTreeSet;
 
+    #[test]
     fn seam_indexes_are_reused_for_unchanged_sources_and_retired_on_replacement() {
         use mcedit2_world::surface::SourceChunkTile;
         let near = Arc::new(SurfaceView {
@@ -1835,6 +1832,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn direct_chunk_meshing_culls_original_seams_and_reuses_unchanged_parts() {
         use mcedit2_world::{
             sections::State,
@@ -1978,6 +1976,7 @@ mod tests {
         assert_eq!(after.chunks[0].quads().len(), 6);
     }
 
+    #[test]
     fn distant_lod_reuses_unchanged_chunk_and_invalidates_adjacent_source() {
         use mcedit2_world::{
             sections::State,
@@ -2102,6 +2101,7 @@ mod tests {
         assert_eq!(fourth.chunks[0].key, first_part.key);
     }
 
+    #[test]
     fn immutable_chunk_snapshot_reuses_patch_arcs_and_materializes_on_demand() {
         use mcedit2_world::surface::{SourceChunkTile, SurfaceView};
         let near = Arc::new(SurfaceView {
@@ -2256,6 +2256,7 @@ mod tests {
             .verify_source_memory();
     }
 
+    #[test]
     fn full_chunks_replace_near_window_without_losing_outside_height() {
         use mcedit2_world::surface::{SourceChunkTile, VoxelMaterial, ALL_FACES};
         let world = mcedit2_world::inspect_world(
@@ -2356,6 +2357,7 @@ mod tests {
         assert!(Arc::ptr_eq(&stream.cache[&(0, 0, 1)], &patch));
     }
 
+    #[test]
     fn requested_lod_replaces_cached_near_geometry_after_camera_retreats() {
         let req = FarChunkRequest {
             cx: 29,
@@ -2387,6 +2389,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn cached_sample_is_only_a_visual_bridge_until_exact_chunk_arrives() {
         let req = FarChunkRequest {
             cx: -12,
@@ -2407,6 +2410,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn first_batches_fill_exact_rings_before_sampled_horizon() {
         let requests = plan([0.0, 80.0, 0.0], 16).unwrap();
         let pending = prioritized_pending(&requests, (0, 0), 0);
@@ -2418,6 +2422,7 @@ mod tests {
         assert_eq!(scheduled, original);
     }
 
+    #[test]
     fn display_order_is_append_only_and_independent_of_camera_facing() {
         let requests = plan([0.0, 72.0, 0.0], 12).unwrap();
         let mut a = requests.clone();
@@ -2454,6 +2459,7 @@ mod tests {
         assert_eq!(order.visible, vec![first, third]);
     }
 
+    #[test]
     fn camera_facing_prioritizes_complete_chunk_rings_without_skipping_sources() {
         let planned = plan([0.0, 80.0, 0.0], 8).unwrap();
         let unique = planned.iter().copied().map(key).collect::<BTreeSet<_>>();
@@ -2479,6 +2485,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn reorientation_never_reschedules_already_fetched_chunks() {
         let planned = plan([0.0, 80.0, 0.0], 8).unwrap();
         let mut pending = prioritized_pending(&planned, (0, 0), 0);
@@ -2644,6 +2651,7 @@ mod tests {
         assert_eq!(look_sector(90.0), 2);
     }
 
+    #[test]
     fn cancelled_stale_batch_stops_at_next_chunk_boundary() {
         let cancelled = Arc::new(AtomicBool::new(false));
         let worker = Arc::clone(&cancelled);
@@ -2652,6 +2660,7 @@ mod tests {
         assert!(!not_cancelled(&worker));
     }
 
+    #[test]
     fn cached_exact_source_is_never_discarded_due_to_its_voxel_count() {
         let physical = 8 * 1024 * 1024 * 1024;
         assert_eq!(
@@ -2677,6 +2686,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn selected_radius_has_no_hidden_sixty_four_chunk_limit() {
         let radius = 128;
         let selected = plan([0.0, 70.0, 0.0], radius).unwrap();
@@ -2684,6 +2694,7 @@ mod tests {
         assert!(selected.iter().any(|req| req.cx == 128 && req.cz == 0));
     }
 
+    #[test]
     fn exact_seams_cull_only_proven_full_opaque_neighbors() {
         use mcedit2_world::sections::State;
         let mk = |x, name: &str| {
@@ -2728,6 +2739,7 @@ mod tests {
         assert_ne!(view.voxels[0].faces & FACE_POS_X, 0);
     }
 
+    #[test]
     fn exact_chunk_seams_keep_faces_behind_ice_and_partial_blocks() {
         use mcedit2_world::sections::State;
         let mk = |x: i32, name: &str, props: &[(&str, &str)]| {
@@ -2792,6 +2804,7 @@ mod tests {
         assert_ne!(view.voxels[0].faces & FACE_POS_X, 0);
     }
 
+    #[test]
     fn exact_chunk_seams_match_source_for_glass_leaves_and_liquid_boundaries() {
         use mcedit2_world::sections::State;
         let mk = |x, name: &str, kind| {
@@ -2878,6 +2891,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn streamed_water_seams_hide_only_verified_internal_faces() {
         use mcedit2_world::sections::State;
         let fluid = |x, name: &str, level: &str| {
@@ -2928,6 +2942,7 @@ mod tests {
         assert_ne!(view.voxels[0].faces & FACE_POS_X, 0);
     }
 
+    #[test]
     fn complete_rings_schedule_each_source_chunk_once() {
         for radius in [1, 4, 8, 16, 32, 64] {
             let requests = plan([0.0, 80.0, 0.0], radius).unwrap();
@@ -2938,6 +2953,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn signed_origin_floor_and_lod_are_deterministic() {
         let requests = plan([-0.1, 80.0, -16.1], 24).unwrap();
         assert_eq!((requests[0].cx, requests[0].cz), (-1, -2));
@@ -2948,6 +2964,7 @@ mod tests {
         assert!(plan([0.0, 0.0, 0.0], 0).is_err());
     }
 
+    #[test]
     fn world_border_does_not_overflow_or_synthesize_chunks() {
         let requests = plan([29_999_992.0, 40.0, -29_999_992.0], 32).unwrap();
         assert!(requests.iter().all(|r| {
@@ -2957,6 +2974,7 @@ mod tests {
         }));
     }
 
+    #[test]
     fn decoded_sources_reuse_verified_images_and_stream_while_flying() {
         for version in [1343, 3465, 3955] {
             let mut fixture = crate::metadata_fixture::Fixture::new(version);
@@ -3078,6 +3096,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn lookahead_reads_real_columns_without_expanding_the_visible_plan() {
         fn drain(stream: &mut Stream, mut task: Task<Message>) {
             loop {
@@ -3168,33 +3187,8 @@ mod tests {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::WorldGeometry {
-            lookahead_reads_real_columns_without_expanding_the_visible_plan();
-            crate::stream_readers::verify_delivery_coalescing();
-            decoded_sources_reuse_verified_images_and_stream_while_flying();
-            seam_indexes_are_reused_for_unchanged_sources_and_retired_on_replacement();
-            direct_chunk_meshing_culls_original_seams_and_reuses_unchanged_parts();
-            distant_lod_reuses_unchanged_chunk_and_invalidates_adjacent_source();
-            immutable_chunk_snapshot_reuses_patch_arcs_and_materializes_on_demand();
-            full_chunks_replace_near_window_without_losing_outside_height();
-            requested_lod_replaces_cached_near_geometry_after_camera_retreats();
-            cached_sample_is_only_a_visual_bridge_until_exact_chunk_arrives();
-            first_batches_fill_exact_rings_before_sampled_horizon();
-            display_order_is_append_only_and_independent_of_camera_facing();
-            camera_facing_prioritizes_complete_chunk_rings_without_skipping_sources();
-            reorientation_never_reschedules_already_fetched_chunks();
-            cancelled_stale_batch_stops_at_next_chunk_boundary();
-            cached_exact_source_is_never_discarded_due_to_its_voxel_count();
-            selected_radius_has_no_hidden_sixty_four_chunk_limit();
-            exact_seams_cull_only_proven_full_opaque_neighbors();
-            exact_chunk_seams_keep_faces_behind_ice_and_partial_blocks();
-            exact_chunk_seams_match_source_for_glass_leaves_and_liquid_boundaries();
-            streamed_water_seams_hide_only_verified_internal_faces();
-            complete_rings_schedule_each_source_chunk_once();
-            signed_origin_floor_and_lod_are_deterministic();
-            world_border_does_not_overflow_or_synthesize_chunks();
-        }
+    #[test]
+    fn test_crate_stream_readers_verify_delivery_coalescing() {
+        crate::stream_readers::verify_delivery_coalescing();
     }
 }

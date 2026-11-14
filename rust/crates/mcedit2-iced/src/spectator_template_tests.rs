@@ -113,6 +113,7 @@ fn state(name: &str, properties: &[(&str, &str)]) -> State {
     }
 }
 
+#[test]
 fn compiled_templates_match_reference_bytes_for_masks_models_biomes_fluids_and_lod() {
     let fixture = pack();
     let bank = fixture.open();
@@ -223,6 +224,7 @@ fn compiled_templates_match_reference_bytes_for_masks_models_biomes_fluids_and_l
     }
 }
 
+#[test]
 fn variant_cache_keeps_actual_coordinate_choices_and_inactive_multipart_branches() {
     let fixture = pack();
     let bank = fixture.open();
@@ -247,6 +249,7 @@ fn variant_cache_keeps_actual_coordinate_choices_and_inactive_multipart_branches
     assert!(choices.len() > 1);
 }
 
+#[test]
 fn cancelling_template_preparation_does_not_return_partial_geometry() {
     let fixture = pack();
     let view = scene(fixture.open());
@@ -272,13 +275,4 @@ fn cancelling_template_preparation_does_not_return_partial_geometry() {
         )
         .is_none());
     assert!(out.is_empty());
-}
-
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    if category == crate::test_categories::Category::WorldGeometry {
-        compiled_templates_match_reference_bytes_for_masks_models_biomes_fluids_and_lod();
-        variant_cache_keeps_actual_coordinate_choices_and_inactive_multipart_branches();
-        cancelling_template_preparation_does_not_return_partial_geometry();
-    }
 }

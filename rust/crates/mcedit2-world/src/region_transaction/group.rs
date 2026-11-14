@@ -3,7 +3,6 @@
 use super::*;
 use std::collections::BTreeSet;
 
-const MAX_GROUP_BYTES: usize = 1024 * 1024 * 1024;
 const ACTIVE_NAMES: [&str; 3] = [
     ".mcedit2-group.pending.json",
     ".mcedit2-group.finalizing.json",
@@ -68,15 +67,16 @@ fn preflight(
     world: &WorldSummary,
     dimension: &str,
     candidates: &[NativeRegionCandidate],
+    budget: crate::editing::EditWorkBudget,
 ) -> Result<Group, WorldError> {
     require_no_active_group(world)?;
     if candidates.is_empty()
         || candidates
             .iter()
             .try_fold(0usize, |sum, c| sum.checked_add(c.image.len()))
-            .is_none_or(|n| n > MAX_GROUP_BYTES)
+            .is_none_or(|n| n > budget.bytes())
     {
-        return Err(refuse("保存组不能为空，候选总计不能超过 1 GiB"));
+        return Err(refuse("保存组不能为空，候选总计不能超过当前预算"));
     }
     let mut entries = Vec::new();
     // 在写入日志及任何 Region 之前，对所有源文件和恢复路径完成预检。
@@ -100,7 +100,7 @@ fn preflight(
         if !candidate.section_proofs.is_empty() {
             return Err(refuse("新 section 须通过混合组复核维度合同并保存"));
         }
-        let original = read_region_bytes(&region)?;
+        let original = read_region_bytes(&region, budget)?;
         verify_candidate(&original, candidate)?;
         let replacement = sha(&candidate.image);
         let files = paths(region, &candidate.original_region_sha256, &replacement)?;
@@ -127,18 +127,34 @@ pub fn validate_region_group(
     dimension: &str,
     candidates: &[NativeRegionCandidate],
 ) -> Result<usize, WorldError> {
-    Ok(preflight(world, dimension, candidates)?.entries.len())
+    validate_region_group_with_budget(
+        world,
+        dimension,
+        candidates,
+        crate::editing::EditWorkBudget::default(),
+    )
+}
+pub fn validate_region_group_with_budget(
+    world: &WorldSummary,
+    dimension: &str,
+    candidates: &[NativeRegionCandidate],
+    budget: crate::editing::EditWorkBudget,
+) -> Result<usize, WorldError> {
+    Ok(preflight(world, dimension, candidates, budget)?
+        .entries
+        .len())
 }
 
 fn begin(
     world: &WorldSummary,
     dimension: &str,
     candidates: &[NativeRegionCandidate],
+    budget: crate::editing::EditWorkBudget,
 ) -> Result<(Group, PathBuf), WorldError> {
-    let group = preflight(world, dimension, candidates)?;
+    let group = preflight(world, dimension, candidates, budget)?;
     let path = world.root.join(ACTIVE_NAMES[0]);
     let metadata = serde_json::to_vec(&group).map_err(|e| refuse(e.to_string()))?;
-    if metadata.len() > MAX_GROUP_BYTES {
+    if metadata.len() > budget.bytes() {
         return Err(refuse("保存组日志超过工作集预算"));
     }
     append_atomic_marker(&path, &metadata)?;
@@ -154,6 +170,21 @@ pub fn apply_region_group(
     candidates: &[NativeRegionCandidate],
     confirmation: &str,
 ) -> Result<RegionGroupReceipt, WorldError> {
+    apply_region_group_with_budget(
+        world,
+        dimension,
+        candidates,
+        confirmation,
+        crate::editing::EditWorkBudget::default(),
+    )
+}
+pub fn apply_region_group_with_budget(
+    world: &WorldSummary,
+    dimension: &str,
+    candidates: &[NativeRegionCandidate],
+    confirmation: &str,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<RegionGroupReceipt, WorldError> {
     let _guard = crate::world_write_lock::acquire(&world.root, false)?;
     let has_be = candidates
         .iter()
@@ -161,18 +192,19 @@ pub fn apply_region_group(
     if (has_be && confirmation != "SAVE_BE_NBT") || (!has_be && confirmation != "SAVE") {
         return Err(refuse("保存组需要与内容匹配的 SAVE 或 SAVE_BE_NBT 确认"));
     }
-    let (group, marker_path) = begin(world, dimension, candidates)?;
+    let (group, marker_path) = begin(world, dimension, candidates, budget)?;
     let mut regions = Vec::new();
     for candidate in candidates {
-        let receipt =
-            apply_region_with_mode(world, dimension, candidate, has_be).map_err(|error| {
+        let receipt = apply_region_with_mode(world, dimension, candidate, has_be, budget).map_err(
+            |error| {
                 log::error!(
                     "[region-group] 写入 {} 失败：{error}；保留活动记录 {}，请显式选择解决方向",
                     candidate.path.display(),
                     marker_path.display()
                 );
                 error
-            })?;
+            },
+        )?;
         regions.push(receipt);
     }
     Ok(RegionGroupReceipt {
@@ -185,6 +217,7 @@ pub fn apply_region_group(
 fn read_active(
     world: &WorldSummary,
     dimension: &str,
+    budget: crate::editing::EditWorkBudget,
 ) -> Result<(Group, PathBuf, usize), WorldError> {
     let mut found = None;
     for (phase, name) in ACTIVE_NAMES.iter().enumerate() {
@@ -194,7 +227,7 @@ fn read_active(
                 if found.is_some()
                     || !meta.is_file()
                     || meta.file_type().is_symlink()
-                    || meta.len() > MAX_GROUP_BYTES as u64
+                    || meta.len() > budget.bytes() as u64
                 {
                     return Err(refuse("保存组日志重复、非普通文件或超过工作集预算"));
                 }
@@ -210,14 +243,18 @@ fn read_active(
     found.ok_or_else(|| refuse("当前世界没有活动的多 Region 保存组"))
 }
 
-fn matching_marker(path: &Path, entry: &Entry) -> Result<Marker, WorldError> {
+fn matching_marker(
+    path: &Path,
+    entry: &Entry,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<Marker, WorldError> {
     ensure_regular(path)?;
     if fs::metadata(path)?.len() > 4096 {
         return Err(refuse("Region 恢复记录超过 4 KiB"));
     }
     let marker: Marker =
         serde_json::from_slice(&fs::read(path)?).map_err(|e| refuse(e.to_string()))?;
-    verify_marker(&marker)?;
+    verify_marker(&marker, budget)?;
     if marker.original_sha256 != entry.original || marker.replacement_sha256 != entry.replacement {
         return Err(refuse("单文件恢复记录与保存组不一致"));
     }
@@ -239,8 +276,9 @@ fn resolve(
     world: &WorldSummary,
     dimension: &str,
     rollback: bool,
+    budget: crate::editing::EditWorkBudget,
 ) -> Result<RegionGroupReceipt, WorldError> {
-    let (group, mut active, phase) = read_active(world, dimension)?;
+    let (group, mut active, phase) = read_active(world, dimension, budget)?;
     let wanted = if rollback { 2 } else { 1 };
     if phase != 0 && phase != wanted {
         return Err(refuse("保存组已开始另一种恢复操作，必须先继续完成该操作"));
@@ -257,7 +295,7 @@ fn resolve(
     for entry in &group.entries {
         let region = expected_region_path(world, dimension, entry.x, entry.z, &entry.extension)?;
         let files = paths(region, &entry.original, &entry.replacement)?;
-        let current = sha(&read_region_bytes(&files.region)?);
+        let current = sha(&read_region_bytes(&files.region, budget)?);
         if !(current == entry.replacement || rollback && current == entry.original) {
             return Err(refuse(format!(
                 "Region {} 已被外部修改或不符合恢复方向；保存组保持不变",
@@ -270,7 +308,7 @@ fn resolve(
             &files.completed
         };
         if exists(&files.pending)? {
-            let (marker, _) = read_pending(files.region.clone())?;
+            let (marker, _) = read_pending(files.region.clone(), budget)?;
             if marker.original_sha256 != entry.original
                 || marker.replacement_sha256 != entry.replacement
             {
@@ -278,7 +316,7 @@ fn resolve(
             }
             verify_archives(&files, &marker)?;
         } else if exists(terminal)? {
-            let marker = matching_marker(terminal, entry)?;
+            let marker = matching_marker(terminal, entry, budget)?;
             verify_archives(&files, &marker)?;
             let expected = if rollback {
                 &entry.original
@@ -289,7 +327,7 @@ fn resolve(
                 return Err(refuse("已完成 Region 记录与当前数据不符"));
             }
             ensure_regular(&files.backup)?;
-            let bytes = read_region_bytes(&files.backup)?;
+            let bytes = read_region_bytes(&files.backup, budget)?;
             if bytes.len() as u64 != marker.original_size || sha(&bytes) != entry.original {
                 return Err(refuse("已处理 Region 的原始备份损坏"));
             }
@@ -309,9 +347,9 @@ fn resolve(
     for (entry, files) in group.entries.iter().zip(related) {
         if exists(&files.pending)? {
             regions.push(if rollback {
-                rollback_region(world, dimension, entry.x, entry.z, &entry.extension)?
+                rollback_region(world, dimension, entry.x, entry.z, &entry.extension, budget)?
             } else {
-                finalize_region(world, dimension, entry.x, entry.z, &entry.extension)?
+                finalize_region(world, dimension, entry.x, entry.z, &entry.extension, budget)?
             });
         } else {
             let terminal = if rollback {
@@ -321,13 +359,13 @@ fn resolve(
             };
             if exists(&terminal)? {
                 if !rollback {
-                    let replacement = read_region_bytes(&files.region)?;
+                    let replacement = read_region_bytes(&files.region, budget)?;
                     if sha(&replacement) != entry.replacement {
                         return Err(refuse("已完成 Region 的替换版本在恢复期间改变"));
                     }
                     crate::transaction_artifacts::store(&files.replacement_backup, &replacement)?;
                 }
-                let replacement_backup = retained_replacement(&files, &entry.replacement)?;
+                let replacement_backup = retained_replacement(&files, &entry.replacement, budget)?;
                 regions.push(RegionWriteReceipt {
                     region_path: files.region,
                     backup_path: files.backup,
@@ -352,14 +390,33 @@ pub fn finalize_region_group(
     world: &WorldSummary,
     dimension: &str,
 ) -> Result<RegionGroupReceipt, WorldError> {
-    finalize_region_group_with_history(world, dimension).map(|(receipt, _)| receipt)
+    finalize_region_group_with_budget(world, dimension, crate::editing::EditWorkBudget::default())
+}
+pub fn finalize_region_group_with_budget(
+    world: &WorldSummary,
+    dimension: &str,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<RegionGroupReceipt, WorldError> {
+    finalize_region_group_with_history_with_budget(world, dimension, budget)
+        .map(|(receipt, _)| receipt)
 }
 pub fn finalize_region_group_with_history(
     world: &WorldSummary,
     dimension: &str,
 ) -> Result<(RegionGroupReceipt, crate::history_source::Archive), WorldError> {
+    finalize_region_group_with_history_with_budget(
+        world,
+        dimension,
+        crate::editing::EditWorkBudget::default(),
+    )
+}
+pub fn finalize_region_group_with_history_with_budget(
+    world: &WorldSummary,
+    dimension: &str,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<(RegionGroupReceipt, crate::history_source::Archive), WorldError> {
     let _guard = crate::world_write_lock::acquire(&world.root, false)?;
-    let receipt = resolve(world, dimension, false)?;
+    let receipt = resolve(world, dimension, false, budget)?;
     let archive = resolved_history(world, dimension, &receipt, false)?;
     Ok((receipt, archive))
 }
@@ -367,14 +424,33 @@ pub fn rollback_region_group(
     world: &WorldSummary,
     dimension: &str,
 ) -> Result<RegionGroupReceipt, WorldError> {
-    rollback_region_group_with_history(world, dimension).map(|(receipt, _)| receipt)
+    rollback_region_group_with_budget(world, dimension, crate::editing::EditWorkBudget::default())
+}
+pub fn rollback_region_group_with_budget(
+    world: &WorldSummary,
+    dimension: &str,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<RegionGroupReceipt, WorldError> {
+    rollback_region_group_with_history_with_budget(world, dimension, budget)
+        .map(|(receipt, _)| receipt)
 }
 pub fn rollback_region_group_with_history(
     world: &WorldSummary,
     dimension: &str,
 ) -> Result<(RegionGroupReceipt, crate::history_source::Archive), WorldError> {
+    rollback_region_group_with_history_with_budget(
+        world,
+        dimension,
+        crate::editing::EditWorkBudget::default(),
+    )
+}
+pub fn rollback_region_group_with_history_with_budget(
+    world: &WorldSummary,
+    dimension: &str,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<(RegionGroupReceipt, crate::history_source::Archive), WorldError> {
     let _guard = crate::world_write_lock::acquire(&world.root, false)?;
-    let receipt = resolve(world, dimension, true)?;
+    let receipt = resolve(world, dimension, true, budget)?;
     let archive = resolved_history(world, dimension, &receipt, true)?;
     Ok((receipt, archive))
 }
@@ -394,11 +470,6 @@ fn resolved_history(
             .map(|name| world.root.join(name))
             .chain(std::iter::once(receipt.marker_path.clone())),
     )
-}
-
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
 }
 
 #[cfg(test)]
@@ -527,6 +598,7 @@ mod tests {
     }
     const DIM: &str = "minecraft:overworld";
 
+    #[test]
     fn group_save_and_finalize_keep_every_immutable_original_backup() {
         let fixture = Fixture::new();
         let other = Fixture::new();
@@ -643,10 +715,24 @@ mod tests {
         finalize_single_region(&single.world, DIM, plan.region_x, plan.region_z, "mca").unwrap();
     }
 
+    #[test]
     fn interrupted_write_rolls_back_written_region_and_keeps_unwritten_region() {
         let fixture = Fixture::new();
-        begin(&fixture.world, DIM, &fixture.plans).unwrap();
-        apply_region_with_mode(&fixture.world, DIM, &fixture.plans[0], false).unwrap();
+        begin(
+            &fixture.world,
+            DIM,
+            &fixture.plans,
+            crate::editing::EditWorkBudget::default(),
+        )
+        .unwrap();
+        apply_region_with_mode(
+            &fixture.world,
+            DIM,
+            &fixture.plans[0],
+            false,
+            crate::editing::EditWorkBudget::default(),
+        )
+        .unwrap();
         assert!(apply_single_region(&fixture.world, DIM, &fixture.plans[1]).is_err());
         let receipt = rollback_region_group(&fixture.world, DIM).unwrap();
         assert_eq!(receipt.total_regions, 2);
@@ -655,10 +741,24 @@ mod tests {
         require_no_active_group(&fixture.world).unwrap();
     }
 
+    #[test]
     fn external_change_refuses_entire_recovery_before_mutating_other_regions() {
         let fixture = Fixture::new();
-        begin(&fixture.world, DIM, &fixture.plans).unwrap();
-        apply_region_with_mode(&fixture.world, DIM, &fixture.plans[0], false).unwrap();
+        begin(
+            &fixture.world,
+            DIM,
+            &fixture.plans,
+            crate::editing::EditWorkBudget::default(),
+        )
+        .unwrap();
+        apply_region_with_mode(
+            &fixture.world,
+            DIM,
+            &fixture.plans[0],
+            false,
+            crate::editing::EditWorkBudget::default(),
+        )
+        .unwrap();
         let mut foreign = fs::read(&fixture.plans[1].path).unwrap();
         foreign.push(1);
         fs::write(&fixture.plans[1].path, &foreign).unwrap();
@@ -670,6 +770,7 @@ mod tests {
         assert_eq!(fs::read(&fixture.plans[1].path).unwrap(), foreign);
     }
 
+    #[test]
     fn interrupted_finalization_resumes_and_cannot_switch_recovery_direction() {
         let fixture = Fixture::new();
         apply_region_group(&fixture.world, DIM, &fixture.plans, "SAVE").unwrap();
@@ -679,12 +780,21 @@ mod tests {
         )
         .unwrap();
         let first = &fixture.plans[0];
-        finalize_region(&fixture.world, DIM, first.region_x, first.region_z, "mca").unwrap();
+        finalize_region(
+            &fixture.world,
+            DIM,
+            first.region_x,
+            first.region_z,
+            "mca",
+            crate::editing::EditWorkBudget::default(),
+        )
+        .unwrap();
         assert!(rollback_region_group(&fixture.world, DIM).is_err());
         let receipt = finalize_region_group(&fixture.world, DIM).unwrap();
         assert_eq!(receipt.regions.len(), 2);
     }
 
+    #[test]
     fn interrupted_rollback_resumes_from_verified_per_region_records() {
         let fixture = Fixture::new();
         apply_region_group(&fixture.world, DIM, &fixture.plans, "SAVE").unwrap();
@@ -694,20 +804,17 @@ mod tests {
         )
         .unwrap();
         let first = &fixture.plans[0];
-        rollback_region(&fixture.world, DIM, first.region_x, first.region_z, "mca").unwrap();
+        rollback_region(
+            &fixture.world,
+            DIM,
+            first.region_x,
+            first.region_z,
+            "mca",
+            crate::editing::EditWorkBudget::default(),
+        )
+        .unwrap();
         let receipt = rollback_region_group(&fixture.world, DIM).unwrap();
         assert_eq!(receipt.regions.len(), 2);
         fixture.assert_original();
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Recovery {
-            group_save_and_finalize_keep_every_immutable_original_backup();
-            interrupted_write_rolls_back_written_region_and_keeps_unwritten_region();
-            external_change_refuses_entire_recovery_before_mutating_other_regions();
-            interrupted_finalization_resumes_and_cannot_switch_recovery_direction();
-            interrupted_rollback_resumes_from_verified_per_region_records();
-        }
     }
 }

@@ -85,12 +85,12 @@ pub(crate) fn run(app: &mut App, scope: Scope, rollback: bool) -> Task<Message> 
             let (report, archive) = match scope {
                 Scope::Single { x, z, extension } => {
                     let (receipt, archive) = if rollback {
-                        region_transaction::rollback_pending_region_with_history(
-                            &world, &dimension, x, z, &extension,
+                        region_transaction::rollback_pending_region_with_history_with_budget(
+                            &world, &dimension, x, z, &extension, budget,
                         )
                     } else {
-                        region_transaction::finalize_single_region_with_history(
-                            &world, &dimension, x, z, &extension,
+                        region_transaction::finalize_single_region_with_history_with_budget(
+                            &world, &dimension, x, z, &extension, budget,
                         )
                     }
                     .map_err(|error| error.to_string())?;
@@ -111,9 +111,13 @@ pub(crate) fn run(app: &mut App, scope: Scope, rollback: bool) -> Task<Message> 
                 }
                 Scope::Group => {
                     let (receipt, archive) = if rollback {
-                        region_transaction::rollback_region_group_with_history(&world, &dimension)
+                        region_transaction::rollback_region_group_with_history_with_budget(
+                            &world, &dimension, budget,
+                        )
                     } else {
-                        region_transaction::finalize_region_group_with_history(&world, &dimension)
+                        region_transaction::finalize_region_group_with_history_with_budget(
+                            &world, &dimension, budget,
+                        )
                     }
                     .map_err(|error| error.to_string())?;
                     (

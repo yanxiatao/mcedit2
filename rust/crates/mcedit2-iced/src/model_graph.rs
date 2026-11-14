@@ -326,11 +326,6 @@ fn expand(
 }
 
 #[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     fn compile(files: &BTreeMap<String, Value>, key: &str) -> Result<Model, String> {
@@ -353,6 +348,7 @@ mod tests {
             .collect()
     }
 
+    #[test]
     fn composites_inherit_visibility_but_children_keep_independent_textures() {
         let mut source = files(&[
             (
@@ -392,6 +388,7 @@ mod tests {
         assert_eq!(inherited.elements[0].root.point([0.; 3]), [1., 0., 0.]);
     }
 
+    #[test]
     fn base_empty_and_nested_models_do_not_invent_geometry() {
         let source = files(&[
             ("empty", r#"{"loader":"neoforge:empty"}"#),
@@ -422,13 +419,5 @@ mod tests {
         assert!(compile(&source, "model:test:bad")
             .unwrap_err()
             .contains("不存在"));
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Models {
-            composites_inherit_visibility_but_children_keep_independent_textures();
-            base_empty_and_nested_models_do_not_invent_geometry();
-        }
     }
 }

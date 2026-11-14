@@ -45,12 +45,11 @@ pub struct PartPose {
     pub skip_draw: Option<bool>,
 }
 
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    if category == crate::test_categories::Category::Geometry {
-        tests::all_client_layers_and_pose_overrides_match_actual_vertices();
-    }
+#[test]
+fn test_tests_all_client_layers_and_pose_overrides_match_actual_vertices() {
+    tests::all_client_layers_and_pose_overrides_match_actual_vertices();
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;

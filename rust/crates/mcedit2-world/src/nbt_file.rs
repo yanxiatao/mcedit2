@@ -156,7 +156,11 @@ fn encode(enc: &Encoding, nbt: &[u8]) -> Result<Vec<u8>, WorldError> {
 }
 /// 文件入口读取真实 NBT 根结构，沿独立文档的压缩识别与文件预算。
 pub(crate) fn read_nbt(path: &Path) -> Result<Vec<u8>, WorldError> {
-    Ok(decode(read(path)?)?.1)
+    read_nbt_with_limit(path, crate::MAX_NBT)
+}
+pub(crate) fn read_nbt_with_limit(path: &Path, limit: u64) -> Result<Vec<u8>, WorldError> {
+    regular(path)?;
+    Ok(decode_limited(crate::read_limited_file(path, limit)?, limit)?.1)
 }
 /// 从独立原文件和候选重验压缩类型、GZip 元数据和双方 NBT 结构。
 pub(crate) fn verify_transition(original: &[u8], replacement: &[u8]) -> Result<(), WorldError> {

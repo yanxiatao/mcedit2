@@ -626,11 +626,8 @@ struct MaskJob {
     >,
 }
 
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    if category != crate::test_categories::Category::Rendering {
-        return;
-    }
+#[test]
+fn rendering_behavior() {
     use mcedit2_world::section_visibility::Section;
     let build = |gap: u8| {
         Topology::build_columns(
@@ -806,6 +803,7 @@ pub(crate) fn run_test_category(category: crate::test_categories::Category) {
         "穿墙时继续使用完整几何"
     );
 }
+
 impl Drop for MaskJob {
     fn drop(&mut self) {
         self.cancel

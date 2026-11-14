@@ -3,6 +3,8 @@
 pub mod catalog;
 pub mod document;
 mod process;
+#[cfg(unix)]
+mod process_group;
 #[cfg(windows)]
 mod process_owner;
 pub mod resources;

@@ -611,14 +611,10 @@ impl Sorting {
 }
 
 #[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
     fn transparent_sort_keeps_chunk_sources_origins_and_distance_order() {
         use crate::spectator::MeshChunk;
         let face = WorldQuad {
@@ -708,6 +704,7 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
+    #[test]
     fn adapter_limits_segment_complete_instances_and_page_runs_preserve_order() {
         assert_eq!(segment_faces(151), 0);
         assert_eq!(segment_faces(156), 1);
@@ -757,6 +754,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn y32_cross_boundary_keeps_one_full_source_quad() {
         let quad = WorldQuad {
             xyz: [
@@ -843,6 +841,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn profile_contiguous_transparency() {
         if std::env::var_os("MCEDIT2_TRANSPARENT_CPU_PROFILE").is_none() {
             return;
@@ -912,15 +911,5 @@ mod tests {
             old_time.as_micros(),
             new_time.as_micros()
         );
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Rendering {
-            transparent_sort_keeps_chunk_sources_origins_and_distance_order();
-            adapter_limits_segment_complete_instances_and_page_runs_preserve_order();
-            y32_cross_boundary_keeps_one_full_source_quad();
-            profile_contiguous_transparency();
-        }
     }
 }

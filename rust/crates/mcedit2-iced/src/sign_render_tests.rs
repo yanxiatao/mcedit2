@@ -165,6 +165,7 @@ fn text(
     .unwrap()
     .unwrap()
 }
+#[test]
 fn fonts_layout_and_resources() {
     let fixture = assets();
     let bank = fixture.open();
@@ -279,6 +280,7 @@ fn fonts_layout_and_resources() {
             > 1
     );
 }
+#[test]
 fn models_textures_and_source_frames() {
     let fixture = assets();
     let bank = fixture.open();
@@ -521,10 +523,4 @@ fn models_textures_and_source_frames() {
         .iter()
         .flat_map(|c| c.quads().iter())
         .all(|q| q.mode & crate::material_mode::FONT_TEXT == 0));
-}
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    if category == crate::test_categories::Category::SpecialModels {
-        fonts_layout_and_resources();
-        models_textures_and_source_frames();
-    }
 }

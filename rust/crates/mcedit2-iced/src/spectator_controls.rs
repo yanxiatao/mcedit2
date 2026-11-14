@@ -838,15 +838,12 @@ pub(super) fn profile_controls(mesh: Arc<StreamMesh>, camera: Camera) -> serde_j
 }
 
 #[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use canvas::Program;
 
+    #[test]
+    #[cfg(debug_assertions)]
     #[cfg(debug_assertions)]
     fn queued_mouse_events_keep_drag_start_when_runtime_cursor_is_already_at_end() {
         let (app, _scene, _, original) = crate::picking_integration_tests::fixture();
@@ -922,6 +919,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn actual_canvas_events_publish_point_drag_and_corner_requests() {
         let (app, _scene, _, original) = crate::picking_integration_tests::fixture();
         let controls = Controls {
@@ -964,6 +962,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn source_context_switch_and_focus_loss_cancel_in_progress_drag() {
         let (app, _scene, mesh, _) = crate::picking_integration_tests::fixture();
         let mut controls = Controls {
@@ -1019,15 +1018,5 @@ mod tests {
                 mouse::Cursor::Available(center)
             )
             .is_none());
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Navigation {
-            #[cfg(debug_assertions)]
-            queued_mouse_events_keep_drag_start_when_runtime_cursor_is_already_at_end();
-            actual_canvas_events_publish_point_drag_and_corner_requests();
-            source_context_switch_and_focus_loss_cancel_in_progress_drag();
-        }
     }
 }

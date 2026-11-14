@@ -174,14 +174,17 @@ fn replay(
     proof: &BatchProof,
     chunks: BTreeMap<(i32, i32), Vec<u8>>,
     base: Option<&crate::entity_editing::IdentitySnapshot>,
+    budget: crate::editing::EditWorkBudget,
 ) -> Result<BTreeMap<(i32, i32), Vec<u8>>, WorldError> {
-    replay_with_storage(proof, chunks, base, true)
+    replay_with_storage(proof, chunks, base, true, budget)
 }
+
 pub(crate) fn replay_with_storage(
     proof: &BatchProof,
     mut chunks: BTreeMap<(i32, i32), Vec<u8>>,
     base: Option<&crate::entity_editing::IdentitySnapshot>,
     separate: bool,
+    budget: crate::editing::EditWorkBudget,
 ) -> Result<BTreeMap<(i32, i32), Vec<u8>>, WorldError> {
     let mut identities = base.cloned();
     crate::entity_editing::verify_clone_scopes(
@@ -304,7 +307,7 @@ pub(crate) fn replay_with_storage(
                     after: chunks.get(c).map(Vec::as_slice),
                 })
                 .collect::<Vec<_>>();
-            index.replace_chunks(&replacements, 512 * 1024 * 1024)?;
+            index.replace_chunks(&replacements, budget.bytes())?;
         }
     }
     Ok(chunks)
@@ -315,6 +318,21 @@ pub fn prepare(
     dimension: &str,
     actions: Vec<EntityProof>,
     timestamp: u32,
+) -> Result<EntityBatchCandidate, WorldError> {
+    prepare_with_budget(
+        world,
+        dimension,
+        actions,
+        timestamp,
+        crate::editing::EditWorkBudget::default(),
+    )
+}
+pub fn prepare_with_budget(
+    world: &WorldSummary,
+    dimension: &str,
+    actions: Vec<EntityProof>,
+    timestamp: u32,
+    budget: crate::editing::EditWorkBudget,
 ) -> Result<EntityBatchCandidate, WorldError> {
     let proof = BatchProof {
         dimension: dimension.into(),
@@ -327,7 +345,7 @@ pub fn prepare(
     for r in &regions {
         let path = expected_path(world, &proof, *r)?;
         let data = match fs::symlink_metadata(&path) {
-            Ok(_) => Some(fs::read(&path)?),
+            Ok(_) => Some(crate::read_limited_file(&path, budget.bytes() as u64)?),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(e.into()),
         };
@@ -335,8 +353,8 @@ pub fn prepare(
             used = used
                 .checked_add(data.len())
                 .ok_or_else(|| err("实体批次大小溢出"))?;
-            if used > 512 * 1024 * 1024 {
-                return Err(err("实体批次源文件超过 512 MiB 内存预算"));
+            if used > budget.bytes() {
+                return Err(err("实体批次源文件超过当前内存预算"));
             }
             parse_slots(data)?;
         }
@@ -370,13 +388,13 @@ pub fn prepare(
             world,
             &proof.dimension,
             &BTreeMap::new(),
-            512 * 1024 * 1024,
+            budget.bytes(),
             || false,
         )?)
     } else {
         None
     };
-    let results = replay(&proof, source, identities.as_ref())?;
+    let results = replay(&proof, source, identities.as_ref(), budget)?;
     let mut parts = Vec::new();
     let mut sidecars = Vec::new();
     for (r, (path, old)) in &original {
@@ -409,7 +427,7 @@ pub fn prepare(
             let start = image.len() / 4096;
             if sectors == 0
                 || start > 0x00ff_ffff
-                || image.len() + sectors * 4096 > 256 * 1024 * 1024
+                || image.len().saturating_add(sectors * 4096) > budget.bytes()
             {
                 return Err(err("实体区块超过预算"));
             }
@@ -448,8 +466,8 @@ pub fn prepare(
         used = used
             .checked_add(image.len())
             .ok_or_else(|| err("实体批次大小溢出"))?;
-        if used > 1024 * 1024 * 1024 {
-            return Err(err("实体批次源与候选超过 1 GiB 内存预算"));
+        if used > budget.bytes() {
+            return Err(err("实体批次源与候选超过当前内存预算"));
         }
         parts.push(Part {
             coords: *r,
@@ -481,7 +499,7 @@ pub fn prepare(
         .zip(&old_sides)
         .map(|(s, o)| (s.chunk, o.as_deref(), s.image.as_slice()))
         .collect::<Vec<_>>();
-    verify(&proof, &refs, &files, identities.as_ref())?;
+    verify(&proof, &refs, &files, identities.as_ref(), budget)?;
     Ok(EntityBatchCandidate {
         proof,
         parts,
@@ -489,11 +507,13 @@ pub fn prepare(
     })
 }
 /// 完整批次在每次预检和恢复时共同核对源、目标及顺序重放。
+
 pub(crate) fn verify(
     proof: &BatchProof,
     parts: &[((i32, i32), Option<&[u8]>, &[u8])],
     files: &[((i32, i32), Option<&[u8]>, &[u8])],
     identities: Option<&crate::entity_editing::IdentitySnapshot>,
+    budget: crate::editing::EditWorkBudget,
 ) -> Result<(), WorldError> {
     let touched = chunks(proof)?;
     let needed = touched.iter().map(|c| region(*c)).collect::<BTreeSet<_>>();
@@ -612,7 +632,7 @@ pub(crate) fn verify(
     if used_files.len() != files.len() {
         return Err(err("实体批次存在重复或无关 MCC"));
     }
-    if replay(proof, source, identities)? != after {
+    if replay(proof, source, identities, budget)? != after {
         return Err(err("实体批次和顺序证明重放结果不一致"));
     }
     Ok(())

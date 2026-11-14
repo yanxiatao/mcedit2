@@ -1471,12 +1471,6 @@ impl canvas::Program<Message> for IsometricSurface {
         }
     }
 }
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-    static_mesh::run_test_category(category);
-    framing_tests::run_test_category(category);
-}
 
 #[cfg(test)]
 #[path = "orthographic_framing_tests.rs"]
@@ -1559,6 +1553,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn barycentric_cursor_depth_distinguishes_intersecting_sloped_quads() {
         let view = example();
         let mut a = view.faces(Size::new(700.0, 440.0)).remove(0);
@@ -1578,6 +1573,7 @@ mod tests {
         assert_eq!(depth_at_cursor(Point::new(11.0, 5.0), &a), None);
     }
 
+    #[test]
     fn triangulated_uv_samples_identical_cutout_regions_as_gpu() {
         let rect = [
             Point::new(0.0, 0.0),
@@ -1593,11 +1589,13 @@ mod tests {
         assert_eq!(face_uv_at_cursor(Point::new(12.0, 2.0), &rect, &uv), None);
     }
 
+    #[test]
     fn degenerate_projected_triangle_cannot_be_a_pick_target() {
         let p = Point::new(2.0, 3.0);
         assert_eq!(triangle_depth(p, [p, p, p], [0.0, 1.0, 2.0]), None);
     }
 
+    #[test]
     fn cancelled_projection_never_populates_shared_gpu_or_face_cache() {
         let view = example();
         let size = Size::new(800.0, 440.0);
@@ -1609,6 +1607,7 @@ mod tests {
         assert!(!faces.is_empty());
     }
 
+    #[test]
     fn gpu_canvas_and_picking_share_one_exact_immutable_view_face_buffer() {
         let view = example();
         let size = Size::new(800.0, 440.0);
@@ -1622,6 +1621,7 @@ mod tests {
         assert_eq!(different.len(), view.faces(Size::new(801.0, 440.0)).len());
     }
 
+    #[test]
     fn projected_lod_cliff_has_witnessed_side_and_never_is_pickable() {
         use mcedit2_world::surface::{VoxelMaterial, ALL_FACES};
         let mut view = example();
@@ -1661,6 +1661,7 @@ mod tests {
         assert_eq!(view.pick_face(center, Size::new(900.0, 600.0)), None);
     }
 
+    #[test]
     fn projected_exact_border_retains_verified_lod_wall() {
         use mcedit2_world::surface::{VoxelMaterial, ALL_FACES};
         let tile = |x, z, y, span, faces| {
@@ -1712,6 +1713,7 @@ mod tests {
         assert!((length(verified_half) * 2.0 - length(wall)).abs() < 0.001);
     }
 
+    #[test]
     fn distant_scene_fits_horizon_without_3px_minimum_scale() {
         let mut view = example();
         let surface = Arc::make_mut(&mut view.surface);
@@ -1748,6 +1750,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn camera_relative_projection_preserves_neighboring_blocks_at_world_border() {
         let mut view = example();
         let source = Arc::make_mut(&mut view.surface);
@@ -1768,6 +1771,7 @@ mod tests {
         assert_eq!(box_[0][2], z - 0.5);
     }
 
+    #[test]
     fn camera_orbit_and_pitch_select_same_original_xyz() {
         let size = Size::new(700.0, 440.0);
         let block = [2.0, -62.5, 3.0];
@@ -1788,6 +1792,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn scrolled_isometric_orbit_uses_event_deltas_without_losing_the_scroll_transform() {
         use canvas::Program;
         let view = example();
@@ -1829,6 +1834,7 @@ mod tests {
         ));
     }
 
+    #[test]
     fn scene_guides_use_exact_original_coordinate_extents() {
         let view = example();
         let box_ = view.source_box();
@@ -1836,6 +1842,7 @@ mod tests {
         assert_eq!(box_[7], [2.5, -48.5, 3.5]);
     }
 
+    #[test]
     fn zero_thickness_crossed_model_face_is_a_renderable_polygon() {
         let view = example();
         let part = models::Part {
@@ -1869,6 +1876,7 @@ mod tests {
         assert!(part.rotation.is_some());
     }
 
+    #[test]
     fn cullface_plane_uses_transformed_geometry_not_local_face_name() {
         let mut part = models::Part::cube(models::Box3::FULL);
         part.variant_y = 90;
@@ -1882,6 +1890,7 @@ mod tests {
         assert!(!on_world_boundary(&partial, Face::PosX, Face::PosX));
     }
 
+    #[test]
     fn face_centroid_depth_tracks_actual_sloped_corners() {
         let view = example();
         let size = Size::new(600.0, 440.0);
@@ -1916,6 +1925,7 @@ mod tests {
         assert!((mean - center_depth).abs() > 0.01);
     }
 
+    #[test]
     fn translucent_face_ties_draw_after_opaque_and_share_pick_order() {
         let view = example();
         let size = Size::new(600.0, 440.0);
@@ -1933,6 +1943,7 @@ mod tests {
         assert!(faces[1].translucent);
     }
 
+    #[test]
     fn offscreen_faces_are_skipped_without_changing_source_voxels() {
         let mut view = example();
         let original = view.surface.voxels.len();
@@ -1941,6 +1952,7 @@ mod tests {
         assert_eq!(view.surface.voxels.len(), original);
     }
 
+    #[test]
     fn angled_part_projection_and_original_selection_share_coordinates() {
         let mut view = example();
         let rot = models::ElementRotation {
@@ -1963,6 +1975,7 @@ mod tests {
         assert_eq!(view.surface.voxels[0].state.name, raw);
     }
 
+    #[test]
     fn partial_geometry_keeps_one_original_voxel_position_for_picking() {
         let mut view = example();
         std::sync::Arc::make_mut(&mut view.surface).voxels[0].state = State {
@@ -1975,6 +1988,7 @@ mod tests {
         assert!(faces.iter().all(|f| f.pos == (2, -63, 3)));
     }
 
+    #[test]
     fn extreme_panorama_chunk_grid_is_bounded_and_floor_aligned() {
         assert_eq!(adaptive_chunk_grid(-33, -1), vec![-32, -16]);
         assert_eq!(adaptive_chunk_grid(15, 16), vec![16]);
@@ -1988,6 +2002,7 @@ mod tests {
         assert!(adaptive_chunk_grid(0, 15).is_empty());
     }
 
+    #[test]
     fn panorama_chunk_markers_reach_far_horizon_not_just_first_256() {
         let chosen = sampled_source_tile_indices(32_017, 256);
         assert_eq!(chosen.len(), 256);
@@ -2000,6 +2015,7 @@ mod tests {
         assert!(sampled_source_tile_indices(10, 0).is_empty());
     }
 
+    #[test]
     fn conservative_projected_envelope_drops_only_definite_offscreen_voxels() {
         let screen = Size::new(900.0, 440.0);
         assert!(outside_projected_envelope(
@@ -2036,6 +2052,7 @@ mod tests {
         ));
     }
 
+    #[test]
     fn chunk_and_section_boundaries_use_negative_coordinate_floor_grid() {
         assert_eq!(grid_boundaries(-17, -14), vec![-16]);
         assert_eq!(grid_boundaries(-33, -1), vec![-32, -16]);
@@ -2044,6 +2061,7 @@ mod tests {
         assert_eq!(grid_boundaries(-64, -64), Vec::<i32>::new());
     }
 
+    #[test]
     fn three_d_selection_world_box_preserves_signed_coordinate_extrema() {
         let corners = IsometricSurface::bounds_corners([-16, -64, -4], [-15, -62, -3]);
         assert_eq!(corners[0], [-16.5, -64.5, -4.5]);
@@ -2051,6 +2069,7 @@ mod tests {
         assert!(Bounds::new((-16, -64, -4), (-15, -62, -3)).is_ok());
     }
 
+    #[test]
     fn original_be_and_staged_visual_flags_survive_loaded_texture_mode() {
         let mut view = example();
         std::sync::Arc::make_mut(&mut view.surface).voxels[0].original_block_entity = true;
@@ -2059,41 +2078,10 @@ mod tests {
         assert!(faces.iter().any(|f| f.block_entity && f.staged));
     }
 
+    #[test]
     fn zero_culled_faces_are_not_pickable() {
         let mut view = example();
         std::sync::Arc::make_mut(&mut view.surface).voxels[0].faces = 0;
         assert!(view.faces(Size::new(700.0, 440.0)).is_empty());
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Rendering {
-            barycentric_cursor_depth_distinguishes_intersecting_sloped_quads();
-            triangulated_uv_samples_identical_cutout_regions_as_gpu();
-            degenerate_projected_triangle_cannot_be_a_pick_target();
-            cancelled_projection_never_populates_shared_gpu_or_face_cache();
-            gpu_canvas_and_picking_share_one_exact_immutable_view_face_buffer();
-            projected_lod_cliff_has_witnessed_side_and_never_is_pickable();
-            projected_exact_border_retains_verified_lod_wall();
-            distant_scene_fits_horizon_without_3px_minimum_scale();
-            camera_relative_projection_preserves_neighboring_blocks_at_world_border();
-            camera_orbit_and_pitch_select_same_original_xyz();
-            scrolled_isometric_orbit_uses_event_deltas_without_losing_the_scroll_transform();
-            scene_guides_use_exact_original_coordinate_extents();
-            zero_thickness_crossed_model_face_is_a_renderable_polygon();
-            cullface_plane_uses_transformed_geometry_not_local_face_name();
-            face_centroid_depth_tracks_actual_sloped_corners();
-            translucent_face_ties_draw_after_opaque_and_share_pick_order();
-            offscreen_faces_are_skipped_without_changing_source_voxels();
-            angled_part_projection_and_original_selection_share_coordinates();
-            partial_geometry_keeps_one_original_voxel_position_for_picking();
-            extreme_panorama_chunk_grid_is_bounded_and_floor_aligned();
-            panorama_chunk_markers_reach_far_horizon_not_just_first_256();
-            conservative_projected_envelope_drops_only_definite_offscreen_voxels();
-            chunk_and_section_boundaries_use_negative_coordinate_floor_grid();
-            three_d_selection_world_box_preserves_signed_coordinate_extrema();
-            original_be_and_staged_visual_flags_survive_loaded_texture_mode();
-            zero_culled_faces_are_not_pickable();
-        }
     }
 }

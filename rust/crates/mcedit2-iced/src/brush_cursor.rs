@@ -674,11 +674,13 @@ impl<const N: usize> Layer<N> {
 #[cfg(test)]
 #[path = "brush_cursor_tests.rs"]
 pub(crate) mod tests;
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    match category {
-        crate::test_categories::Category::Rendering => tests::material_cursor(),
-        crate::test_categories::Category::Background => tests::request_handoff(),
-        _ => {}
-    }
+
+#[test]
+fn rendering_behavior() {
+    tests::material_cursor();
+}
+
+#[test]
+fn background_behavior() {
+    tests::request_handoff();
 }

@@ -99,26 +99,18 @@ fn available_memory() -> Result<u64, String> {
 }
 #[cfg(target_os = "linux")]
 fn available_memory() -> Result<u64, String> {
-    let data = std::fs::read_to_string("/proc/meminfo").map_err(|e| e.to_string())?;
-    data.lines()
-        .find_map(|line| line.strip_prefix("MemAvailable:"))
-        .and_then(|v| v.split_whitespace().next()?.parse::<u64>().ok())
-        .and_then(|n| n.checked_mul(1024))
-        .ok_or("无法读取 MemAvailable；请显式指定资源预算".into())
+    crate::linux_memory::available()
 }
 #[cfg(not(any(windows, target_os = "linux")))]
 fn available_memory() -> Result<u64, String> {
     Err("此平台尚未提供可用内存查询；请在资源面板显式指定 MiB 预算".into())
-}
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
     fn shared_working_set_is_checked_and_can_be_raised() {
         let small = ResourceBudget::from_input("1").unwrap();
         assert!(small.check(100_000, 200_000, 50_000).is_err());
@@ -134,17 +126,10 @@ mod tests {
             .check(300 * 1024 * 1024, 600 * 1024 * 1024, 1200 * 1024 * 1024)
             .is_ok());
     }
+    #[test]
+    #[cfg(any(windows, target_os = "linux"))]
     #[cfg(any(windows, target_os = "linux"))]
     fn automatic_queries_available_memory() {
         assert!(ResourceBudget::automatic().unwrap().bytes > 0);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Assets {
-            shared_working_set_is_checked_and_can_be_raised();
-            #[cfg(any(windows, target_os = "linux"))]
-            automatic_queries_available_memory();
-        }
     }
 }

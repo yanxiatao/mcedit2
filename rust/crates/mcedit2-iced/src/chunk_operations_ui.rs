@@ -297,6 +297,7 @@ fn clean_for_write(app: &App, w: usize) -> Result<(), String> {
 fn read(app: &mut App, target: Target) -> Result<Task<Message>, String> {
     let (w, _) = owner(app, &target)?;
     let world = app.worlds[w].clone();
+    let budget = app.block_edit.budget.parse()?;
     let panel = app
         .chunk_operations
         .panels
@@ -314,7 +315,8 @@ fn read(app: &mut App, target: Target) -> Result<Task<Message>, String> {
     panel.status = "正在读取真实恢复记录…".into();
     Ok(Task::perform(
         crate::nbt_background(move || {
-            mixed_transaction::pending_summary(&world).map_err(|e| e.to_string())
+            mixed_transaction::pending_summary_with_budget(&world, budget)
+                .map_err(|e| e.to_string())
         }),
         move |result| {
             Message::ChunkOperations(Action::ReadDone(target.clone(), Arc::clone(&token), result))
@@ -570,11 +572,7 @@ fn handle(app: &mut App, action: Action) -> Result<Task<Message>, String> {
             let key = owner(app, &target)?;
             clean_for_write(app, key.0)?;
             let world = app.worlds[key.0].clone();
-            let budget = if kind == Io::Finish {
-                app.block_edit.budget.parse()?
-            } else {
-                Default::default()
-            };
+            let budget = app.block_edit.budget.parse()?;
             let panel = app
                 .chunk_operations
                 .panels
@@ -645,16 +643,18 @@ fn handle(app: &mut App, action: Action) -> Result<Task<Message>, String> {
                 crate::nbt_background(move || {
                     let mut sessions = crate::saved_sessions::Ready::default();
                     let result = match kind {
-                        Io::Prepare => mixed_transaction::prepare(
+                        Io::Prepare => mixed_transaction::prepare_with_budget(
                             &world,
                             plan.as_ref().expect("准备具有冻结计划").candidates(),
                             false,
                             &phrase,
+                            budget,
                         ),
-                        Io::Finish => mixed_transaction::finish_with_history(
+                        Io::Finish => mixed_transaction::finish_with_history_with_budget(
                             &world,
                             false,
                             Some(reviewed.as_deref().expect("写入具有实际恢复记录")),
+                            budget,
                         )
                         .map(|(count, archive)| {
                             sessions = crate::saved_sessions::advance(
@@ -665,15 +665,16 @@ fn handle(app: &mut App, action: Action) -> Result<Task<Message>, String> {
                             );
                             count
                         }),
-                        Io::Rollback => mixed_transaction::rollback_reviewed(
+                        Io::Rollback => mixed_transaction::rollback_reviewed_with_budget(
                             &world,
                             false,
                             reviewed.as_deref().expect("回滚具有实际恢复记录"),
+                            budget,
                         ),
                     }
                     .map_err(|e| e.to_string());
-                    let pending =
-                        mixed_transaction::pending_summary(&world).map_err(|e| e.to_string());
+                    let pending = mixed_transaction::pending_summary_with_budget(&world, budget)
+                        .map_err(|e| e.to_string());
                     Ok(IoResult {
                         result,
                         pending,

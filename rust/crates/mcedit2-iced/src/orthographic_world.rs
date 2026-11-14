@@ -813,10 +813,6 @@ impl canvas::Program<Message> for Controls {
         }
     }
 }
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
 
 #[cfg(test)]
 #[path = "orthographic_world_tests.rs"]

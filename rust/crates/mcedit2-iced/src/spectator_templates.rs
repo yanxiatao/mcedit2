@@ -355,10 +355,5 @@ impl Template {
 }
 
 #[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
-
-#[cfg(test)]
 #[path = "spectator_template_tests.rs"]
 mod tests;

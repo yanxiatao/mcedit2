@@ -41,6 +41,13 @@ pub(crate) struct Reviewed {
 /// 外来恢复先读取真实日志，再在主线程建立会话归属，随后才开始物理提交。
 fn review(app: &mut App, key: (usize, usize)) -> Task<Message> {
     let world = app.worlds[key.0].clone();
+    let budget = match app.block_edit.budget.parse() {
+        Ok(budget) => budget,
+        Err(error) => {
+            app.mixed_status = error;
+            return Task::none();
+        }
+    };
     let root = world.root.clone();
     let identity = std::sync::Arc::new(());
     app.mixed_save.review = Some(Review {
@@ -52,7 +59,7 @@ fn review(app: &mut App, key: (usize, usize)) -> Task<Message> {
     app.mixed_status = "正在读取并冻结实际恢复记录…".into();
     Task::perform(
         nbt_background(move || {
-            mcedit2_world::mixed_transaction::pending_summary(&world)
+            mcedit2_world::mixed_transaction::pending_summary_with_budget(&world, budget)
                 .map_err(|error| error.to_string())
         }),
         move |result| {
@@ -346,7 +353,13 @@ pub(crate) fn run(app: &mut App, kind: u8) -> Task<Message> {
         .owner
         .as_ref()
         .is_some_and(|owner| owner.maps_changed);
-    let phrase = app.mixed_phrase.clone();
+    let save_budget = match app.block_edit.budget.parse() {
+        Ok(budget) => budget,
+        Err(error) => {
+            app.mixed_status = error;
+            return Task::none();
+        }
+    };
     let reviewed = app.mixed_save.prepared.clone();
     let history_budget = if kind == 1 {
         let Some(summary) = &reviewed else {
@@ -369,11 +382,14 @@ pub(crate) fn run(app: &mut App, kind: u8) -> Task<Message> {
     };
     // NBT 候选已经过各自 FileDocument 的写入权限检查；不借用另一文件的开关。
     let read_only = app.readonly;
-    let root_sessions = if kind == 1 {
+    let mut root_sessions = if kind == 1 {
         crate::saved_sessions::capture(app, &world.root)
     } else {
         Vec::new()
     };
+    for source in &mut root_sessions {
+        source.session.set_work_budget(save_budget);
+    }
     let participants = app
         .mixed_sources
         .keys()
@@ -392,7 +408,8 @@ pub(crate) fn run(app: &mut App, kind: u8) -> Task<Message> {
             let result = (|| {
                 if kind == 0 {
                     if let Some(pending) =
-                        mixed_transaction::pending_summary(&world).map_err(|e| e.to_string())?
+                        mixed_transaction::pending_summary_with_budget(&world, save_budget)
+                            .map_err(|e| e.to_string())?
                     {
                         return Err(format!(
                             "已有保存事务 {}，阶段 {:?}；请先处理该事务",
@@ -420,7 +437,8 @@ pub(crate) fn run(app: &mut App, kind: u8) -> Task<Message> {
                             .map_err(|_| "保存时间超出范围")?
                     };
                     let mut unchanged = Vec::new();
-                    for (source, session, request) in sessions {
+                    for (source, mut session, request) in sessions {
+                        session.set_work_budget(save_budget);
                         let policy = if let Some(intent) =
                             intent.as_ref().filter(|intent| intent.key == source)
                         {
@@ -457,22 +475,33 @@ pub(crate) fn run(app: &mut App, kind: u8) -> Task<Message> {
                         ));
                     }
                     if all.is_empty() {
-                        if read_only || phrase != "SAVE" || unchanged.is_empty() {
+                        if read_only || unchanged.is_empty() {
                             return Err("没有可保存的来源，或保存确认方式 / 写入权限无效".into());
                         }
                         sessions_ready = crate::saved_sessions::unchanged(unchanged);
                         no_write = true;
                         return Ok(0);
                     }
-                    mixed_transaction::prepare(&world, &all, read_only, &phrase)
-                        .map_err(|e| e.to_string())
+                    mixed_transaction::prepare_with_budget(
+                        &world,
+                        &all,
+                        read_only,
+                        if all.iter().any(MixedCandidate::requires_nbt_confirmation) {
+                            "SAVE_BE_NBT"
+                        } else {
+                            "SAVE"
+                        },
+                        save_budget,
+                    )
+                    .map_err(|e| e.to_string())
                 } else if kind == 1 {
-                    saved = mixed_transaction::nbt_identities(&world)
+                    saved = mixed_transaction::nbt_identities_with_budget(&world, save_budget)
                         .map_err(|error| error.to_string())?;
-                    let (count, archive) = mixed_transaction::finish_with_history(
+                    let (count, archive) = mixed_transaction::finish_with_history_with_budget(
                         &world,
                         read_only,
                         reviewed.as_ref(),
+                        save_budget,
                     )
                     .map_err(|error| error.to_string())?;
                     sessions_ready = crate::saved_sessions::advance(
@@ -507,7 +536,7 @@ pub(crate) fn run(app: &mut App, kind: u8) -> Task<Message> {
                                     maps.observe_transaction(
                                         &archive,
                                         &maps.revision(),
-                                        256 * 1024 * 1024,
+                                        save_budget.bytes(),
                                         || false,
                                     )
                                     .map_err(|error| error.to_string())
@@ -518,10 +547,12 @@ pub(crate) fn run(app: &mut App, kind: u8) -> Task<Message> {
                     }
                     Ok(count)
                 } else {
-                    mixed_transaction::rollback(&world, read_only).map_err(|e| e.to_string())
+                    mixed_transaction::rollback_with_budget(&world, read_only, save_budget)
+                        .map_err(|e| e.to_string())
                 }
             })();
-            let pending = mixed_transaction::pending_summary(&world).map_err(|e| e.to_string());
+            let pending = mixed_transaction::pending_summary_with_budget(&world, save_budget)
+                .map_err(|e| e.to_string());
             Ok(Completed {
                 result,
                 pending,

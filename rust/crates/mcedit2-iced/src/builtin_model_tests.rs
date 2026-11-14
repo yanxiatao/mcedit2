@@ -24,6 +24,7 @@ const COLORS: [&str; 16] = [
     "black",
 ];
 
+#[test]
 fn unidentified_legacy_chest_sheets_are_diagnosed_instead_of_misinterpreted() {
     let f = fixture();
     for side in ["left", "right"] {
@@ -42,6 +43,9 @@ fn unidentified_legacy_chest_sheets_are_diagnosed_instead_of_misinterpreted() {
     let bed = parse_state("minecraft:red_bed[facing=north,part=head]").unwrap();
     assert_eq!(bank.geometry_at(&bed, (0, 0, 0)).unwrap().len(), 3);
 }
+
+#[test]
+#[ignore = "requires local GPU / installed Minecraft resources"]
 
 fn real_special_source_positions() {
     let world = mcedit2_world::inspect_world(PathBuf::from(
@@ -165,6 +169,7 @@ fn center(part: &crate::models::Part) -> [f32; 3] {
     }))
 }
 
+#[test]
 fn all_modern_chests_keep_body_lid_latch_facing_halves_and_entity_sheet() {
     let f = fixture();
     let bank = f.open();
@@ -265,6 +270,7 @@ fn all_modern_chests_keep_body_lid_latch_facing_halves_and_entity_sheet() {
     assert_eq!(r[2].bounds.max[0] + 0.5, l[2].bounds.min[0] + 1.5);
 }
 
+#[test]
 fn all_bed_colors_parts_and_facings_keep_sheet_crops_and_source_height() {
     let f = fixture();
     let bank = f.open();
@@ -327,6 +333,7 @@ fn all_bed_colors_parts_and_facings_keep_sheet_crops_and_source_height() {
         .is_none());
 }
 
+#[test]
 fn explicit_models_empty_geometry_and_foreign_chests_are_not_overwritten() {
     for doc in [
         br#"{"elements":[]}"#.as_slice(),
@@ -355,6 +362,7 @@ fn explicit_models_empty_geometry_and_foreign_chests_are_not_overwritten() {
     assert!(bank.geometry_at(&foreign, (0, 0, 0)).unwrap().is_empty());
 }
 
+#[test]
 fn entity_texture_overlay_and_zip_match_directory_for_block_only_loading() {
     let f = fixture();
     let pixels = image::RgbaImage::from_pixel(64, 64, image::Rgba([77, 19, 199, 255]));
@@ -424,6 +432,7 @@ fn entity_texture_overlay_and_zip_match_directory_for_block_only_loading() {
     );
 }
 
+#[test]
 fn special_models_keep_geometry_and_source_picking_in_perspective_and_projection() {
     use iced::{Point, Size};
     let f = fixture();
@@ -502,21 +511,5 @@ fn special_models_keep_geometry_and_source_picking_in_perspective_and_projection
             )
             .unwrap();
         assert_eq!(hit.owner.unwrap().position, [x, 0, 0]);
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    if category == crate::test_categories::Category::SpecialModels {
-        unidentified_legacy_chest_sheets_are_diagnosed_instead_of_misinterpreted();
-        all_modern_chests_keep_body_lid_latch_facing_halves_and_entity_sheet();
-        all_bed_colors_parts_and_facings_keep_sheet_crops_and_source_height();
-        explicit_models_empty_geometry_and_foreign_chests_are_not_overwritten();
-        entity_texture_overlay_and_zip_match_directory_for_block_only_loading();
-        special_models_keep_geometry_and_source_picking_in_perspective_and_projection();
-    }
-
-    if category == crate::test_categories::Category::Installed {
-        real_special_source_positions();
     }
 }

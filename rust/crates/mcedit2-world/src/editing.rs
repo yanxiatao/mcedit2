@@ -1283,6 +1283,7 @@ fn nbt_sha(raw: &[u8]) -> String {
 /// Strict 3D original block-state transaction overlay. Nothing is saved.
 #[derive(Debug, Clone)]
 pub struct Session {
+    save_work_budget: EditWorkBudget,
     world: WorldSummary,
     dimension: String,
     origin: Option<crate::history_source::Archive>,
@@ -1325,6 +1326,12 @@ pub struct Session {
     be_redo: Vec<BeHistory>,
 }
 impl Session {
+    pub fn set_work_budget(&mut self, budget: EditWorkBudget) {
+        self.save_work_budget = budget;
+    }
+    pub fn work_budget(&self) -> EditWorkBudget {
+        self.save_work_budget
+    }
     /// 对 level.dat 明确声明但 Region 目录尚未生成的原版维度建立会话。
     /// 仅扩展内存中的世界摘要，目录创建由混合事务负责。
     pub fn new_with_creation_profile(
@@ -1349,6 +1356,7 @@ impl Session {
             ));
         }
         Ok(Self {
+            save_work_budget: EditWorkBudget::default(),
             world,
             dimension,
             origin: None,
@@ -4099,13 +4107,14 @@ impl Session {
             return Err(refuse("创建区块或 section 必须通过混合事务保存"));
         }
         let mut reader =
-            ReadOnlyRegionCache::for_source(&self.world, &self.dimension, self.origin.as_ref())?;
+            ReadOnlyRegionCache::for_source(&self.world, &self.dimension, self.origin.as_ref())?
+                .with_work_budget(self.save_work_budget);
         let (candidates, proofs, biomes) = self.prepare_terrain_chunk_candidates(&mut reader)?;
         let candidates = candidates
             .into_iter()
             .map(TerrainChunkCandidate::into_existing)
             .collect::<Result<Vec<_>, _>>()?;
-        region_plan::plan_world_regions_with_history(
+        region_plan::plan_world_regions_with_history_budget(
             &self.world,
             &self.dimension,
             &candidates,
@@ -4114,6 +4123,7 @@ impl Session {
             &biomes,
             &[],
             timestamp,
+            self.save_work_budget,
         )
     }
     /// 同一保存入口按派生数据合同完成区块。未重算的旧版方块阶段不会暴露为可写候选。
@@ -4149,7 +4159,8 @@ impl Session {
                     &self.world,
                     &self.dimension,
                     self.origin.as_ref(),
-                )?;
+                )?
+                .with_work_budget(self.save_work_budget);
                 let mut block_source = self.clone();
                 block_source.biome_overlay.clear();
                 block_source.biome_source.clear();
@@ -4231,7 +4242,7 @@ impl Session {
                     || reader.alpha_storage()
                 {
                     self.verify_entity_history()?;
-                    let shared = crate::shared_chunk_save::prepare_creation_light(
+                    let shared = crate::shared_chunk_save::prepare_creation_light_with_budget(
                         &self.world,
                         proof,
                         &blocks,
@@ -4240,6 +4251,7 @@ impl Session {
                         self.entity_proofs()?,
                         timestamp,
                         &mut cancelled,
+                        self.save_work_budget,
                     )?;
                     return Ok(vec![crate::mixed_transaction::MixedCandidate::SharedChunk(
                         shared,
@@ -4255,13 +4267,14 @@ impl Session {
                 )?;
                 if !self.be_overlay.is_empty() || !self.entity_overlay.is_empty() {
                     self.verify_entity_history()?;
-                    let shared = crate::shared_chunk_save::prepare_light(
+                    let shared = crate::shared_chunk_save::prepare_light_with_budget(
                         &self.world,
                         candidate,
                         self.be_proofs()?,
                         &self.be_overlay,
                         self.entity_proofs()?,
                         timestamp,
+                        self.save_work_budget,
                     )?;
                     Ok(vec![crate::mixed_transaction::MixedCandidate::SharedChunk(
                         shared,
@@ -4291,7 +4304,8 @@ impl Session {
         terrain.entity_overlay.clear();
         terrain.entity_sources.clear();
         let mut reader =
-            ReadOnlyRegionCache::for_source(&self.world, &self.dimension, self.origin.as_ref())?;
+            ReadOnlyRegionCache::for_source(&self.world, &self.dimension, self.origin.as_ref())?
+                .with_work_budget(self.save_work_budget);
         let (chunks, proofs, biomes) = if !terrain.creation.is_empty() {
             terrain.prepare_terrain_chunk_candidates(&mut reader)?
         } else if terrain.be_overlay.is_empty()
@@ -4310,7 +4324,7 @@ impl Session {
         };
         if !self.creation.is_empty() {
             let snapshots: Vec<_> = self.creation.values().cloned().collect();
-            let mut output = crate::chunk_creation::plan_mixed(
+            let mut output = crate::chunk_creation::plan_mixed_with_budget(
                 &self.world,
                 &self.dimension,
                 chunks
@@ -4322,15 +4336,19 @@ impl Session {
                 &biomes,
                 timestamp,
                 &mut reader,
+                self.save_work_budget,
             )?;
             if !self.entity_overlay.is_empty() {
                 self.verify_entity_history()?;
-                output.push(MixedCandidate::EntityBatch(crate::entity_batch::prepare(
-                    &self.world,
-                    &self.dimension,
-                    self.entity_proofs()?,
-                    timestamp,
-                )?));
+                output.push(MixedCandidate::EntityBatch(
+                    crate::entity_batch::prepare_with_budget(
+                        &self.world,
+                        &self.dimension,
+                        self.entity_proofs()?,
+                        timestamp,
+                        self.save_work_budget,
+                    )?,
+                ));
             }
             return Ok(output);
         }
@@ -4351,7 +4369,7 @@ impl Session {
             if !self.entity_overlay.is_empty() {
                 self.verify_entity_history()?;
                 return Ok(vec![MixedCandidate::SharedChunk(
-                    crate::shared_chunk_save::prepare_native(
+                    crate::shared_chunk_save::prepare_native_with_budget(
                         &self.world,
                         &self.dimension,
                         chunks,
@@ -4359,6 +4377,7 @@ impl Session {
                         biomes,
                         self.entity_proofs()?,
                         timestamp,
+                        self.save_work_budget,
                     )?,
                 )]);
             }
@@ -4387,7 +4406,7 @@ impl Session {
             .any(|(source, _)| !source.starts_with("entity-region:"))
         {
             self.verify_entity_history()?;
-            let shared = crate::shared_chunk_save::prepare_native(
+            let shared = crate::shared_chunk_save::prepare_native_with_budget(
                 &self.world,
                 &self.dimension,
                 chunks,
@@ -4395,6 +4414,7 @@ impl Session {
                 biomes,
                 self.entity_proofs()?,
                 timestamp,
+                self.save_work_budget,
             )?;
             return Ok(vec![MixedCandidate::SharedChunk(shared)]);
         }
@@ -4437,15 +4457,16 @@ impl Session {
                 })
                 .cloned()
                 .collect();
-            if crate::region_external::requires_external(
+            if crate::region_external::requires_external_with_budget(
                 &self.world,
                 &self.dimension,
                 region,
                 extension,
                 &changes,
+                self.save_work_budget,
             )? {
                 output.push(MixedCandidate::External(
-                    crate::region_external::prepare_history(
+                    crate::region_external::prepare_history_with_budget(
                         &self.world,
                         &self.dimension,
                         region,
@@ -4455,10 +4476,11 @@ impl Session {
                         &region_biomes,
                         &[],
                         timestamp,
+                        self.save_work_budget,
                     )?,
                 ));
             } else {
-                for candidate in region_plan::plan_world_regions_with_history(
+                for candidate in region_plan::plan_world_regions_with_history_budget(
                     &self.world,
                     &self.dimension,
                     &changes,
@@ -4467,6 +4489,7 @@ impl Session {
                     &region_biomes,
                     &[],
                     timestamp,
+                    self.save_work_budget,
                 )? {
                     output.push(MixedCandidate::Region {
                         dimension: self.dimension.clone(),
@@ -4477,12 +4500,15 @@ impl Session {
         }
         if !self.entity_overlay.is_empty() {
             self.verify_entity_history()?;
-            output.push(MixedCandidate::EntityBatch(crate::entity_batch::prepare(
-                &self.world,
-                &self.dimension,
-                self.entity_proofs()?,
-                timestamp,
-            )?));
+            output.push(MixedCandidate::EntityBatch(
+                crate::entity_batch::prepare_with_budget(
+                    &self.world,
+                    &self.dimension,
+                    self.entity_proofs()?,
+                    timestamp,
+                    self.save_work_budget,
+                )?,
+            ));
         }
         Ok(output)
     }
@@ -4509,7 +4535,17 @@ impl Session {
         timestamp: u32,
     ) -> Result<Vec<NativeRegionCandidate>, WorldError> {
         let candidates = self.prepare_native_palette_candidates()?;
-        region_plan::plan_world_regions(&self.world, &self.dimension, &candidates, timestamp)
+        region_plan::plan_world_regions_with_history_budget(
+            &self.world,
+            &self.dimension,
+            &candidates,
+            &[],
+            &[],
+            &[],
+            &[],
+            timestamp,
+            self.save_work_budget,
+        )
     }
     /// Experimental single-Region world write. Refuses any staged edit that
     /// touches a second Region; manual-only library API, not exposed in iced.
@@ -4528,8 +4564,12 @@ impl Session {
         let candidate = images
             .pop()
             .ok_or_else(|| refuse("Missing single Region save candidate"))?;
-        let receipt =
-            region_transaction::apply_single_region(&self.world, &self.dimension, &candidate)?;
+        let receipt = region_transaction::apply_single_region_with_budget(
+            &self.world,
+            &self.dimension,
+            &candidate,
+            self.save_work_budget,
+        )?;
         self.discard();
         Ok(receipt)
     }

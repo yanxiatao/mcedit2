@@ -181,15 +181,12 @@ fn parse_profile(bytes: &[u8], java: bool) -> Result<BTreeMap<String, Material>,
     }
     Ok(out)
 }
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
     fn native_mtl_keeps_raw_resource_references_and_ignores_unused_pbr_fields() {
         let source=b"newmtl Painted Body\nKd 1 1 1 0.6\nd 0.1\nKe 3 3 3\nNi unused\nmap_Kd C:\\Original Folder\\assets\\demo\\textures\\item\\panel.png\nneoforge_TintIndex 2\n";
         let materials = parse_java(source).unwrap();
@@ -202,12 +199,14 @@ mod tests {
         assert!(parse_java(b"Kd 1 1 1\n").is_err());
     }
 
+    #[test]
     fn reads_static_mtl_diffuse_alpha_and_texture() {
         let m=parse(b"newmtl frame\nKd 0.25 0.5 1\nd 0.6\nmap_Kd example:item/casing\nmap_d example:item/casing_alpha\n").unwrap();
         assert_eq!(m["frame"].diffuse, [0.25, 0.5, 1., 0.6]);
         assert_eq!(m["frame"].map_kd.as_deref(), Some("example:item/casing"));
     }
 
+    #[test]
     fn parses_static_specular_emission_and_pbr_extension_values() {
         let m=parse(b"newmtl chrome\nKs 0.5 0.25 1\nKe 0.1 0.2 0.3\nNs 100\nNi 1.4\nPm 0.8\nPr 0.35\nillum 2\n").unwrap();
         let c = &m["chrome"];
@@ -220,18 +219,9 @@ mod tests {
         assert!(parse(b"newmtl bad\nNs NaN\n").is_err());
     }
 
+    #[test]
     fn refuses_path_traversal_and_invalid_opacity() {
         assert!(parse(b"newmtl test\nmap_Kd ../private.png\n").is_err());
         assert!(parse(b"newmtl test\nd -1\n").is_err());
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Models {
-            native_mtl_keeps_raw_resource_references_and_ignores_unused_pbr_fields();
-            reads_static_mtl_diffuse_alpha_and_texture();
-            parses_static_specular_emission_and_pbr_extension_values();
-            refuses_path_traversal_and_invalid_opacity();
-        }
     }
 }

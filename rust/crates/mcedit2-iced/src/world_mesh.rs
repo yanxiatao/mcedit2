@@ -298,14 +298,10 @@ impl WorldQuad {
 }
 
 #[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
     fn full_corner_attributes_and_material_survive_triangle_expansion() {
         let face = WorldQuad {
             xyz: [
@@ -342,6 +338,7 @@ mod tests {
         assert_eq!(moved.rgba, face.rgba);
     }
 
+    #[test]
     fn standalone_triangle_keeps_degenerate_second_triangle_and_rejects_inconsistent_data() {
         let mut face = WorldQuad {
             xyz: [[0.0; 3]; 4],
@@ -358,13 +355,5 @@ mod tests {
         let mut vertices = face.expanded();
         vertices[3].rgba[0] = 0.0;
         assert!(WorldQuad::from_vertices(&vertices).is_err());
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::WorldGeometry {
-            full_corner_attributes_and_material_survive_triangle_expansion();
-            standalone_triangle_keeps_degenerate_second_triangle_and_rejects_inconsistent_data();
-        }
     }
 }

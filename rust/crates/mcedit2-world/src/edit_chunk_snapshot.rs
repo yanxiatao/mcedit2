@@ -516,7 +516,8 @@ impl Session {
             .copied()
             .collect::<BTreeSet<_>>();
         let mut reader =
-            ReadOnlyRegionCache::for_source(&self.world, &self.dimension, Some(origin))?;
+            ReadOnlyRegionCache::for_source(&self.world, &self.dimension, Some(origin))?
+                .with_work_budget(self.save_work_budget);
         let mut result = BTreeMap::new();
         for chunk in chunks {
             let (flags, status) = if let Some(raw) = self.be_overlay.get(&chunk) {
@@ -575,7 +576,9 @@ impl Session {
             origin.verify_current()?;
         }
         self.verify_entity_history()?;
-        let mut reader = self.source_reader()?;
+        let mut reader = self
+            .source_reader()?
+            .with_work_budget(self.save_work_budget);
         let mut terrain = self.clone();
         terrain.entity_overlay.clear();
         terrain.entity_sources.clear();
@@ -595,7 +598,8 @@ impl Session {
             .into_iter()
             .map(|stage| ((stage.chunk_x, stage.chunk_z), stage.patched_nbt))
             .collect::<BTreeMap<_, _>>();
-        let mut actual = ReadOnlyRegionCache::new(&self.world, &self.dimension)?;
+        let mut actual = ReadOnlyRegionCache::new(&self.world, &self.dimension)?
+            .with_work_budget(self.save_work_budget);
         let mut targets = BTreeMap::new();
         let mut entities = BTreeMap::new();
         let mut terrain_history = BTreeSet::new();
@@ -818,13 +822,15 @@ impl Session {
                         .collect::<BTreeMap<_, _>>()
                 };
                 let candidate = if scope.is_empty() && versions.is_empty() {
-                    crate::chunk_snapshot::prepare_region(
+                    crate::chunk_snapshot::prepare_region_with_budget(
                         &self.world,
                         &self.dimension,
                         storage,
                         chunks,
                         nbt,
                         timestamp,
+                        0,
+                        self.save_work_budget,
                     )?
                 } else {
                     let origin = self
@@ -842,6 +848,7 @@ impl Session {
                         &scope,
                         &versions,
                         &mut cancelled,
+                        self.save_work_budget,
                     )?
                 };
                 if let Some(mut candidate) = candidate {
@@ -887,6 +894,7 @@ impl Session {
                 origin,
                 timestamp,
                 &mut cancelled,
+                self.save_work_budget,
             )? {
                 result.push(MixedCandidate::ChunkSnapshot(candidate));
             }

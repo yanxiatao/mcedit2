@@ -1010,14 +1010,10 @@ pub(crate) fn view(app: &App) -> Element<'_, Message> {
 }
 
 #[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
     fn bounds_preserve_negative_coordinates_and_refuse_overflow() {
         let b = bounds([-80, 0, 32]).unwrap();
         assert_eq!(b.minimum, [-95, -15, 17]);
@@ -1027,6 +1023,7 @@ mod tests {
         assert!(bounds([0, -2040, 0]).is_err());
     }
 
+    #[test]
     fn linked_source_reload_preserves_four_independent_viewports_and_orbit() {
         use crate::view_navigation::{Action as NavAction, QuadPane, Target};
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1104,6 +1101,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn drafts_failed_loads_and_stale_results_keep_the_last_valid_quad_snapshot() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../test_files/AnvilWorld_1.8");
@@ -1175,6 +1173,7 @@ mod tests {
         ));
     }
 
+    #[test]
     fn real_source_planes_share_center_and_stale_load_cannot_publish() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../test_files/AnvilWorld_1.8");
@@ -1213,16 +1212,6 @@ mod tests {
         app.quad.nonce = 2;
         let _ = update(&mut app, Action::Loaded(1, (0, 0), Ok(Box::new(snapshot))));
         assert!(app.quad.snapshot.is_none());
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Navigation {
-            bounds_preserve_negative_coordinates_and_refuse_overflow();
-            linked_source_reload_preserves_four_independent_viewports_and_orbit();
-            drafts_failed_loads_and_stale_results_keep_the_last_valid_quad_snapshot();
-            real_source_planes_share_center_and_stale_load_cannot_publish();
-        }
     }
 }
 

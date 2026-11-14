@@ -891,10 +891,6 @@ impl canvas::Program<Message> for Map2D<'_> {
         }
     }
 }
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
 
 #[cfg(test)]
 mod tests {
@@ -913,6 +909,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn accurate_64_square_grid_selects_edge_without_off_by_one() {
         let grid = GridLayout::new(Size::new(480.0, 420.0), 64, 64, Default::default()).unwrap();
         assert_eq!(
@@ -937,6 +934,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn source_xyz_is_preserved_in_both_plane_orientations() {
         let b = Bounds::new((-16, -64, -17), (-15, -64, -16)).unwrap();
         let slice = Slice {
@@ -1004,6 +1002,7 @@ mod tests {
         assert_eq!(map.cell(1, 0).unwrap().1, (-16, -64, -17));
     }
 
+    #[test]
     fn uv_corners_and_texture_sampling_are_bounded() {
         let uv = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
         assert_eq!(sample_uv(uv, 0.0, 0.0), [0.0, 0.0]);
@@ -1015,6 +1014,7 @@ mod tests {
         assert!(texture_samples(28.0, 4096).pow(2) * 4096 <= 16384);
     }
 
+    #[test]
     fn absent_source_is_visually_distinct_from_air() {
         let air = SliceCell::Present {
             state: State {
@@ -1033,6 +1033,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn all_slice_planes_keep_exact_source_coordinates_after_anchored_zoom_and_pan() {
         use crate::view_navigation::{Action, Target, Viewport};
         let size = Size::new(640., 400.);
@@ -1106,6 +1107,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn scrolled_slice_uses_transformed_cursor_for_source_pick_and_wheel() {
         use canvas::Program;
         let slice = Slice {
@@ -1178,17 +1180,5 @@ mod tests {
         assert!(
             matches!(wheel.into_inner().0,Some(Message::Navigate(_,crate::view_navigation::Action::Zoom{anchor,..})) if anchor==Point::new(80.,50.))
         );
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Navigation {
-            accurate_64_square_grid_selects_edge_without_off_by_one();
-            source_xyz_is_preserved_in_both_plane_orientations();
-            uv_corners_and_texture_sampling_are_bounded();
-            absent_source_is_visually_distinct_from_air();
-            all_slice_planes_keep_exact_source_coordinates_after_anchored_zoom_and_pan();
-            scrolled_slice_uses_transformed_cursor_for_source_pick_and_wheel();
-        }
     }
 }

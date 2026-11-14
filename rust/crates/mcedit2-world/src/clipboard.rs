@@ -2,8 +2,6 @@
 use crate::editing::{parse_state, render_state};
 use crate::sections::State;
 use crate::WorldError;
-#[cfg(test)]
-use crate::WorldSummary;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -63,14 +61,21 @@ pub struct SourceFileProof {
 impl SourceFileProof {
     pub fn verify(&self) -> Result<(), WorldError> {
         let metadata = fs::symlink_metadata(&self.path)?;
-        if !metadata.file_type().is_file()
-            || metadata.file_type().is_symlink()
-            || metadata.len() > MAX_BYTES as u64
-        {
-            return Err(refuse("结构源文件无效或超预算"));
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(refuse("结构源文件必须是普通文件"));
         }
-        let bytes = fs::read(&self.path)?;
-        if format!("{:x}", Sha256::digest(&bytes)) != self.sha256 {
+        use std::io::Read;
+        let mut file = fs::File::open(&self.path)?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let count = file.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            hasher.update(&buffer[..count]);
+        }
+        if format!("{:x}", hasher.finalize()) != self.sha256 {
             return Err(refuse("结构源文件在预览后已变化"));
         }
         Ok(())
@@ -1226,8 +1231,8 @@ pub(crate) fn encode_with_budget(
     clip.validate_with_budget(world, &clip.dimension, budget)?;
     let bytes = serde_json::to_vec_pretty(clip)
         .map_err(|e| refuse(format!("Clipboard encode failed: {e}")))?;
-    if bytes.len() > MAX_BYTES {
-        return Err(refuse("Clipboard JSON exceeds 64 MiB limit"));
+    if bytes.len() > (budget.bytes() / 4) {
+        return Err(refuse("Clipboard JSON exceeds 当前文件预算 limit"));
     }
     budget.check(
         bytes
@@ -1254,10 +1259,13 @@ pub fn load_with_budget(
         return Err(refuse("Only .mcedit2clip is accepted"));
     }
     let meta = fs::symlink_metadata(path)?;
-    if !meta.is_file() || meta.file_type().is_symlink() || meta.len() > MAX_BYTES as u64 {
-        return Err(refuse("Clipboard must be a regular file under 64 MiB"));
+    if !meta.is_file() || meta.file_type().is_symlink() || meta.len() > (budget.bytes() / 4) as u64
+    {
+        return Err(refuse(
+            "Clipboard must be a regular file under 当前文件预算",
+        ));
     }
-    let bytes = fs::read(path)?;
+    let bytes = crate::read_limited_file(path, (budget.bytes() / 4) as u64)?;
     let mut clipboard = decode_with_budget(world, dimension, &bytes, budget)?;
     clipboard.source_file = Some(SourceFileProof::from_bytes(path, &bytes)?);
     Ok(clipboard)
@@ -1268,8 +1276,8 @@ pub(crate) fn decode_with_budget(
     bytes: &[u8],
     budget: EditWorkBudget,
 ) -> Result<BlockClipboard, WorldError> {
-    if bytes.len() > MAX_BYTES {
-        return Err(refuse("Clipboard JSON exceeds 64 MiB"));
+    if bytes.len() > (budget.bytes() / 4) {
+        return Err(refuse("Clipboard JSON exceeds 当前文件预算"));
     }
     budget.check(
         bytes
@@ -1284,14 +1292,10 @@ pub(crate) fn decode_with_budget(
 }
 
 #[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
     fn horizontal_rotation_and_mirror_preserve_cells_and_known_facing() {
         let sample = BlockClipboard {
             format: FORMAT.into(),
@@ -1354,6 +1358,7 @@ mod tests {
         assert_eq!(twice.blocks, sample.blocks);
     }
 
+    #[test]
     fn unknown_orientation_and_numeric_metadata_transformations_fail_closed() {
         let test = State {
             name: "mod:machine".into(),
@@ -1369,13 +1374,5 @@ mod tests {
             reorient(&numeric, HorizontalTransform::Identity).unwrap(),
             numeric
         );
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Interchange {
-            horizontal_rotation_and_mirror_preserve_cells_and_known_facing();
-            unknown_orientation_and_numeric_metadata_transformations_fail_closed();
-        }
     }
 }

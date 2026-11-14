@@ -53,6 +53,7 @@ fn install_and_finalize(app: &mut App) {
     let task = background(app, Message::Nbt(epoch, Action::Finalize));
     let _ = deliver(app, task);
 }
+#[test]
 fn standalone_world_properties_and_preserved_session() {
     let mut fixture = Fixture::new(3955);
     fixture.add_chunk();
@@ -114,6 +115,7 @@ fn standalone_world_properties_and_preserved_session() {
     app.sessions.get_mut(&(0, 0)).unwrap().undo().unwrap();
     assert!(!app.sessions[&(0, 0)].has_pending_changes());
 }
+#[test]
 fn independent_players_and_inventory() {
     use crate::player_browser::{self, Action as Browser, Open};
     for version in [1343, 3955] {
@@ -288,6 +290,7 @@ fn independent_players_and_inventory() {
     }
 }
 /// 多文件、跨世界、真实保存与迟到结果共用完整后台类别。
+#[test]
 fn multiple_documents_and_file_ownership() {
     use crate::nbt_documents::Action as Tab;
     use crate::workspace_tabs::{Action as Workspace, CloseTarget};
@@ -508,41 +511,36 @@ fn document_pages_preserve_edits_and_file_ownership() {
         assert_eq!(fixture.file("level.dat"), fixture.level);
     }
 }
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    if category == crate::test_categories::Category::Background {
-        standalone_world_properties_and_preserved_session();
-        multiple_documents_and_file_ownership();
-        independent_players_and_inventory();
+
+#[test]
+fn navigation_behavior() {
+    document_pages_preserve_edits_and_file_ownership();
+    let fixture = Fixture::new(3955);
+    let mut app = app(&fixture);
+    let task = crate::update(&mut app, Message::WorldInfo);
+    open(&mut app, task);
+    let panel = app.nbt_document().unwrap();
+    let mut doc = panel.source.document.clone();
+    let opaque = doc.inspect("/Data/OpaqueWorld").unwrap();
+    for time in [0, 6000, 12000, 18000] {
+        doc.apply(&crate::world_info::time_operation(&doc, time).unwrap())
+            .unwrap();
+        assert_eq!(doc.inspect("/Data/OpaqueWorld").unwrap(), opaque);
     }
-    if category == crate::test_categories::Category::Navigation {
-        document_pages_preserve_edits_and_file_ownership();
-        let fixture = Fixture::new(3955);
-        let mut app = app(&fixture);
-        let task = crate::update(&mut app, Message::WorldInfo);
-        open(&mut app, task);
-        let panel = app.nbt_document().unwrap();
-        let mut doc = panel.source.document.clone();
-        let opaque = doc.inspect("/Data/OpaqueWorld").unwrap();
-        for time in [0, 6000, 12000, 18000] {
-            doc.apply(&crate::world_info::time_operation(&doc, time).unwrap())
-                .unwrap();
-            assert_eq!(doc.inspect("/Data/OpaqueWorld").unwrap(), opaque);
-        }
-        assert!(crate::world_info::time_operation(&doc, 24000).is_err());
-        edit(
-            &mut app,
-            Action::TypedSet("/Data/Player/SelectedItemSlot".into(), "9".into()),
-        );
-        assert_eq!(
-            app.nbt_document()
-                .unwrap()
-                .source
-                .document
-                .inspect("/Data/Player/SelectedItemSlot")
-                .unwrap(),
-            Value::Int(0)
-        );
-    }
+    assert!(crate::world_info::time_operation(&doc, 24000).is_err());
+    edit(
+        &mut app,
+        Action::TypedSet("/Data/Player/SelectedItemSlot".into(), "9".into()),
+    );
+    assert_eq!(
+        app.nbt_document()
+            .unwrap()
+            .source
+            .document
+            .inspect("/Data/Player/SelectedItemSlot")
+            .unwrap(),
+        Value::Int(0)
+    );
 }
 
 pub(crate) fn inventory_action(app: &mut App, action: crate::inventory_ui::Action) {

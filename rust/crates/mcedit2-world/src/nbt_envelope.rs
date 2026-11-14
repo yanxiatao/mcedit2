@@ -18,13 +18,10 @@ impl NbtEnvelope {
         bytes: Vec<u8>,
         limit: u64,
     ) -> Result<(Self, Vec<u8>), WorldError> {
-        if bytes.len() as u64 > crate::MAX_NBT {
-            return Err(invalid("NBT 编码超过 64 MiB"));
+        if bytes.len() as u64 > limit {
+            return Err(invalid("NBT 编码超过当前预算"));
         }
         if !bytes.starts_with(&[0x1f, 0x8b]) {
-            if bytes.len() as u64 > limit {
-                return Err(invalid("NBT 数据超过当前解码预算"));
-            }
             return Ok((Self::Plain, bytes));
         }
         let mut decoder = GzDecoder::new(bytes.as_slice());
@@ -39,6 +36,12 @@ impl NbtEnvelope {
         Ok((Self::Gzip(header), nbt))
     }
     pub(crate) fn encode(&self, nbt: &[u8]) -> Result<Vec<u8>, WorldError> {
+        self.encode_limited(nbt, crate::MAX_NBT)
+    }
+    pub(crate) fn encode_limited(&self, nbt: &[u8], limit: u64) -> Result<Vec<u8>, WorldError> {
+        if nbt.len() as u64 > limit {
+            return Err(invalid("NBT 超过编码预算"));
+        }
         match self {
             Self::Plain => Ok(nbt.to_vec()),
             Self::Gzip(header) => {
@@ -57,7 +60,7 @@ impl NbtEnvelope {
                 let mut encoder = builder.write(Vec::new(), Compression::default());
                 encoder.write_all(nbt)?;
                 let bytes = encoder.finish()?;
-                if bytes.len() as u64 > crate::MAX_NBT {
+                if bytes.len() as u64 > limit {
                     return Err(invalid("内层 GZip 超过 NBT 编码预算"));
                 }
                 Ok(bytes)
@@ -67,14 +70,10 @@ impl NbtEnvelope {
 }
 
 #[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
     fn inner_gzip_retains_source_header_metadata_and_rejects_invalid_encoding() {
         let mut encoder = GzBuilder::new()
             .mtime(123)
@@ -93,12 +92,5 @@ mod tests {
         assert!(NbtEnvelope::decode(vec![0x1f, 0x8b, 8]).is_err());
         let nested = envelope.encode(&envelope.encode(&raw).unwrap()).unwrap();
         assert!(NbtEnvelope::decode(nested).is_err());
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Formats {
-            inner_gzip_retains_source_header_metadata_and_rejects_invalid_encoding();
-        }
     }
 }

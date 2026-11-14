@@ -397,10 +397,6 @@ pub fn append_chunk(view: &mut SurfaceView, patch: FarChunkPatch) {
     view.source_tiles.push(patch.tile);
     view.voxels.extend(patch.voxels);
 }
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
 
 #[cfg(test)]
 mod tests {
@@ -412,6 +408,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn distant_canopy_preserves_verified_ground_without_inventing_more_layers() {
         let mut selection = FarLayers::default();
         assert!(!selection.observe(82, state("minecraft:oak_leaves"), 8));
@@ -423,6 +420,7 @@ mod tests {
         assert_eq!(layers[1].1.name, "minecraft:grass_block");
     }
 
+    #[test]
     fn exact_and_opaque_lod_columns_never_acquire_extra_ground() {
         for (top, span) in [
             ("minecraft:water", 1),
@@ -440,6 +438,7 @@ mod tests {
         assert_eq!(water.layers().count(), 2);
     }
 
+    #[test]
     fn asynchronous_batch_budget_grows_only_as_source_sample_density_falls() {
         assert_eq!(batch_size_for(1), 12);
         assert_eq!(batch_size_for(4), 32);
@@ -448,6 +447,7 @@ mod tests {
         assert!(batch_size_for(16) <= FAR_BATCH_CHUNKS);
     }
 
+    #[test]
     fn far_view_plans_distant_horizon_without_scanning_every_cell() {
         let p = plan_far_chunks(0, 0, 128).unwrap();
         assert!(!p.is_empty());
@@ -489,19 +489,9 @@ mod tests {
         assert!(plan_far_chunks(0, 0, 2048).is_err());
     }
 
+    #[test]
     fn far_view_negative_coordinates_use_floor_chunk_grid() {
         let p = plan_far_chunks(-17, -31, 16).unwrap();
         assert_eq!((p[0].cx, p[0].cz), (-2, -2));
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Geometry {
-            distant_canopy_preserves_verified_ground_without_inventing_more_layers();
-            exact_and_opaque_lod_columns_never_acquire_extra_ground();
-            asynchronous_batch_budget_grows_only_as_source_sample_density_falls();
-            far_view_plans_distant_horizon_without_scanning_every_cell();
-            far_view_negative_coordinates_use_floor_chunk_grid();
-        }
     }
 }

@@ -204,10 +204,6 @@ pub(crate) fn unknown_tint(state: &State, kind: VoxelMaterial) -> Color {
     };
     rgba(stable_hash(&state.name), alpha)
 }
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
 
 #[cfg(test)]
 mod tests {
@@ -219,6 +215,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn common_family_colors_keep_original_named_identity() {
         let water = tint(&state("minecraft:water"), VoxelMaterial::Liquid, true).unwrap();
         let lava = tint(&state("minecraft:lava"), VoxelMaterial::Liquid, true).unwrap();
@@ -229,6 +226,7 @@ mod tests {
         assert_ne!(grass, side);
     }
 
+    #[test]
     fn numeric_and_unknown_states_are_stable_not_converted() {
         assert!(tint(&state("numeric:301"), VoxelMaterial::Solid, true).is_none());
         assert!(tint(&state("numeric:2"), VoxelMaterial::Solid, true).is_some());
@@ -239,6 +237,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn dye_prefixes_and_alpha_are_respected() {
         assert_ne!(
             tint(
@@ -257,14 +256,5 @@ mod tests {
             .unwrap()
             .a < 1.0
         );
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Materials {
-            common_family_colors_keep_original_named_identity();
-            numeric_and_unknown_states_are_stable_not_converted();
-            dye_prefixes_and_alpha_are_respected();
-        }
     }
 }

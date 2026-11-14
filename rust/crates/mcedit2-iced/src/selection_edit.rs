@@ -411,7 +411,6 @@ fn invalidate(app: &mut App) {
     app.clear_block_preview();
     app.be_prepared = None;
     app.save_preview = None;
-    app.save_phrase.clear();
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ScriptTicket(Option<Snapshot>);
@@ -1068,7 +1067,3 @@ pub(crate) fn view(app: &App) -> Element<'_, Message> {
 #[cfg(test)]
 #[path = "selection_edit_tests.rs"]
 mod tests;
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run(category);
-}

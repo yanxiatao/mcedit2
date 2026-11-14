@@ -149,10 +149,6 @@ pub(crate) fn address(
     }
     true
 }
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
 
 #[cfg(test)]
 mod tests {
@@ -168,6 +164,7 @@ mod tests {
         [[0., 0., 0.], [1., 0., 0.], [1., 1., 0.], [0., 1., 0.]]
     }
 
+    #[test]
     fn negative_and_positive_repeats_stay_inside_source_atlas_slot() {
         let mut faces = Vec::new();
         assert!(tiles(
@@ -188,6 +185,7 @@ mod tests {
         assert_eq!(faces.last().unwrap().0[2], [1., 1., 0.]);
     }
 
+    #[test]
     fn rotated_uv_axes_repeat_without_changing_world_geometry() {
         let mut faces = Vec::new();
         assert!(tiles(
@@ -203,6 +201,7 @@ mod tests {
             .all(|p| p[0] >= 0.25 && p[0] <= 0.375 && p[1] >= 0.5 && p[1] <= 0.625)));
     }
 
+    #[test]
     fn unbounded_source_range_is_refused_before_emitting_geometry() {
         let mut emitted = 0;
         assert!(!tiles(
@@ -221,14 +220,5 @@ mod tests {
             |_, _| emitted += 1
         ));
         assert_eq!(emitted, 256);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Materials {
-            negative_and_positive_repeats_stay_inside_source_atlas_slot();
-            rotated_uv_axes_repeat_without_changing_world_geometry();
-            unbounded_source_range_is_refused_before_emitting_geometry();
-        }
     }
 }

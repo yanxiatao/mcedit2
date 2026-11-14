@@ -252,14 +252,10 @@ impl Registry {
 }
 
 #[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
     fn all_original_tables_load_without_unknown_id_inference() {
         for version in [
             Version::V18,
@@ -309,13 +305,6 @@ mod tests {
                     .properties
                     .contains(&("facing".into(), facing.into())));
             }
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Models {
-            all_original_tables_load_without_unknown_id_inference();
         }
     }
 }

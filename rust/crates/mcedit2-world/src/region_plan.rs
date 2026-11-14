@@ -24,7 +24,7 @@ use std::path::PathBuf;
 
 const SECTOR: usize = 4096;
 const HEADER: usize = 2 * SECTOR;
-const MAX_IMAGE: usize = 256 * 1024 * 1024;
+const MAX_IMAGE: u64 = (MAX_REGION_SECTORS as u64 + MAX_CHUNK_SECTORS as u64) * SECTOR as u64;
 const MAX_NBT: usize = 64 * 1024 * 1024;
 const MAX_COMPRESSED: usize = 32 * 1024 * 1024;
 const MAX_CHUNK_SECTORS: usize = 255;
@@ -44,9 +44,10 @@ pub(crate) struct Slot {
     pub(crate) sectors: usize,
 }
 pub(crate) fn parse_slots(bytes: &[u8]) -> Result<[Option<Slot>; 1024], WorldError> {
-    if bytes.len() < HEADER || !bytes.len().is_multiple_of(SECTOR) || bytes.len() > MAX_IMAGE {
+    if bytes.len() < HEADER || !bytes.len().is_multiple_of(SECTOR) || bytes.len() as u64 > MAX_IMAGE
+    {
         return Err(refuse(
-            "Region image is truncated, not sector-aligned or exceeds 256 MiB",
+            "Region image is truncated, not sector-aligned or exceeds its sector address range",
         ));
     }
     let sector_count = bytes.len() / SECTOR;
@@ -474,6 +475,7 @@ fn plan_region_image_with_be(
         &[],
         &[],
         timestamp,
+        crate::editing::EditWorkBudget::default(),
     )
 }
 fn plan_region_image_with_history(
@@ -486,12 +488,14 @@ fn plan_region_image_with_history(
     biomes: &[crate::biome_editing::Proof],
     sections: &[crate::chunk_creation::SectionCreationProof],
     timestamp: u32,
+    budget: crate::editing::EditWorkBudget,
 ) -> Result<Vec<u8>, WorldError> {
     if changes.is_empty() || changes.len() > 1024 {
         return Err(refuse(
             "Region plan requires 1..1024 existing changed chunks",
         ));
     }
+    budget.check(original.len().saturating_mul(2))?;
     let locations = parse_slots(original)?;
     let mut seen = BTreeSet::new();
     let mut image = original.to_vec();
@@ -585,11 +589,12 @@ fn plan_region_image_with_history(
         let new_len = final_sectors
             .checked_mul(SECTOR)
             .ok_or_else(|| refuse("Region output size overflow"))?;
-        if sector > MAX_REGION_SECTORS || new_len > MAX_IMAGE {
+        if sector > MAX_REGION_SECTORS || new_len as u64 > MAX_IMAGE {
             return Err(refuse(
                 "Region plan exceeds sector address/image safety budget",
             ));
         }
+        budget.check(original.len().saturating_add(new_len))?;
         image.resize(new_len, 0);
         let start = sector * SECTOR;
         image[start..start + 4].copy_from_slice(&(length as u32).to_be_bytes());
@@ -651,6 +656,7 @@ pub(crate) fn plan_region_from_source(
     biomes: &[crate::biome_editing::Proof],
     sections: &[crate::chunk_creation::SectionCreationProof],
     timestamp: u32,
+    budget: crate::editing::EditWorkBudget,
 ) -> Result<NativeRegionCandidate, WorldError> {
     let refs = changes.iter().collect::<Vec<_>>();
     let image = plan_region_image_with_history(
@@ -663,6 +669,7 @@ pub(crate) fn plan_region_from_source(
         biomes,
         sections,
         timestamp,
+        budget,
     )?;
     Ok(NativeRegionCandidate {
         path: path.to_owned(),
@@ -1098,24 +1105,7 @@ pub(crate) fn verify_candidate(
 
 /// Group current verified original-NBT chunk candidates by their existing
 /// MCA/MCR file. The original bytes are re-read and hashed before returning.
-pub(crate) fn plan_world_regions(
-    world: &WorldSummary,
-    dimension: &str,
-    changes: &[NativeChunkCandidate],
-    timestamp: u32,
-) -> Result<Vec<NativeRegionCandidate>, WorldError> {
-    plan_world_regions_with_be(world, dimension, changes, &[], timestamp)
-}
-pub(crate) fn plan_world_regions_with_be(
-    world: &WorldSummary,
-    dimension: &str,
-    changes: &[NativeChunkCandidate],
-    proofs: &[BeReplayStep],
-    timestamp: u32,
-) -> Result<Vec<NativeRegionCandidate>, WorldError> {
-    plan_world_regions_with_history(world, dimension, changes, proofs, &[], &[], &[], timestamp)
-}
-pub(crate) fn plan_world_regions_with_history(
+pub(crate) fn plan_world_regions_with_history_budget(
     world: &WorldSummary,
     dimension: &str,
     changes: &[NativeChunkCandidate],
@@ -1124,6 +1114,7 @@ pub(crate) fn plan_world_regions_with_history(
     biomes: &[crate::biome_editing::Proof],
     sections: &[crate::chunk_creation::SectionCreationProof],
     timestamp: u32,
+    budget: crate::editing::EditWorkBudget,
 ) -> Result<Vec<NativeRegionCandidate>, WorldError> {
     if !proofs.is_empty() && !history.is_empty() {
         return Err(refuse("BE 历史不能与旧标量证明混用"));
@@ -1191,7 +1182,19 @@ pub(crate) fn plan_world_regions_with_history(
         if fs::symlink_metadata(&path)?.file_type().is_symlink() {
             return Err(refuse("Original region symlink refused"));
         }
-        let original = fs::read(&path)?;
+        budget.check(
+            result
+                .iter()
+                .map(|c: &NativeRegionCandidate| c.image.len())
+                .sum::<usize>()
+                .saturating_add(
+                    fs::metadata(&path)?
+                        .len()
+                        .try_into()
+                        .map_err(|_| refuse("Region 大小超出地址范围"))?,
+                ),
+        )?;
+        let original = crate::read_limited_file(&path, budget.bytes() as u64)?;
         let stamp = hash(&original);
         let region_proofs = proofs
             .iter()
@@ -1226,9 +1229,18 @@ pub(crate) fn plan_world_regions_with_history(
             &region_biomes,
             &region_sections,
             timestamp,
+            budget,
+        )?;
+        budget.check(
+            result
+                .iter()
+                .map(|c| c.image.len())
+                .sum::<usize>()
+                .saturating_add(original.len())
+                .saturating_add(image.len()),
         )?;
         // Catch concurrent modifications during planning.
-        if hash(&fs::read(&path)?) != stamp {
+        if hash(&crate::read_limited_file(&path, budget.bytes() as u64)?) != stamp {
             return Err(refuse(
                 "Original region bytes changed during dry-run; refuse",
             ));
@@ -1249,11 +1261,6 @@ pub(crate) fn plan_world_regions_with_history(
         });
     }
     Ok(result)
-}
-
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
 }
 
 #[cfg(test)]
@@ -1354,6 +1361,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn original_zlib_gzip_and_raw_sectors_survive_append_only_edit_plan() {
         for method in [1u8, 2, 3] {
             let original = region(method);
@@ -1373,6 +1381,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn stale_digest_duplicate_missing_and_cross_region_fail_without_writing() {
         let original = region(2);
         let candidate = changed();
@@ -1387,6 +1396,7 @@ mod tests {
         assert_eq!(original, region(2));
     }
 
+    #[test]
     fn overlapping_invalid_and_external_chunk_sectors_are_refused() {
         let mut overlap = region(2);
         overlap[4..8].copy_from_slice(&((2u32 << 8) | 1).to_be_bytes());
@@ -1399,6 +1409,7 @@ mod tests {
         assert!(plan_region_image(&external, 0, 0, &[&changed()], 5).is_err());
     }
 
+    #[test]
     fn original_numeric_inner_gzip_block_patch_preserves_its_envelope() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../test_files/AnvilWorld_1.8/region/r.0.0.mca");
@@ -1449,15 +1460,5 @@ mod tests {
             Some(&after)
         );
         assert_eq!(fs::read(&path).unwrap(), original);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Recovery {
-            original_numeric_inner_gzip_block_patch_preserves_its_envelope();
-            original_zlib_gzip_and_raw_sectors_survive_append_only_edit_plan();
-            stale_digest_duplicate_missing_and_cross_region_fail_without_writing();
-            overlapping_invalid_and_external_chunk_sectors_are_refused();
-        }
     }
 }

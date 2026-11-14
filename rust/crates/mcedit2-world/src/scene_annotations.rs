@@ -951,13 +951,16 @@ impl<'a> Reader<'a> {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    if category == crate::test_categories::Category::Geometry {
-        tests::read_locations_across_storage_and_nested_entities();
-        tests::saved_generation_and_spawn_layers();
-    }
+#[test]
+fn test_tests_read_locations_across_storage_and_nested_entities() {
+    tests::read_locations_across_storage_and_nested_entities();
 }
+
+#[test]
+fn test_tests_saved_generation_and_spawn_layers() {
+    tests::saved_generation_and_spawn_layers();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

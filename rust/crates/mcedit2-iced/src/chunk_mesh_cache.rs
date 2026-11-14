@@ -256,10 +256,6 @@ impl ChunkMeshCache {
             .retain(|coordinate, _| visible.contains(coordinate));
     }
 }
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
 
 #[cfg(test)]
 mod tests {
@@ -300,6 +296,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn exact_mesh_cache_keeps_original_arc_without_copying_vertex_arrays() {
         let mut cache = ChunkMeshCache::default();
         let voxel = sample(0);
@@ -322,6 +319,7 @@ mod tests {
         assert_eq!(origin, [0, 0, 0]);
     }
 
+    #[test]
     fn exact_equality_invalidates_modified_source() {
         let mut c = ChunkMeshCache::default();
         let v = sample(-1);
@@ -359,6 +357,7 @@ mod tests {
         assert!(c.get(&s, (-1, 0, -1, 90, 0), &[]).is_none());
     }
 
+    #[test]
     fn texture_visibility_changes_clear_cache_and_fluids_accept_exact_dependencies() {
         let mut c = ChunkMeshCache::default();
         let v = sample(0);
@@ -394,6 +393,7 @@ mod tests {
             .is_some());
     }
 
+    #[test]
     fn no_fixed_chunk_count_discards_active_meshes() {
         let mut cache = ChunkMeshCache::default();
         let style = ChunkMeshCache::style(None, false, Default::default());
@@ -416,6 +416,7 @@ mod tests {
             .is_some());
     }
 
+    #[test]
     fn cache_retains_all_visible_chunks_and_discards_departed_chunks() {
         let mut c = ChunkMeshCache::default();
         let style = ChunkMeshCache::style(None, false, Default::default());
@@ -443,6 +444,7 @@ mod tests {
             .is_none());
     }
 
+    #[test]
     fn biome_changes_only_retire_geometry_that_used_biome_colors() {
         let mut cache = ChunkMeshCache::default();
         let style = ChunkMeshCache::style(None, true, Default::default());
@@ -476,17 +478,5 @@ mod tests {
                 .is_none(),
             "真实颜色依赖变化必须重建"
         );
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::WorldGeometry {
-            biome_changes_only_retire_geometry_that_used_biome_colors();
-            exact_mesh_cache_keeps_original_arc_without_copying_vertex_arrays();
-            exact_equality_invalidates_modified_source();
-            texture_visibility_changes_clear_cache_and_fluids_accept_exact_dependencies();
-            no_fixed_chunk_count_discards_active_meshes();
-            cache_retains_all_visible_chunks_and_discards_departed_chunks();
-        }
     }
 }

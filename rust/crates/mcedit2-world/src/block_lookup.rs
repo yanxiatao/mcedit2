@@ -174,6 +174,7 @@ pub fn read_world_chunk(
 /// coordinate-checked and BE-checked on every request. No world writes,
 /// persistent cache, or absent-chunk synthesis is performed.
 pub struct ReadOnlyRegionCache<'a> {
+    work_budget: crate::editing::EditWorkBudget,
     display_palette: crate::surface::VoxelPalette,
     world: &'a WorldSummary,
     dimension: &'a str,
@@ -207,6 +208,11 @@ struct CreationRegionImage {
     slots: Option<[Option<crate::region_plan::Slot>; 1024]>,
 }
 impl<'a> ReadOnlyRegionCache<'a> {
+    pub(crate) fn with_work_budget(mut self, budget: crate::editing::EditWorkBudget) -> Self {
+        self.work_budget = budget;
+        self
+    }
+
     /// 当前读取批次冻结的 Region、区块和外置载荷镜像，计入调用任务的工作集。
     pub(crate) fn frozen_bytes(&self) -> usize {
         self.creation_bytes
@@ -231,6 +237,7 @@ impl<'a> ReadOnlyRegionCache<'a> {
             .find(|d| d.name == dimension)
             .ok_or_else(|| invalid(format!("Unknown original dimension {dimension}")))?;
         Ok(Self {
+            work_budget: crate::editing::EditWorkBudget::default(),
             display_palette: Default::default(),
             world,
             dimension,
@@ -332,7 +339,8 @@ impl<'a> ReadOnlyRegionCache<'a> {
             } else {
                 origin.with_versions(versions)?
             };
-            let reader = Self::with_history_source(self.world, self.dimension, &scoped)?;
+            let reader = Self::with_history_source(self.world, self.dimension, &scoped)?
+                .with_work_budget(self.work_budget);
             self.snapshot_sources
                 .insert(std::sync::Arc::clone(versions), Box::new(reader));
         }
@@ -382,7 +390,8 @@ impl<'a> ReadOnlyRegionCache<'a> {
             _ => false,
         };
         if !same {
-            *self = Self::for_source(self.world, self.dimension, origin)?;
+            *self = Self::for_source(self.world, self.dimension, origin)?
+                .with_work_budget(self.work_budget);
         }
         Ok(())
     }
@@ -403,14 +412,14 @@ impl<'a> ReadOnlyRegionCache<'a> {
         let key = (cx.div_euclid(32), cz.div_euclid(32));
         if !self.creation_regions.contains_key(&key) {
             let path = crate::chunk_creation::region_path(self.world, self.dimension, key)?;
-            let image = match self.read_source_file(&path, 256 * 1024 * 1024)? {
+            let image = match self.read_source_file(&path, self.work_budget.bytes())? {
                 Some(bytes) => {
                     if self
                         .creation_bytes
                         .checked_add(bytes.len())
-                        .is_none_or(|n| n > 512 * 1024 * 1024)
+                        .is_none_or(|n| n > self.work_budget.bytes())
                     {
-                        return Err(invalid("本次创建读取的 Region 镜像超过 512 MiB 预算"));
+                        return Err(invalid("本次创建读取的 Region 镜像超过本次工作预算"));
                     }
                     self.creation_bytes += bytes.len();
                     Some(std::sync::Arc::<[u8]>::from(bytes))
@@ -542,7 +551,7 @@ impl<'a> ReadOnlyRegionCache<'a> {
             .creation_bytes
             .checked_add(bytes)
             .ok_or_else(|| invalid("Alpha 光照来源大小溢出"))?;
-        if self.creation_bytes > 512 * 1024 * 1024 {
+        if self.creation_bytes > self.work_budget.bytes() {
             return Err(invalid("Alpha 光照来源超过批次内存预算"));
         }
         let sha = file
@@ -583,9 +592,9 @@ impl<'a> ReadOnlyRegionCache<'a> {
                     if self
                         .creation_bytes
                         .checked_add(compressed.len())
-                        .is_none_or(|n| n > 512 * 1024 * 1024)
+                        .is_none_or(|n| n > self.work_budget.bytes())
                     {
-                        return Err(invalid("本次创建读取的 MCC 镜像超过 512 MiB 预算"));
+                        return Err(invalid("本次创建读取的 MCC 镜像超过本次工作预算"));
                     }
                     self.creation_bytes += compressed.len();
                     let (_, nbt) = crate::region_external::decode(method, &compressed)?;
@@ -608,9 +617,9 @@ impl<'a> ReadOnlyRegionCache<'a> {
         if self
             .creation_bytes
             .checked_add(size)
-            .is_none_or(|n| n > 512 * 1024 * 1024)
+            .is_none_or(|n| n > self.work_budget.bytes())
         {
-            return Err(invalid("本次创建读取的 Region 与区块镜像超过 512 MiB 预算"));
+            return Err(invalid("本次创建读取的 Region 与区块镜像超过本次工作预算"));
         }
         self.creation_bytes += size;
         self.creation_chunks.insert((cx, cz), result.clone());
@@ -749,7 +758,8 @@ impl<'a> ReadOnlyRegionCache<'a> {
     }
     fn current_reader(&mut self) -> Result<&mut ReadOnlyRegionCache<'a>, WorldError> {
         if self.current.is_none() {
-            let mut reader = Self::new(self.world, self.dimension)?;
+            let mut reader =
+                Self::new(self.world, self.dimension)?.with_work_budget(self.work_budget);
             reader.current_head = self.origin.clone();
             self.current = Some(Box::new(reader));
         }
@@ -1121,7 +1131,7 @@ impl SharedRegionBatch {
         cell.get_or_init(|| {
             let path = crate::chunk_creation::region_path(&self.world, &self.dimension, region)
                 .map_err(|e| e.to_string())?;
-            let Some(image) = self.read_source_file(&path, 256 * 1024 * 1024)? else {
+            let Some(image) = self.read_source_file(&path, self.budget)? else {
                 return Ok(None);
             };
             if let Some(before) = self.previous.regions.get(&region) {
@@ -1293,15 +1303,12 @@ pub fn parse_xyz(s: &str) -> Result<(i32, i32, i32), WorldError> {
     };
     Ok((parse(parts[0])?, parse(parts[1])?, parse(parts[2])?))
 }
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
     fn true_zero_byte_placeholder_is_absent_but_truncated_region_is_corrupt() {
         let dir = std::env::temp_dir().join(format!(
             "mcedit2-empty-original-region-{}",
@@ -1349,6 +1356,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[test]
     fn exact_signed_xyz_parsing_and_error_paths() {
         assert_eq!(parse_xyz("-255, -64, 400").unwrap(), (-255, -64, 400));
         for bad in ["1,2", "1,2,3,4", "3.5,0,0", "nan,0,0", "2147483648,0,0"] {
@@ -1356,6 +1364,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn absent_region_and_invalid_dimension_do_not_generate_chunks() {
         let dir = std::env::temp_dir().join(format!("mcedit2-lookup-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1387,14 +1396,5 @@ mod tests {
         assert!(ReadOnlyRegionCache::new(&world, "minecraft:not-real").is_err());
         assert!(read_world_block(&world, "minecraft:not-real", 0, 0, 0).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Geometry {
-            true_zero_byte_placeholder_is_absent_but_truncated_region_is_corrupt();
-            exact_signed_xyz_parsing_and_error_paths();
-            absent_region_and_invalid_dimension_do_not_generate_chunks();
-        }
     }
 }

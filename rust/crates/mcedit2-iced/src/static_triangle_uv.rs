@@ -275,15 +275,12 @@ pub(crate) fn bind_quad(
     }
     Ok(())
 }
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
     fn repeated_uv_clipping_interpolates_vertex_rgba_and_keeps_constant_uv_geometry() {
         let region = AtlasUv {
             start: [0.1, 0.2],
@@ -332,6 +329,7 @@ mod tests {
         assert_eq!(count, 1);
     }
 
+    #[test]
     fn clips_triangle_across_repeated_tiles_without_atlas_bleed() {
         let atlas = AtlasUv {
             start: [0.2, 0.3],
@@ -352,6 +350,7 @@ mod tests {
             && p[1] <= 0.4 + 1e-6));
     }
 
+    #[test]
     fn budget_and_nonfinite_input_do_not_emit_partial_geometry() {
         let atlas = AtlasUv {
             start: [0.2, 0.3],
@@ -373,14 +372,5 @@ mod tests {
             |_, _| count += 1
         ));
         assert_eq!(count, 0);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Materials {
-            repeated_uv_clipping_interpolates_vertex_rgba_and_keeps_constant_uv_geometry();
-            clips_triangle_across_repeated_tiles_without_atlas_bleed();
-            budget_and_nonfinite_input_do_not_emit_partial_geometry();
-        }
     }
 }

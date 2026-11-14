@@ -894,11 +894,9 @@ impl Snapshot {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    if category == crate::test_categories::Category::Formats {
-        tests::world_registry_migration_pipeline();
-    }
+#[test]
+fn test_tests_world_registry_migration_pipeline() {
+    tests::world_registry_migration_pipeline();
 }
 
 #[cfg(test)]
@@ -1251,7 +1249,7 @@ impl<'a, S: IdentitySource> Pack<'a, S> {
                     }
                 }
                 path.push(parts[parts.len() - 1]);
-                self.source.read(&path)?
+                self.source.read_limited(&path, MAX_JSON as u64)?
             }
             Contents::Zip(zip) => {
                 let member = match zip.by_name(member) {

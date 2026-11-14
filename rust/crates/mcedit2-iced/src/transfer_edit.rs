@@ -515,7 +515,6 @@ pub(crate) fn update(app: &mut App, action: Action) -> Task<Message> {
                     app.clone_destination = value;
                     app.clear_block_preview();
                     app.save_preview = None;
-                    app.save_phrase.clear();
                 }
                 Err(error) => {
                     log::error!("[transfer-position] {error}");
@@ -916,11 +915,8 @@ pub(crate) fn review(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    if category != crate::test_categories::Category::Background {
-        return;
-    }
+#[test]
+fn background_behavior() {
     large_transfer_pipeline();
     // 真实样本与生产异步任务：显示候选、确认、撤销及取消后的过期结果。
     let (mut app, scene, _, _) = crate::picking_integration_tests::fixture();

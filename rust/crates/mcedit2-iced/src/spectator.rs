@@ -1079,13 +1079,6 @@ fn build_sources(
 }
 #[path = "spectator_controls.rs"]
 pub(crate) mod controls;
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-    templates::run_test_category(category);
-    controls::run_test_category(category);
-    performance::run_test_category(category);
-}
 
 #[cfg(test)]
 #[path = "spectator_perf.rs"]
@@ -1095,6 +1088,7 @@ pub(crate) use controls::{Controls, Crosshair};
 mod tests {
     use super::*;
 
+    #[test]
     fn cached_liquid_faces_rebuild_for_diagonal_above_and_removed_neighbors() {
         use mcedit2_world::{sections::State, surface::ALL_FACES};
         let prepare_source = |source: &mut SurfaceView| {
@@ -1209,6 +1203,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn chunk_slices_preserve_negative_coordinates_and_far_lod_boundaries() {
         use mcedit2_world::sections::State;
         use mcedit2_world::surface::ALL_FACES;
@@ -1255,6 +1250,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn spectator_mesh_uses_original_thin_connection_shapes_without_json_assets() {
         use mcedit2_world::sections::State;
         use mcedit2_world::surface::ALL_FACES;
@@ -1346,6 +1342,7 @@ mod tests {
         assert!(bridges_passage(&closed_gate));
     }
 
+    #[test]
     fn spectator_stair_corner_mesh_uses_source_shape_not_generic_straight_steps() {
         use mcedit2_world::sections::State;
         use mcedit2_world::surface::ALL_FACES;
@@ -1434,6 +1431,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn spectator_door_halves_render_source_accurate_open_hinge_thin_planes() {
         use mcedit2_world::sections::State;
         use mcedit2_world::surface::ALL_FACES;
@@ -1527,6 +1525,7 @@ mod tests {
         assert_eq!(top.1 .1 - left_open.1 .1, 1.0);
     }
 
+    #[test]
     fn internal_faces_of_adjacent_model_boxes_are_hidden() {
         let left = models::Part::cube(models::Box3 {
             min: [-0.5, -0.5, -0.5],
@@ -1542,6 +1541,7 @@ mod tests {
         assert!(!internally_occluded(&parts, 0, Face::NegX));
     }
 
+    #[test]
     fn source_verified_lod_cliff_emits_real_side_triangles_without_guessing() {
         use mcedit2_world::sections::State;
         use mcedit2_world::surface::ALL_FACES;
@@ -1618,6 +1618,7 @@ mod tests {
         assert_eq!(build(&unknown).len(), 6);
     }
 
+    #[test]
     fn verified_exact_border_generates_actual_gpu_wall() {
         use mcedit2_world::sections::State;
         use mcedit2_world::surface::{ALL_FACES, FACE_TOP};
@@ -1704,6 +1705,7 @@ mod tests {
             .any(|v| lower_edge(v) && (v.xyz[2] - 3.5).abs() < 0.001));
     }
 
+    #[test]
     fn layered_far_tiles_show_ground_beneath_canopy_without_leaf_cliff() {
         use mcedit2_world::sections::State;
         use mcedit2_world::surface::ALL_FACES;
@@ -1782,6 +1784,7 @@ mod tests {
         assert!(vertices[12..18].iter().all(|v| v.xyz[1] <= 68.5 + 0.001));
     }
 
+    #[test]
     fn minecraft_yaw_zero_faces_positive_z_and_pitch_points_down() {
         let mut c = Camera::default();
         let (right, up, front) = c.basis();
@@ -1792,6 +1795,7 @@ mod tests {
         assert!(c.basis().2[1] < -0.7);
     }
 
+    #[test]
     fn spectator_uniform_uses_camera_relative_original_world_positions() {
         let view = SurfaceView {
             biomes: Default::default(),
@@ -1827,6 +1831,7 @@ mod tests {
         assert!((wide.projection[1] - 1.).abs() < 0.00001);
     }
 
+    #[test]
     fn source_exposed_volume_produces_true_world_space_triangles() {
         let stone = mcedit2_world::sections::State {
             name: "minecraft:stone".into(),
@@ -1894,6 +1899,7 @@ mod tests {
         assert!(build(&renderer).is_empty());
     }
 
+    #[test]
     fn streaming_publishes_completed_chunks_before_the_next_chunk_is_cancelled() {
         use std::sync::atomic::{AtomicBool, Ordering};
         let voxel = |x| {
@@ -1982,6 +1988,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn exact_chunk_mesh_survives_recenter_and_rejects_changed_source() {
         use mcedit2_world::{sections::State, surface::FACE_TOP};
         let voxel = SurfaceVoxel::new(
@@ -2080,6 +2087,7 @@ mod tests {
         assert!(build(&changed_scene).is_empty());
     }
 
+    #[test]
     fn compiled_face_cache_preserves_per_voxel_biome_and_visibility() {
         use std::io::Write;
         let path =
@@ -2173,6 +2181,7 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
 
+    #[test]
     fn speed_is_normalized_and_flight_never_mutates_source() {
         let mut c = Camera::default();
         let original = c.position;
@@ -2183,27 +2192,5 @@ mod tests {
         let d =
             ((c.position[0] - original[0]).powi(2) + (c.position[2] - original[2]).powi(2)).sqrt();
         assert!((d - 1.2).abs() < 0.0001);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::WorldGeometry {
-            cached_liquid_faces_rebuild_for_diagonal_above_and_removed_neighbors();
-            chunk_slices_preserve_negative_coordinates_and_far_lod_boundaries();
-            spectator_mesh_uses_original_thin_connection_shapes_without_json_assets();
-            spectator_stair_corner_mesh_uses_source_shape_not_generic_straight_steps();
-            spectator_door_halves_render_source_accurate_open_hinge_thin_planes();
-            internal_faces_of_adjacent_model_boxes_are_hidden();
-            source_verified_lod_cliff_emits_real_side_triangles_without_guessing();
-            verified_exact_border_generates_actual_gpu_wall();
-            layered_far_tiles_show_ground_beneath_canopy_without_leaf_cliff();
-            minecraft_yaw_zero_faces_positive_z_and_pitch_points_down();
-            spectator_uniform_uses_camera_relative_original_world_positions();
-            source_exposed_volume_produces_true_world_space_triangles();
-            streaming_publishes_completed_chunks_before_the_next_chunk_is_cancelled();
-            exact_chunk_mesh_survives_recenter_and_rejects_changed_source();
-            compiled_face_cache_preserves_per_voxel_biome_and_visibility();
-            speed_is_normalized_and_flight_never_mutates_source();
-        }
     }
 }

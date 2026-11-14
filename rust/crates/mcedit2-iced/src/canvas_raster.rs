@@ -583,10 +583,5 @@ fn unorm(value: f32) -> u8 {
 }
 
 #[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
-
-#[cfg(test)]
 #[path = "canvas_raster_tests.rs"]
 pub(crate) mod tests;

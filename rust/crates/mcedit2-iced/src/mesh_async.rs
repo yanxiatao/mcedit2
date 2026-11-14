@@ -482,15 +482,12 @@ pub(crate) fn enqueue_spectator(view: &crate::spectator::SpectatorScene) {
         cancelled: Arc::new(AtomicBool::new(false)),
     });
 }
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
     fn leaving_a_projection_cancels_only_its_active_and_queued_canvas_work() {
         let fixture = crate::textures::java_obj_tests::fixture();
         let view = crate::textures::java_obj_tests::isometric_scene(fixture.open());
@@ -538,6 +535,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn independent_views_keep_queue_positions_when_replaced() {
         let fixture = crate::textures::java_obj_tests::fixture();
         let base = crate::textures::java_obj_tests::isometric_scene(fixture.open());
@@ -589,6 +587,7 @@ mod tests {
         assert!(state.next.is_empty());
     }
 
+    #[test]
     fn spectator_chunk_batches_coalesce_without_cancelling_active_world() {
         let scene = crate::spectator::SpectatorScene {
             entity_frame: None,
@@ -698,14 +697,5 @@ mod tests {
             cancelled: Arc::new(AtomicBool::new(false)),
         });
         assert!(active.load(Ordering::Acquire));
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Background {
-            leaving_a_projection_cancels_only_its_active_and_queued_canvas_work();
-            independent_views_keep_queue_positions_when_replaced();
-            spectator_chunk_batches_coalesce_without_cancelling_active_world();
-        }
     }
 }

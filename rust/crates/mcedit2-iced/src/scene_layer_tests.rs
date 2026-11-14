@@ -53,6 +53,7 @@ fn camera() -> Camera {
         perspective: true,
     }
 }
+#[test]
 fn geometry_and_read_only_marker_interaction() {
     let size = Size::new(200., 200.);
     let center = Point::new(100., 100.);
@@ -615,6 +616,7 @@ fn installed_scene_annotations_from_actual_world() {
     std::fs::write(target, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
     eprintln!("真实存档位置图层：{report}");
 }
+#[test]
 fn saved_terrain_layers_all_projections() {
     use crate::projected_entities::Mapping;
     use mcedit2_world::scene_annotations::Geometry;
@@ -766,6 +768,7 @@ fn saved_terrain_layers_all_projections() {
         None
     );
 }
+#[test]
 fn continuous_saved_terrain_boundary() {
     use crate::metadata_fixture::{define_overworld, Fixture};
     use mcedit2_world::{
@@ -991,21 +994,15 @@ fn continuous_saved_terrain_boundary() {
     }
 }
 
-pub(super) fn run_test_category(category: crate::test_categories::Category) {
-    match category {
-        crate::test_categories::Category::Rendering => {
-            geometry_and_read_only_marker_interaction();
-            saved_terrain_layers_all_projections();
-            continuous_saved_terrain_boundary();
-        }
-        crate::test_categories::Category::Background => {
-            background_cancel_reuse_select_and_source_read()
-        }
-        crate::test_categories::Category::Installed => {
-            installed_scene_annotations_from_actual_world()
-        }
-        _ => (),
-    }
+#[test]
+fn background_behavior() {
+    background_cancel_reuse_select_and_source_read()
+}
+
+#[test]
+#[ignore = "requires local GPU / installed Minecraft resources"]
+fn installed_behavior() {
+    installed_scene_annotations_from_actual_world()
 }
 
 /// 通过正式后台批次读取不可变动态模型与群系来源；供已有特殊模型类别共用。

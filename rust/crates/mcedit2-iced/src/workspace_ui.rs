@@ -430,11 +430,8 @@ pub(crate) fn advanced_shell<'a>(app: &'a App, page: Element<'a, Message>) -> El
     .into()
 }
 
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    if category != crate::test_categories::Category::Navigation {
-        return;
-    }
+#[test]
+fn navigation_behavior() {
     let mut fixture = crate::metadata_fixture::Fixture::new(3955);
     crate::object_fixture::populate(&mut fixture);
     let original = fixture.file("region/r.0.0.mca");

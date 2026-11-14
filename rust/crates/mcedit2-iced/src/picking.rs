@@ -634,11 +634,6 @@ impl Index {
 }
 
 #[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::spectator::Camera;
@@ -708,6 +703,7 @@ mod tests {
         )
     }
 
+    #[test]
     fn ray_hits_actual_triangles_and_keeps_original_owner_at_world_edges() {
         let origin = [29_999_900, -64, -29_999_900];
         let geometry = index(vec![(quad(0., 3., 0, 1.), Some(owner(-101)))], origin);
@@ -734,6 +730,7 @@ mod tests {
         assert!(miss.is_none(), "包围盒不能替代实际三角形");
     }
 
+    #[test]
     fn nearest_visible_alpha_and_lod_occlusion_match_material_rules() {
         for (mode, alpha, visible) in [
             (0, 0., false),
@@ -775,6 +772,7 @@ mod tests {
         assert!(hit(&lod, camera([0; 3])).unwrap().owner.is_none());
     }
 
+    #[test]
     fn hierarchy_and_camera_clipping_do_not_drop_valid_sources() {
         let mut quads = (1..600)
             .map(|i| (quad(i as f32 * 2., 3., 0, 1.), Some(owner(i))))
@@ -822,6 +820,7 @@ mod tests {
         .is_err());
     }
 
+    #[test]
     fn texture_holes_and_linear_sampler_use_the_displayed_atlas() {
         let mut atlas = TextureAtlas::empty_test_atlas();
         atlas.pages = vec![Arc::new(crate::textures::AtlasPage {
@@ -900,20 +899,10 @@ mod tests {
         assert_eq!(cast(&source, Quality::Detailed), 1);
     }
 
+    #[test]
     fn viewing_selection_preserves_large_bounds_and_rejects_invalid_coordinates() {
         let b = selection_bounds([-100, -64, 20], [100, 128, 220]).unwrap();
         assert_eq!(b.volume().unwrap(), 201 * 193 * 201);
         assert!(selection_bounds([30_000_000, 0, 0], [0, 0, 0]).is_err());
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Rendering {
-            ray_hits_actual_triangles_and_keeps_original_owner_at_world_edges();
-            nearest_visible_alpha_and_lod_occlusion_match_material_rules();
-            hierarchy_and_camera_clipping_do_not_drop_valid_sources();
-            texture_holes_and_linear_sampler_use_the_displayed_atlas();
-            viewing_selection_preserves_large_bounds_and_rejects_invalid_coordinates();
-        }
     }
 }

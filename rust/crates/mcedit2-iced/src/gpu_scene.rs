@@ -3960,13 +3960,6 @@ impl Primitive {
         true
     }
 }
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-    world::run_test_category(category);
-    redraw_tests::run_test_category(category);
-    hardware_tests::run_test_category(category);
-}
 
 #[cfg(test)]
 #[path = "gpu_redraw_tests.rs"]
@@ -3975,6 +3968,7 @@ mod redraw_tests;
 mod tests {
     use super::*;
 
+    #[test]
     fn partial_scene_handoff_preserves_previous_coverage_atlas_and_source_origin() {
         let (_, scene, old, _) = crate::picking_integration_tests::fixture();
         let previous = crate::spectator::CompletedFrame {
@@ -4081,6 +4075,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn atlas_page_spans_preserve_face_order_across_independent_page_bindings() {
         let mut quads = Vec::new();
         for page in [0, 1, 1, 260, 0] {
@@ -4125,6 +4120,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn spectator_chunk_identity_keeps_negative_world_coordinates() {
         let quad = gpu_test_quad(2.0);
         assert_eq!(chunk_bucket(&quad, [-32, 0, -32]), (-2, -2, 0));
@@ -4134,6 +4130,7 @@ mod tests {
         assert!(!same_vertices(&quad, &changed));
     }
 
+    #[test]
     fn spectator_mesh_handoff_retains_previous_complete_vertices_and_origin() {
         use mcedit2_world::surface::SurfaceView;
         let source = |x: i32| {
@@ -4210,6 +4207,7 @@ mod tests {
         assert!(Arc::ptr_eq(&ready.surface, &new_origin));
     }
 
+    #[test]
     fn completed_stream_generation_keeps_separate_chunks_and_original_atlas() {
         let original_atlas = Arc::new(TextureAtlas::empty_test_atlas());
         let new_atlas = Arc::new(TextureAtlas::empty_test_atlas());
@@ -4274,6 +4272,7 @@ mod tests {
         assert_eq!(committed.stream_mesh.unwrap().chunks.len(), 2);
     }
 
+    #[test]
     fn streamed_camera_keeps_mesh_origin_when_source_view_has_moved() {
         let source = Arc::new(mcedit2_world::surface::SurfaceView {
             biomes: Default::default(),
@@ -4347,6 +4346,7 @@ mod tests {
         })
     }
 
+    #[test]
     fn perspective_sort_follows_eye_position_and_retains_order_when_turning() {
         let forward = test_camera([0.0, 0.0, 1.0]);
         let mut moved = forward;
@@ -4369,6 +4369,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn extracted_translucent_faces_match_original_global_quad_sort() {
         let mut first = Vec::new();
         first.extend(test_quad(1.0, 1.0, 0, 1));
@@ -4393,6 +4394,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn transparent_quads_sort_as_whole_original_model_faces() {
         let mut vertices = Vec::new();
         vertices.extend(test_quad(10.0, 0.0, 2, 1));
@@ -4412,7 +4414,8 @@ mod tests {
         assert_eq!(reversed, sorted);
     }
 
-    fn gltf_single_sided_blend_mode_keeps_back_to_front_transparency_sort() {
+    #[test]
+    fn single_sided_blend_mode_keeps_back_to_front_transparency_sort() {
         let encoded = crate::material_mode::encode(0, Some("BLEND"), 0.5, false);
         let mut vertices = Vec::new();
         vertices.extend(test_quad(10.0, 2.0, encoded, 1));
@@ -4424,6 +4427,7 @@ mod tests {
         assert!(sorted[12..].iter().all(|v| v.atlas_page == 20));
     }
 
+    #[test]
     fn transparent_equal_depth_is_deterministic_and_keeps_triangle_pairs() {
         let mut vertices = Vec::new();
         vertices.extend(test_quad(1.0, 3.0, 2, 1));
@@ -4449,6 +4453,7 @@ mod tests {
         }; 6]
     }
 
+    #[test]
     fn hardware_mesh_segmentation_preserves_complete_quads() {
         let stride = std::mem::size_of::<Vertex>() as u64;
         assert_eq!(gpu_segment_vertices(stride * 6), 6);
@@ -4462,6 +4467,7 @@ mod tests {
         assert_eq!(rebuilt, full);
     }
 
+    #[test]
     fn gpu_upload_avoids_rewriting_unchanged_prefix_and_handles_shorter_mesh() {
         let a = gpu_test_quad(1.0);
         let b = gpu_test_quad(2.0);
@@ -4487,6 +4493,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn equal_length_chunk_edits_only_upload_local_dirty_faces() {
         let original: Vec<Vertex> = (0..256).flat_map(|i| gpu_test_quad(i as f32)).collect();
         let mut updated = original.clone();
@@ -4506,6 +4513,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn shifted_geometry_uploads_suffix_and_shrinking_only_updates_draw_count() {
         let a = gpu_test_quad(1.0);
         let b = gpu_test_quad(2.0);
@@ -4527,6 +4535,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn replacing_middle_chunk_uploads_entire_shifted_suffix() {
         let a = gpu_test_quad(1.0);
         let b = gpu_test_quad(2.0);
@@ -4542,6 +4551,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn bitwise_vertex_comparison_is_stable_across_identical_allocations() {
         let original = gpu_test_quad(1.0).to_vec();
         let another = original.clone();
@@ -4564,6 +4574,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn vertex_world_depth_maps_nearest_to_zero_and_farthest_to_one() {
         let mut v = Vertex {
             xy: [50.0, 25.0],
@@ -4588,6 +4599,7 @@ mod tests {
         assert_eq!(flat.xy, [-1.0, 1.0]);
     }
 
+    #[test]
     fn render_target_dimensions_are_capped_and_nonzero() {
         let rect = Rectangle {
             x: 0.0,
@@ -4636,31 +4648,6 @@ mod tests {
         let capped =
             crate::render_viewport::RenderViewport::at_scale(Size::new(9000., 4500.), 2., 4096);
         assert_eq!(capped.raster, Size::new(4096, 2048));
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Rendering {
-            partial_scene_handoff_preserves_previous_coverage_atlas_and_source_origin();
-            atlas_page_spans_preserve_face_order_across_independent_page_bindings();
-            spectator_chunk_identity_keeps_negative_world_coordinates();
-            spectator_mesh_handoff_retains_previous_complete_vertices_and_origin();
-            completed_stream_generation_keeps_separate_chunks_and_original_atlas();
-            streamed_camera_keeps_mesh_origin_when_source_view_has_moved();
-            perspective_sort_follows_eye_position_and_retains_order_when_turning();
-            extracted_translucent_faces_match_original_global_quad_sort();
-            transparent_quads_sort_as_whole_original_model_faces();
-            gltf_single_sided_blend_mode_keeps_back_to_front_transparency_sort();
-            transparent_equal_depth_is_deterministic_and_keeps_triangle_pairs();
-            hardware_mesh_segmentation_preserves_complete_quads();
-            gpu_upload_avoids_rewriting_unchanged_prefix_and_handles_shorter_mesh();
-            equal_length_chunk_edits_only_upload_local_dirty_faces();
-            shifted_geometry_uploads_suffix_and_shrinking_only_updates_draw_count();
-            replacing_middle_chunk_uploads_entire_shifted_suffix();
-            bitwise_vertex_comparison_is_stable_across_identical_allocations();
-            vertex_world_depth_maps_nearest_to_zero_and_farthest_to_one();
-            render_target_dimensions_are_capped_and_nonzero();
-        }
     }
 }
 

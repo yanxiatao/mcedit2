@@ -244,7 +244,7 @@ pub fn prepare_repopulation_cancellable(
         populated,
     };
     let path = repop_path(world, &proof)?;
-    let before = read(&path)?;
+    let before = read_with_limit(&path, budget.bytes())?;
     budget.check(before.len().saturating_mul(3))?;
     let slots = parse_slots(&before)?;
     let mut image = before.clone();
@@ -261,11 +261,7 @@ pub fn prepare_repopulation_cancellable(
         let payload = crate::region_plan::compress(method, &envelope.encode(&next)?)?;
         let sectors = (payload.len() + 5).div_ceil(4096);
         let start = image.len() / 4096;
-        if sectors == 0
-            || sectors > 255
-            || start > 0x00ff_ffff
-            || image.len() + sectors * 4096 > 256 * 1024 * 1024
-        {
+        if sectors == 0 || sectors > 255 || start > 0x00ff_ffff {
             return Err(err("重生成候选超过 Region 预算"));
         }
         budget.check(
@@ -416,15 +412,14 @@ pub(crate) fn sidecar_path(
     region_external::sidecar_path(&region, side.cx, side.cz)
 }
 fn read(path: &Path) -> Result<Vec<u8>, WorldError> {
+    read_with_limit(path, crate::editing::EditWorkBudget::default().bytes())
+}
+fn read_with_limit(path: &Path, limit: usize) -> Result<Vec<u8>, WorldError> {
     let m = fs::symlink_metadata(path)?;
-    if !m.file_type().is_file() || m.file_type().is_symlink() || m.len() > 256 * 1024 * 1024 {
+    if !m.file_type().is_file() || m.file_type().is_symlink() || m.len() > limit as u64 {
         return Err(err("区块存储文件非法或超限"));
     }
-    let b = fs::read(path)?;
-    if b.len() > 256 * 1024 * 1024 {
-        return Err(err("区块存储文件读取超限"));
-    }
-    Ok(b)
+    crate::read_limited_file(path, limit as u64)
 }
 fn optional(path: &Path) -> Result<Option<Vec<u8>>, WorldError> {
     match fs::symlink_metadata(path) {
@@ -548,7 +543,7 @@ pub fn prepare_delete_cancellable(
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
                 Err(e) => return Err(e.into()),
             }
-            let before = optional(&path)?;
+            let before = crate::history_source::read_file(&path, budget.bytes(), |_| Ok(()))?;
             let mut identity = RegionIdentity {
                 storage,
                 rx: *rx,
@@ -678,7 +673,7 @@ fn inventory_cancellable(
             .map_err(|_| err("存储文件长度超出地址空间"))?;
         retained += name.len() + 160;
         budget.check(retained.saturating_add(file_bytes))?;
-        let bytes = read(&path)?;
+        let bytes = read_with_limit(&path, budget.bytes())?;
         budget.check(retained.saturating_add(bytes.len()))?;
         entries.push((name, hash(&bytes)));
     }

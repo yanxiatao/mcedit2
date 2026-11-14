@@ -407,12 +407,7 @@ pub fn inspect_world(path: impl AsRef<Path>) -> Result<WorldSummary> {
     // never generates, overwrites or silently converts either file.
     let file = world_list::metadata(&root)?
         .ok_or_else(|| invalid("世界目录缺少 level.dat 或 level.dat_old"))?;
-    let compressed = fs::read(&file)?;
-    if compressed.len() as u64 > MAX_COMPRESSED {
-        return Err(invalid(
-            "Original level.dat exceeds compressed safety budget",
-        ));
-    }
+    let compressed = read_limited_file(&file, MAX_COMPRESSED)?;
     let expanded = decompress_bounded(GzDecoder::new(&compressed[..]))?;
     let metadata = nbt_metadata(&expanded)?;
     let mut discovered = discover_legacy_dimensions(&root)?;
@@ -860,30 +855,6 @@ pub fn compatibility_label(summary: &WorldSummary) -> &'static str {
 }
 
 #[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    client_json::run_test_category(category);
-    world_data::run_test_category(category);
-    scene_annotations::run_test_category(category);
-    entity_model::run_test_category(category);
-    tests::run_test_category(category);
-    alpha::run_test_category(category);
-    block_lookup::run_test_category(category);
-    chunk_surface::run_test_category(category);
-    clipboard::run_test_category(category);
-    structure_transform::run_test_category(category);
-    far_view::run_test_category(category);
-    launch::run_test_category(category);
-    lz4_block::run_test_category(category);
-    nbt_envelope::run_test_category(category);
-    oldnumeric::run_test_category(category);
-    region_plan::run_test_category(category);
-    region_transaction::run_test_category(category);
-    schematic::run_test_category(category);
-    sections::run_test_category(category);
-    surface::run_test_category(category);
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use flate2::{write::GzEncoder, write::ZlibEncoder, Compression};
@@ -948,12 +919,14 @@ mod tests {
         chunk
     }
 
+    #[test]
     fn nbt_metadata_preserves_actual_version_and_name() {
         let metadata = nbt_metadata(&example_nbt()).unwrap();
         assert_eq!(metadata.data_version, Some(3955));
         assert_eq!(metadata.name.as_deref(), Some("Native Rust Test"));
     }
 
+    #[test]
     fn nbt_rejects_truncated_and_unknown_tag_types() {
         let mut original = example_nbt();
         original.pop();
@@ -962,6 +935,7 @@ mod tests {
         assert!(nbt_metadata(&invalid).is_err());
     }
 
+    #[test]
     fn original_region_index_and_exact_zlib_nbt_are_read_only() {
         let temp = Fixture::new();
         let chunk = write_fixture_world(&temp);
@@ -994,6 +968,7 @@ mod tests {
         assert_eq!(world.total_chunks(), 1);
     }
 
+    #[test]
     fn truncated_region_is_skipped_with_warning_not_a_generated_chunk() {
         let temp = Fixture::new();
         write_fixture_world(&temp);
@@ -1013,6 +988,7 @@ mod tests {
         assert_eq!(world.warnings.len(), 131);
     }
 
+    #[test]
     fn invalid_or_out_of_bounds_sector_is_never_read() {
         let temp = Fixture::new();
         write_fixture_world(&temp);
@@ -1023,6 +999,7 @@ mod tests {
         assert!(RegionIndex::open(path).is_err());
     }
 
+    #[test]
     fn overlapping_original_region_slots_are_rejected_before_rendering() {
         let temp = Fixture::new();
         write_fixture_world(&temp);
@@ -1052,6 +1029,7 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), partial);
     }
 
+    #[test]
     fn original_region_method_four_decodes_inline_and_external_lz4() {
         let temp = Fixture::new();
         let raw = write_fixture_world(&temp);
@@ -1098,6 +1076,7 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), bytes);
     }
 
+    #[test]
     fn java_external_mcc_is_read_only_and_rejects_bad_marker() {
         let temp = Fixture::new();
         let original = write_fixture_world(&temp);
@@ -1136,6 +1115,7 @@ mod tests {
             .is_err());
     }
 
+    #[test]
     fn negative_external_mcc_coordinates_are_not_local_slot_names() {
         let temp = Fixture::new();
         let region = temp.0.join("region/r.-1.0.mca");
@@ -1153,32 +1133,14 @@ mod tests {
         assert!(index.read_chunk_at(31, 7).is_err());
     }
 
+    #[test]
     fn region_filename_accepts_negative_positions_and_refuses_suspicious_extensions() {
         assert!(is_region_filename(Path::new("r.-1.3.mcr")));
         assert!(is_region_filename(Path::new("r.12.-9.mca")));
         assert!(!is_region_filename(Path::new("r.0.0.mca.tmp")));
         assert!(!is_region_filename(Path::new("notes.mca")));
     }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Formats {
-            nbt_metadata_preserves_actual_version_and_name();
-            nbt_rejects_truncated_and_unknown_tag_types();
-            original_region_index_and_exact_zlib_nbt_are_read_only();
-            truncated_region_is_skipped_with_warning_not_a_generated_chunk();
-            invalid_or_out_of_bounds_sector_is_never_read();
-            overlapping_original_region_slots_are_rejected_before_rendering();
-            original_region_method_four_decodes_inline_and_external_lz4();
-            java_external_mcc_is_read_only_and_rejects_bad_marker();
-            negative_external_mcc_coordinates_are_not_local_slot_names();
-            region_filename_accepts_negative_positions_and_refuses_suspicious_extensions();
-        }
-    }
 }
-
-#[cfg(test)]
-mod test_categories;
 
 pub mod entity_name;
 
@@ -1189,3 +1151,21 @@ pub mod piglin_appearance;
 
 pub mod armor_trim;
 mod registry_tags;
+
+/// Bound the allocation while reading, including files growing after metadata.
+pub(crate) fn read_limited_file(path: &std::path::Path, limit: u64) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let file = std::fs::File::open(path)?;
+    if !file.metadata()?.is_file() || file.metadata()?.len() > limit {
+        return Err(invalid(format!(
+            "文件不是普通文件或超过读取预算：{}",
+            path.display()
+        )));
+    }
+    let mut bytes = Vec::new();
+    file.take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(invalid("文件在读取期间超过预算"));
+    }
+    Ok(bytes)
+}

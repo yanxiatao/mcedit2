@@ -559,9 +559,8 @@ pub(crate) fn render(
 #[cfg(test)]
 #[path = "item_icon_tests.rs"]
 mod tests;
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    if category == crate::test_categories::Category::Assets {
-        tests::pipeline();
-    }
+
+#[test]
+fn test_tests_pipeline() {
+    tests::pipeline();
 }

@@ -36,14 +36,10 @@ pub(crate) fn qualified(value: &str, fallback_namespace: &str) -> Option<String>
 }
 
 #[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
     fn minecraft_resource_ids_allow_modded_dots_but_refuse_traversal() {
         assert!(namespace("create.addon"));
         assert!(namespace("example-mod_2"));
@@ -76,12 +72,5 @@ mod tests {
         assert_eq!(qualified("mod:../secret", "minecraft"), None);
         assert_eq!(qualified("mod:stone", ".."), Some("mod:stone".into()));
         assert_eq!(qualified("stone", ".."), None);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Sources {
-            minecraft_resource_ids_allow_modded_dots_but_refuse_traversal();
-        }
     }
 }

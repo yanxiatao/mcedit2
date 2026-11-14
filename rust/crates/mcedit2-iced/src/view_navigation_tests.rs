@@ -1,6 +1,7 @@
 use super::*;
 use crate::{App, Message};
 
+#[test]
 fn zoom_keeps_the_anchor_source_point_even_when_clamped_and_rejects_invalid_input() {
     let anchor = Point::new(713.25, 105.5);
     let center = Point::new(400., 300.);
@@ -38,6 +39,7 @@ fn zoom_keeps_the_anchor_source_point_even_when_clamped_and_rejects_invalid_inpu
     }
 }
 
+#[test]
 fn active_projection_zoom_and_reset_do_not_modify_other_views_or_source() {
     let (mut app, _, _, _) = crate::picking_integration_tests::fixture();
     let source = app.surface.clone();
@@ -77,6 +79,7 @@ fn active_projection_zoom_and_reset_do_not_modify_other_views_or_source() {
     }
 }
 
+#[test]
 fn queued_middle_drag_uses_each_event_position_and_fractional_wheel_preserves_target() {
     let bounds = Rectangle {
         x: 20.,
@@ -152,6 +155,7 @@ fn queued_middle_drag_uses_each_event_position_and_fractional_wheel_preserves_ta
     assert!(!gesture.dragging());
 }
 
+#[test]
 fn perspective_zoom_updates_the_same_projection_used_by_source_picking() {
     let (_, mut scene, mesh, original) = crate::picking_integration_tests::fixture();
     let owner = original.hit.owner.unwrap();
@@ -185,6 +189,7 @@ fn perspective_zoom_updates_the_same_projection_used_by_source_picking() {
     }
 }
 
+#[test]
 fn standalone_slice_viewports_are_independent_of_each_other_and_the_main_3d_view() {
     let mut app = App::default();
     app.navigate(Target::Horizontal, Action::centered_zoom(4.));
@@ -197,15 +202,4 @@ fn standalone_slice_viewports_are_independent_of_each_other_and_the_main_3d_view
     app.navigate(Target::Horizontal, Action::Reset);
     assert_eq!(app.slice_navigation, Viewport::default());
     assert_eq!(app.vertical_navigation.pan, Vector::new(13., -27.));
-}
-
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    if category == crate::test_categories::Category::Navigation {
-        zoom_keeps_the_anchor_source_point_even_when_clamped_and_rejects_invalid_input();
-        active_projection_zoom_and_reset_do_not_modify_other_views_or_source();
-        queued_middle_drag_uses_each_event_position_and_fractional_wheel_preserves_target();
-        perspective_zoom_updates_the_same_projection_used_by_source_picking();
-        standalone_slice_viewports_are_independent_of_each_other_and_the_main_3d_view();
-    }
 }

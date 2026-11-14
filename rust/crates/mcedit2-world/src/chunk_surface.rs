@@ -622,11 +622,6 @@ fn inspect_sources_inner<C: std::borrow::Borrow<Chunk>>(
 }
 
 #[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::sections::{Layout, Section, State};
@@ -672,6 +667,7 @@ mod tests {
         Session::new(world, dim).unwrap()
     }
 
+    #[test]
     fn all_source_sections_and_verified_horizontal_neighbors_are_used() {
         let sources = BTreeMap::from([
             ((0, 0), Some(chunk(0, &[(15, -4), (3, 20)]))),
@@ -751,6 +747,7 @@ mod tests {
         assert_eq!(stacked.voxels[1].faces & surface::FACE_BOTTOM, 0);
     }
 
+    #[test]
     fn missing_source_chunk_is_reported_without_synthetic_terrain() {
         let result =
             inspect_sources::<Chunk>(&session(), &BTreeMap::new(), 0, 0, false, None).unwrap();
@@ -758,13 +755,5 @@ mod tests {
         assert!(!result.tile.source_present);
         assert!(result.biome_neighbors.is_empty());
         assert_eq!(result.tile.unknown_columns, 256);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Geometry {
-            all_source_sections_and_verified_horizontal_neighbors_are_used();
-            missing_source_chunk_is_reported_without_synthetic_terrain();
-        }
     }
 }

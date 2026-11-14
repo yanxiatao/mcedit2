@@ -13,6 +13,7 @@ const FACES: [(Face, &str); 6] = [
     (Face::PosX, "east"),
 ];
 
+#[test]
 fn uv_lock_matches_actual_java_client_for_roots_crops_mirrors_and_all_variant_turns() {
     let reference: Value =
         serde_json::from_str(include_str!("../tests/fixtures/uvlock-1.21.1.json")).unwrap();
@@ -70,6 +71,7 @@ fn uv_corners([u0, v0, u1, v1]: [f32; 4], rotation: u16, indices: [u8; 4]) -> [[
     indices.map(|i| c[i as usize])
 }
 
+#[test]
 fn variant_geometry_and_inverse_faces_match_actual_java_block_model_rotations() {
     let reference: Value =
         serde_json::from_str(include_str!("../tests/fixtures/uvlock-1.21.1.json")).unwrap();
@@ -119,6 +121,7 @@ fn variant_geometry_and_inverse_faces_match_actual_java_block_model_rotations() 
     }
 }
 
+#[test]
 fn singular_root_is_rejected_for_locked_variants_and_preserved_when_unlocked() {
     let mut bank = ModelBank::default();
     bank.insert("assets/test/models/block/flat.json",br##"{"transform":{"scale":[1,0,1],"origin":"center"},"elements":[{"from":[0,0,0],"to":[16,16,16],"faces":{"up":{"texture":"test:block/uv"}}}]}"##).unwrap();
@@ -151,6 +154,7 @@ fn singular_root_is_rejected_for_locked_variants_and_preserved_when_unlocked() {
         .is_some());
 }
 
+#[test]
 fn uv_lock_resolves_each_composite_child_transform_before_variant_rotation() {
     let mut bank = ModelBank::default();
     for name in ["assembly", "left", "right"] {
@@ -249,6 +253,7 @@ pub(crate) fn states() -> Vec<State> {
     states
 }
 
+#[test]
 fn uv_lock_mesh_projection_and_source_picking_keep_the_original_state() {
     use crate::textures::java_obj_tests;
     use iced::{Point, Size};
@@ -288,16 +293,5 @@ fn uv_lock_mesh_projection_and_source_picking_keep_the_original_state() {
             (0, 0, 0)
         );
         assert!(!iso.gpu_vertices_cached(Size::new(128., 128.)).is_empty());
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    if category == crate::test_categories::Category::Models {
-        uv_lock_matches_actual_java_client_for_roots_crops_mirrors_and_all_variant_turns();
-        variant_geometry_and_inverse_faces_match_actual_java_block_model_rotations();
-        singular_root_is_rejected_for_locked_variants_and_preserved_when_unlocked();
-        uv_lock_resolves_each_composite_child_transform_before_variant_rotation();
-        uv_lock_mesh_projection_and_source_picking_keep_the_original_state();
     }
 }

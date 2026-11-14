@@ -38,9 +38,12 @@ impl Ready {
         }
         let details = match &output.document {
             script::OpenedDocument::World { input, .. } => {
-                if mcedit2_world::mixed_transaction::pending_summary(&input.world)
-                    .map_err(|error| error.to_string())?
-                    .is_some()
+                if mcedit2_world::mixed_transaction::pending_summary_with_budget(
+                    &input.world,
+                    budget,
+                )
+                .map_err(|error| error.to_string())?
+                .is_some()
                 {
                     return Err("新世界存在未完成保存事务，请先处理原生保存恢复".into());
                 }

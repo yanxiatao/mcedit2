@@ -700,7 +700,26 @@ pub fn prepare_region(
     chunks: &[(CreatedChunkProof, Vec<u8>)],
     timestamp: u32,
 ) -> Result<RegionCandidate, WorldError> {
-    prepare_region_with_existing(world, dimension, coords, chunks, None, timestamp)
+    prepare_region_with_budget(
+        world,
+        dimension,
+        coords,
+        chunks,
+        timestamp,
+        crate::editing::EditWorkBudget::default(),
+    )
+}
+pub fn prepare_region_with_budget(
+    world: &crate::WorldSummary,
+    dimension: &str,
+    coords: (i32, i32),
+    chunks: &[(CreatedChunkProof, Vec<u8>)],
+    timestamp: u32,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<RegionCandidate, WorldError> {
+    prepare_region_with_existing_with_budget(
+        world, dimension, coords, chunks, None, timestamp, budget,
+    )
 }
 pub fn prepare_region_with_existing(
     world: &crate::WorldSummary,
@@ -710,8 +729,27 @@ pub fn prepare_region_with_existing(
     existing: Option<&crate::region_plan::NativeRegionCandidate>,
     timestamp: u32,
 ) -> Result<RegionCandidate, WorldError> {
+    prepare_region_with_existing_with_budget(
+        world,
+        dimension,
+        coords,
+        chunks,
+        existing,
+        timestamp,
+        crate::editing::EditWorkBudget::default(),
+    )
+}
+pub fn prepare_region_with_existing_with_budget(
+    world: &crate::WorldSummary,
+    dimension: &str,
+    coords: (i32, i32),
+    chunks: &[(CreatedChunkProof, Vec<u8>)],
+    existing: Option<&crate::region_plan::NativeRegionCandidate>,
+    timestamp: u32,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<RegionCandidate, WorldError> {
     prepare_region_combined(
-        world, dimension, coords, chunks, existing, None, timestamp, None, false,
+        world, dimension, coords, chunks, existing, None, timestamp, None, false, budget,
     )
 }
 pub fn prepare_region_with_external(
@@ -721,6 +759,25 @@ pub fn prepare_region_with_external(
     chunks: &[(CreatedChunkProof, Vec<u8>)],
     existing: &crate::region_external::MccBundleCandidate,
     timestamp: u32,
+) -> Result<RegionCandidate, WorldError> {
+    prepare_region_with_external_with_budget(
+        world,
+        dimension,
+        coords,
+        chunks,
+        existing,
+        timestamp,
+        crate::editing::EditWorkBudget::default(),
+    )
+}
+pub fn prepare_region_with_external_with_budget(
+    world: &crate::WorldSummary,
+    dimension: &str,
+    coords: (i32, i32),
+    chunks: &[(CreatedChunkProof, Vec<u8>)],
+    existing: &crate::region_external::MccBundleCandidate,
+    timestamp: u32,
+    budget: crate::editing::EditWorkBudget,
 ) -> Result<RegionCandidate, WorldError> {
     prepare_region_combined(
         world,
@@ -732,6 +789,7 @@ pub fn prepare_region_with_external(
         timestamp,
         None,
         false,
+        budget,
     )
 }
 fn prepare_region_combined(
@@ -744,6 +802,7 @@ fn prepare_region_combined(
     timestamp: u32,
     source_snapshot: Option<Option<&[u8]>>,
     profiles_verified: bool,
+    budget: crate::editing::EditWorkBudget,
 ) -> Result<RegionCandidate, WorldError> {
     if chunks.is_empty() || chunks.len() > 1024 {
         return Err(invalid("新槽数量无效"));
@@ -754,15 +813,20 @@ fn prepare_region_combined(
     } else {
         match std::fs::symlink_metadata(&path) {
             Ok(m) => {
-                if !m.is_file() || m.file_type().is_symlink() || m.len() > 256 * 1024 * 1024 {
+                if !m.is_file() || m.file_type().is_symlink() || m.len() > budget.bytes() as u64 {
                     return Err(invalid("Region 源文件无效"));
                 }
-                Some(std::fs::read(&path)?)
+                Some(crate::read_limited_file(&path, budget.bytes() as u64)?)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(e.into()),
         }
     };
+    budget.check(
+        old.as_ref()
+            .map_or(0, |bytes| bytes.len())
+            .saturating_mul(2),
+    )?;
     let empty = vec![0u8; 8192];
     let source = old.as_deref().unwrap_or(&empty);
     let slots = crate::region_plan::parse_slots(source)?;
@@ -848,7 +912,7 @@ fn prepare_region_combined(
             return Err(invalid("新槽编码为空"));
         }
         let start = image.len() / 4096;
-        if start > 0x00ff_ffff || image.len() + sectors * 4096 > 256 * 1024 * 1024 {
+        if start > 0x00ff_ffff || image.len().saturating_add(sectors * 4096) > budget.bytes() {
             return Err(invalid("新 Region 超过容量"));
         }
         image.resize(image.len() + sectors * 4096, 0);
@@ -890,6 +954,18 @@ fn prepare_region_combined(
         existing_external: external_proof,
         sidecars,
     };
+    budget.check(
+        old.as_ref()
+            .map_or(0, |bytes| bytes.len())
+            .saturating_add(result.image.len())
+            .saturating_add(
+                result
+                    .sidecars
+                    .iter()
+                    .map(|part| part.image.len())
+                    .sum::<usize>(),
+            ),
+    )?;
     verify_region(&result, old.as_deref())?;
     Ok(result)
 }
@@ -1083,6 +1159,29 @@ pub fn plan_mixed(
     timestamp: u32,
     reader: &mut crate::block_lookup::ReadOnlyRegionCache<'_>,
 ) -> Result<Vec<crate::mixed_transaction::MixedCandidate>, WorldError> {
+    plan_mixed_with_budget(
+        world,
+        dimension,
+        chunks,
+        creation,
+        be,
+        biomes,
+        timestamp,
+        reader,
+        crate::editing::EditWorkBudget::default(),
+    )
+}
+pub fn plan_mixed_with_budget(
+    world: &crate::WorldSummary,
+    dimension: &str,
+    chunks: Vec<TerrainCandidate>,
+    creation: &[crate::editing::CreationSnapshot],
+    be: &[crate::editing::BeProof],
+    biomes: &[crate::biome_editing::Proof],
+    timestamp: u32,
+    reader: &mut crate::block_lookup::ReadOnlyRegionCache<'_>,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<Vec<crate::mixed_transaction::MixedCandidate>, WorldError> {
     use crate::mixed_transaction::MixedCandidate;
     let mut snapshots = BTreeMap::new();
     for snapshot in creation {
@@ -1242,6 +1341,7 @@ pub fn plan_mixed(
                 timestamp,
                 Some(original.as_deref()),
                 true,
+                budget,
             )?));
             continue;
         }
@@ -1252,7 +1352,7 @@ pub fn plan_mixed(
         let source = original
             .as_deref()
             .ok_or_else(|| invalid("已有区块缺少真实 Region"))?;
-        if crate::region_external::requires_external_cached(source, region, &existing)? {
+        if crate::region_external::requires_external_cached(source, region, &existing, budget)? {
             let bundle = crate::region_external::prepare_history_cached(
                 world,
                 dimension,
@@ -1266,6 +1366,7 @@ pub fn plan_mixed(
                 path.clone(),
                 source,
                 reader,
+                budget,
             )?;
             if new.is_empty() {
                 result.push(MixedCandidate::External(bundle));
@@ -1280,6 +1381,7 @@ pub fn plan_mixed(
                     timestamp,
                     Some(Some(source)),
                     true,
+                    budget,
                 )?));
             }
         } else {
@@ -1292,6 +1394,7 @@ pub fn plan_mixed(
                 &relevant_biomes,
                 &sections,
                 timestamp,
+                budget,
             )?;
             if new.is_empty() {
                 result.push(MixedCandidate::Region {
@@ -1309,6 +1412,7 @@ pub fn plan_mixed(
                     timestamp,
                     Some(Some(source)),
                     true,
+                    budget,
                 )?));
             }
         }

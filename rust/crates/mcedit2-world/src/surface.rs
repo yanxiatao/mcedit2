@@ -350,25 +350,39 @@ pub const FACE_NEG_X: u8 = 8;
 pub const FACE_POS_Z: u8 = 16;
 pub const FACE_NEG_Z: u8 = 32;
 pub const ALL_FACES: u8 = 63;
-/// Strict bounds for read-only 3D viewing. The editing batch limit remains
-/// unchanged: a larger scene is NOT a larger writable transaction.
-pub const MAX_VIEW_XZ: u8 = 64;
-pub const MAX_VIEW_Y: i64 = 48;
-pub const MAX_VIEW_CELLS: u64 = MAX_VIEW_XZ as u64 * MAX_VIEW_XZ as u64 * MAX_VIEW_Y as u64;
-fn validate_view(width: u8, depth: u8, y_min: i32, y_max: i32) -> Result<(), WorldError> {
-    let height = y_max as i64 - y_min as i64 + 1;
-    if width == 0
-        || width > MAX_VIEW_XZ
-        || depth == 0
-        || depth > MAX_VIEW_XZ
-        || !(1..=MAX_VIEW_Y).contains(&height)
-        || width as u64 * depth as u64 * height as u64 > MAX_VIEW_CELLS
+/// Read-only windows share one allocation estimate with the UI. X/Z retain
+/// their u8 representation boundary; height is not an independent policy cap.
+pub fn validate_scene_bounds(
+    bounds: crate::editing::Bounds,
+    budget: crate::editing::EditWorkBudget,
+) -> Result<(), WorldError> {
+    let size = bounds
+        .minimum
+        .into_iter()
+        .zip(bounds.maximum)
+        .map(|(a, b)| i64::from(b) - i64::from(a) + 1)
+        .collect::<Vec<_>>();
+    if size.iter().any(|n| *n <= 0) || size[0] > i64::from(u8::MAX) || size[2] > i64::from(u8::MAX)
     {
-        return Err(refuse(
-            "Read-only 3D scene exceeds 64x64x48 / 196608 source cells",
-        ));
+        return Err(refuse("只读窗口的水平边长必须能表示为非零 u8"));
     }
-    Ok(())
+    let bytes = bounds
+        .volume()?
+        .checked_mul(std::mem::size_of::<SurfaceVoxel>() + 32)
+        .ok_or_else(|| refuse("视图工作集溢出"))?;
+    budget.check(bytes)
+}
+fn validate_view(width: u8, depth: u8, y_min: i32, y_max: i32) -> Result<(), WorldError> {
+    if width == 0 || depth == 0 {
+        return Err(refuse("只读窗口不能为空"));
+    }
+    validate_scene_bounds(
+        crate::editing::Bounds {
+            minimum: [0, y_min, 0],
+            maximum: [i32::from(width) - 1, y_max, i32::from(depth) - 1],
+        },
+        crate::editing::EditWorkBudget::default(),
+    )
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VoxelMaterial {
@@ -774,14 +788,7 @@ pub fn inspect_surface_with_visibility(
     // It may scan the complete original dimension height; unlike a 3D
     // volume it does not retain up to 384 voxels per column in memory.
     let height = y_max as i64 - y_min as i64 + 1;
-    if width == 0
-        || width > MAX_VIEW_XZ
-        || depth == 0
-        || depth > MAX_VIEW_XZ
-        || !(1..=4096).contains(&height)
-        || y_min < -2048
-        || y_max > 2047
-    {
+    if width == 0 || depth == 0 || !(1..=4096).contains(&height) || y_min < -2048 || y_max > 2047 {
         return Err(refuse(
             "俯视源范围必须在 64×64 列及 Section Y 的 -2048..2047 内",
         ));
@@ -1209,14 +1216,10 @@ pub fn inspect_volume_with_visibility(
 }
 
 #[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
     fn exact_surface_occluder_contract_preserves_transparency_and_partial_shapes() {
         let state = |name: &str, properties: &[(&str, &str)]| State {
             name: name.into(),
@@ -1261,6 +1264,7 @@ mod tests {
         )));
     }
 
+    #[test]
     fn unknown_source_sections_and_vanilla_plants_cannot_hide_faces() {
         let stone = State {
             name: "minecraft:stone".into(),
@@ -1305,6 +1309,7 @@ mod tests {
         ));
     }
 
+    #[test]
     fn unknown_mod_neighbor_cannot_hide_original_faces() {
         let full = State {
             name: "minecraft:stone".into(),
@@ -1326,6 +1331,7 @@ mod tests {
         ));
     }
 
+    #[test]
     fn exact_surface_culls_known_neighbors_but_not_unknown_source() {
         let state = State {
             name: "minecraft:stone".into(),
@@ -1372,6 +1378,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn only_recognized_partial_vanilla_shapes_refuse_full_face_occlusion() {
         let solid = State {
             name: "minecraft:stone".into(),
@@ -1416,6 +1423,7 @@ mod tests {
         assert!(known_partial_occluder(&snow));
     }
 
+    #[test]
     fn original_source_tiles_are_sorted_and_distinguish_missing_sections() {
         let tile = SourceChunkTile {
             chunk_x: -1,
@@ -1438,16 +1446,17 @@ mod tests {
         assert_eq!((-17_i32).div_euclid(16), missing.chunk_x);
     }
 
+    #[test]
     fn scene_budget_allows_3x3_chunks_but_never_unbounded_source_reads() {
-        assert_eq!(MAX_VIEW_CELLS, 196_608);
         assert!(validate_view(64, 64, -64, -17).is_ok());
-        assert!(validate_view(64, 64, -64, -16).is_err());
-        assert!(validate_view(65, 1, -64, -64).is_err());
+        assert!(validate_view(64, 64, -64, -16).is_ok());
+        assert!(validate_view(65, 1, -64, -64).is_ok());
         assert!(validate_view(0, 1, 0, 0).is_err());
         assert!(validate_view(1, 1, i32::MIN, i32::MAX).is_err());
         assert!(validate_view(1, 1, -384, -337).is_ok());
     }
 
+    #[test]
     fn summary_counts_render_faces_materials_and_source_metadata() {
         let view = SurfaceView {
             biomes: Default::default(),
@@ -1495,6 +1504,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn cutaway_accepts_negative_y_and_refuses_out_of_bounds_without_writing() {
         // Pure geometrical clipping: the selected layer is still the exact
         // source coordinate, and its newly exposed roof is a view cut only.
@@ -1508,6 +1518,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn air_detection_is_explicit_not_derived_from_arbitrary_modded_name() {
         for name in [
             "minecraft:air",
@@ -1526,6 +1537,7 @@ mod tests {
         }));
     }
 
+    #[test]
     fn shared_source_payload_lifecycle() {
         use crate::fluid_surface::{inspect, Kind, Sample};
         let water = State {
@@ -1637,22 +1649,5 @@ mod tests {
             weak.upgrade().is_none(),
             "统计和已释放的调色板不能保活源形状"
         );
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Geometry {
-            exact_surface_occluder_contract_preserves_transparency_and_partial_shapes();
-            unknown_source_sections_and_vanilla_plants_cannot_hide_faces();
-            unknown_mod_neighbor_cannot_hide_original_faces();
-            exact_surface_culls_known_neighbors_but_not_unknown_source();
-            only_recognized_partial_vanilla_shapes_refuse_full_face_occlusion();
-            original_source_tiles_are_sorted_and_distinguish_missing_sections();
-            scene_budget_allows_3x3_chunks_but_never_unbounded_source_reads();
-            summary_counts_render_faces_materials_and_source_metadata();
-            shared_source_payload_lifecycle();
-            cutaway_accepts_negative_y_and_refuses_out_of_bounds_without_writing();
-            air_detection_is_explicit_not_derived_from_arbitrary_modded_name();
-        }
     }
 }

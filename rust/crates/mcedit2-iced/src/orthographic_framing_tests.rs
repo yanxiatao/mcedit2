@@ -28,6 +28,7 @@ fn inside(point: Point, size: Size) {
     );
 }
 
+#[test]
 fn full_height_near_scene_fits_all_aspects_without_a_minimum_pixel_scale() {
     let mut view = cube_scene();
     let source = Arc::make_mut(&mut view.surface);
@@ -66,6 +67,7 @@ fn full_height_near_scene_fits_all_aspects_without_a_minimum_pixel_scale() {
     }
 }
 
+#[test]
 fn unused_source_sections_do_not_shift_or_shrink_a_single_actual_voxel() {
     let mut view = cube_scene();
     let source = Arc::make_mut(&mut view.surface);
@@ -84,6 +86,7 @@ fn unused_source_sections_do_not_shift_or_shrink_a_single_actual_voxel() {
     assert!(view.scale(size) > 100., "单格物体不应被固定 24px 上限压小");
 }
 
+#[test]
 fn translated_json_model_remains_visible_when_its_original_voxel_is_offscreen() {
     let fixture = crate::canvas_raster::tests::fixture(1, 1, &[255; 4]);
     fixture.put("assets/test/models/block/tile.json",br##"{"transform":{"translation":[32,0,0]},"elements":[{"from":[0,0,0],"to":[16,16,16],"faces":{"up":{"texture":"test:block/tile"},"down":{"texture":"test:block/tile"},"north":{"texture":"test:block/tile"},"south":{"texture":"test:block/tile"},"east":{"texture":"test:block/tile"},"west":{"texture":"test:block/tile"}}}]}"##);
@@ -123,6 +126,7 @@ fn translated_json_model_remains_visible_when_its_original_voxel_is_offscreen() 
     );
 }
 
+#[test]
 fn json_and_obj_composite_vertices_from_the_world_mesh_fit_the_same_projection() {
     let fixture = crate::textures::java_obj_tests::fixture();
     let bank = fixture.open();
@@ -153,6 +157,7 @@ fn json_and_obj_composite_vertices_from_the_world_mesh_fit_the_same_projection()
     }
 }
 
+#[test]
 fn bounds_cache_reuses_camera_independent_data_and_never_publishes_canceled_work() {
     let mut view = cube_scene();
     let size = Size::new(800., 600.);
@@ -189,6 +194,7 @@ fn bounds_cache_reuses_camera_independent_data_and_never_publishes_canceled_work
     assert_eq!(after.minimum[1], before.minimum[1] + 128.);
 }
 
+#[test]
 fn empty_source_uses_its_real_request_box_and_invalid_projection_does_not_create_faces() {
     let mut view = cube_scene();
     Arc::make_mut(&mut view.surface).voxels.clear();
@@ -206,6 +212,7 @@ fn empty_source_uses_its_real_request_box_and_invalid_projection_does_not_create
     assert_eq!(bounds, ModelBounds::UNIT);
 }
 
+#[test]
 fn pointer_hit_testing_does_not_prepare_missing_projection_or_geometry_on_the_ui_thread() {
     let view = cube_scene();
     assert!(view
@@ -213,17 +220,4 @@ fn pointer_hit_testing_does_not_prepare_missing_projection_or_geometry_on_the_ui
         .is_none());
     assert!(view.cached_bounds().is_none());
     assert!(view.frame_cache.lock().unwrap().is_none());
-}
-
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    if category == crate::test_categories::Category::Rendering {
-        full_height_near_scene_fits_all_aspects_without_a_minimum_pixel_scale();
-        unused_source_sections_do_not_shift_or_shrink_a_single_actual_voxel();
-        translated_json_model_remains_visible_when_its_original_voxel_is_offscreen();
-        json_and_obj_composite_vertices_from_the_world_mesh_fit_the_same_projection();
-        bounds_cache_reuses_camera_independent_data_and_never_publishes_canceled_work();
-        empty_source_uses_its_real_request_box_and_invalid_projection_does_not_create_faces();
-        pointer_hit_testing_does_not_prepare_missing_projection_or_geometry_on_the_ui_thread();
-    }
 }

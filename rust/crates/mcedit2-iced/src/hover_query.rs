@@ -87,11 +87,9 @@ impl PartialEq for WorldKey {
             && self.animation_tick == other.animation_tick
     }
 }
-#[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    if category != crate::test_categories::Category::Navigation {
-        return;
-    }
+
+#[test]
+fn navigation_behavior() {
     let start = Instant::now();
     let mut gate = Gate::default();
     let mut executions = 0;

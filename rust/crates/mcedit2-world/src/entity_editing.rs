@@ -150,6 +150,13 @@ pub(crate) fn transform_structure_entity(
 /// 身份扫描的只读源；恢复时可由已验证的事务备份构造相同原始视图。
 pub trait IdentitySource {
     fn read(&self, path: &Path) -> Result<Option<Vec<u8>>, WorldError>;
+    fn read_limited(&self, path: &Path, limit: u64) -> Result<Option<Vec<u8>>, WorldError> {
+        let bytes = self.read(path)?;
+        if bytes.as_ref().is_some_and(|b| b.len() as u64 > limit) {
+            return Err(invalid("身份源超过读取预算"));
+        }
+        Ok(bytes)
+    }
     fn directory_members(&self, path: &Path) -> Result<Option<Vec<String>>, WorldError>;
     fn is_directory(&self, path: &Path) -> Result<bool, WorldError>;
 }
@@ -157,18 +164,21 @@ pub trait IdentitySource {
 pub struct DiskIdentitySource;
 impl IdentitySource for DiskIdentitySource {
     fn read(&self, path: &Path) -> Result<Option<Vec<u8>>, WorldError> {
+        self.read_limited(
+            path,
+            crate::editing::EditWorkBudget::default().bytes() as u64,
+        )
+    }
+    fn read_limited(&self, path: &Path, limit: u64) -> Result<Option<Vec<u8>>, WorldError> {
         let metadata = match std::fs::symlink_metadata(path) {
             Ok(metadata) => metadata,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e.into()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
         };
-        if !metadata.file_type().is_file()
-            || metadata.file_type().is_symlink()
-            || metadata.len() > 256 * 1024 * 1024
-        {
-            return Err(invalid("身份源不是普通文件或超过单文件内存预算"));
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(invalid("身份源必须是普通文件"));
         }
-        Ok(Some(std::fs::read(path)?))
+        crate::read_limited_file(path, limit).map(Some)
     }
     fn directory_members(&self, path: &Path) -> Result<Option<Vec<String>>, WorldError> {
         directory_members(path)

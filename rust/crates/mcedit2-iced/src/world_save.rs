@@ -44,14 +44,8 @@ pub(crate) fn owns(app: &App, worlds: &[usize]) -> bool {
 }
 pub(crate) fn confirm(app: &mut App, be: bool) -> Task<Message> {
     let input = (|| -> Result<_, String> {
-        let phrase = if be { "SAVE_BE_NBT" } else { "SAVE" };
-        let actual = if be {
-            &app.be_save_phrase
-        } else {
-            &app.save_phrase
-        };
-        if app.readonly || actual != phrase {
-            return Err(format!("确认保存须输入 {phrase}，且存档不能处于只读模式"));
+        if app.readonly {
+            return Err("只读模式不能保存存档".into());
         }
         if !crate::transfer_edit::history_editable(app)
             || app.transfer.busy
@@ -111,7 +105,11 @@ pub(crate) fn confirm(app: &mut App, be: bool) -> Task<Message> {
         }
     };
     crate::keyboard_bindings::interrupt(app);
-    let sources = crate::saved_sessions::capture(app, &world.root);
+    let budget = intent.budget;
+    let mut sources = crate::saved_sessions::capture(app, &world.root);
+    for source in &mut sources {
+        source.session.set_work_budget(budget);
+    }
     let revision = sources
         .iter()
         .find(|source| source.key == key)
@@ -127,8 +125,6 @@ pub(crate) fn confirm(app: &mut App, be: bool) -> Task<Message> {
     });
     app.save_worker = true;
     app.save_planning = false;
-    app.save_phrase.clear();
-    app.be_save_phrase.clear();
     app.edit_report = "正在后台重新核对保存预览并执行事务，请等待实际结果。".into();
     Task::perform(
         crate::nbt_background(move || {
@@ -157,7 +153,7 @@ pub(crate) fn confirm(app: &mut App, be: bool) -> Task<Message> {
                     sources,
                     &std::collections::BTreeSet::from([key]),
                     history,
-                    Default::default(),
+                    budget,
                 ),
                 Ok(SaveOutcome { history: None, .. }) => crate::saved_sessions::unchanged(
                     sources
@@ -168,8 +164,9 @@ pub(crate) fn confirm(app: &mut App, be: bool) -> Task<Message> {
                 ),
                 Err(_) => crate::saved_sessions::Ready::default(),
             };
-            let pending = mcedit2_world::mixed_transaction::pending_summary(&world)
-                .map_err(|error| error.to_string());
+            let pending =
+                mcedit2_world::mixed_transaction::pending_summary_with_budget(&world, budget)
+                    .map_err(|error| error.to_string());
             Ok(Completed {
                 outcome,
                 sessions,

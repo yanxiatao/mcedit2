@@ -199,16 +199,12 @@ impl RenderFace {
 }
 
 #[cfg(test)]
-pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-    tests::run_test_category(category);
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::textures::java_obj_tests::{fixture, isometric_scene};
     use image::ImageEncoder;
 
+    #[test]
     fn native_composite_keeps_static_json_geometry_materials_and_source_picking() {
         let fixture = fixture();
         let view = isometric_scene(fixture.open());
@@ -260,6 +256,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn authored_solid_and_transparent_vertex_alpha_match_canvas_and_picking() {
         let fixture = fixture();
         // PNG 与顶点都有 Alpha；solid 必须仍可见，translucent 必须拒绝透明像素。
@@ -288,6 +285,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn static_source_culling_and_shared_geometry_are_preserved() {
         let fixture = fixture();
         fixture.put(
@@ -313,6 +311,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn root_geometry_outside_source_voxel_uses_its_real_projected_envelope() {
         let fixture = fixture();
         fixture.put("assets/demo/models/block/assembly.json",br#"{"parent":"demo:block/base","transform":{"translation":[20,0,0],"origin":"center"}}"#);
@@ -347,6 +346,7 @@ mod tests {
         assert_eq!(view.pick(center, size), Some((0, 0, 0)));
     }
 
+    #[test]
     fn dense_model_has_one_source_outline_instead_of_internal_triangle_edges() {
         let fixture = fixture();
         let mut view = isometric_scene(fixture.open());
@@ -374,6 +374,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn source_outlines_keep_edit_status_and_never_highlight_sampled_lod_tiles() {
         let fixture = fixture();
         let mut view = isometric_scene(fixture.open());
@@ -391,17 +392,5 @@ mod tests {
         view.selected = Some((0, 0, 0));
         Arc::make_mut(&mut view.surface).voxels[0].span = 16;
         assert!(view.source_outlines(&faces).is_empty());
-    }
-
-    #[cfg(test)]
-    pub(crate) fn run_test_category(category: crate::test_categories::Category) {
-        if category == crate::test_categories::Category::Rendering {
-            native_composite_keeps_static_json_geometry_materials_and_source_picking();
-            authored_solid_and_transparent_vertex_alpha_match_canvas_and_picking();
-            static_source_culling_and_shared_geometry_are_preserved();
-            root_geometry_outside_source_voxel_uses_its_real_projected_envelope();
-            dense_model_has_one_source_outline_instead_of_internal_triangle_edges();
-            source_outlines_keep_edit_status_and_never_highlight_sampled_lod_tiles();
-        }
     }
 }
